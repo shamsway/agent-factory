@@ -223,6 +223,19 @@ def doctor(argv: list[str]) -> int:
     timer = sh(["systemctl", "--user", "is-active", f"{cfg.unit}.timer"]).stdout.strip()
     report(True if timer == "active" else None, f"systemd timer {cfg.unit}.timer", timer or "not installed (factory install)")
 
+    if cfg.apply_enabled:
+        report(shutil.which("terraform") is not None, "terraform on PATH (required: [apply].enabled)")
+        # Credential-boundary canary: [apply].env names credentials `factory
+        # apply` alone should hold. If this shell already exports one, the
+        # boundary is only a convention here, not enforced -- whoever installs
+        # the dispatcher's systemd unit from this shell could carry it in.
+        leaked = [k for k in cfg.apply_env if os.environ.get(k)]
+        report(
+            not leaked, "apply credentials isolated from this shell",
+            f"already set here, would leak into anything installed from this shell: {', '.join(leaked)}"
+            if leaked else "clean",
+        )
+
     fails = sum(r["status"] == "FAIL" for r in rows)
     if args.json:
         print(json.dumps({"ok": not fails, "version": __version__, "repo": cfg.repo, "root": str(cfg.root), "rows": rows}, indent=2))

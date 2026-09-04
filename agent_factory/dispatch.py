@@ -741,6 +741,14 @@ def merge_pass_locked(dry_run: bool) -> None:
         if pr["reviewDecision"] == "CHANGES_REQUESTED":
             log(f"PR #{pr['number']}: human requested changes; not merging")
             continue
+        # Apply-eligible repos: merging IS the human approval gate for
+        # `factory apply` (see docs/design/sre-fork-implementation-plan.md,
+        # Phase 4), so it must mean a real GitHub review approval, not just
+        # the LLM reviewer's factory-approved label -- unlike a software
+        # repo, where that label plus green CI is the whole evidence chain.
+        if cfg.apply_enabled and pr["reviewDecision"] != "APPROVED":
+            log(f"PR #{pr['number']}: apply-eligible repo needs a human-approved review; waiting")
+            continue
         candidates.append((pr["number"], int(m.group(1))))
     for pr_num, n in sorted(candidates):
         checks = pr_checks(pr_num)

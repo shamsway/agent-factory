@@ -79,3 +79,16 @@ exclusive = false
 [dashboard]
 # port = 8765
 # theme = ".factory-dashboard.css"   # repo-relative CSS loaded after the built-in stylesheet
+
+# For an infra repo where a merge should trigger `terraform apply`. Turning
+# this on changes the merge stage: it requires a genuine human GitHub review
+# approval on the PR (not just the factory-approved label from the LLM
+# reviewer) -- merging IS the human approval gate for `factory apply`, so it
+# has to actually mean a human approved it. Run `factory apply` on its own
+# schedule (separate systemd timer/cron entry from `factory dispatch`); it
+# is a no-op while this is unset. See docs/design/sre-fork-implementation-plan.md.
+[apply]
+# enabled = false
+# dir = "."             # terraform root, relative to the repo root
+# [apply.env]            # env for `factory apply` only -- never the dispatcher's
+# AWS_PROFILE = "infra-apply"

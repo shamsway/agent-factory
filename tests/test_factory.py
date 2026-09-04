@@ -243,6 +243,22 @@ class HostConfigTest(unittest.TestCase):
             self.assertEqual(rows["push access to acme/widgets"]["status"], "PASS")
             self.assertEqual(out["ok"], proc.returncode == 0)
 
+    def test_doctor_flags_leaked_apply_credential(self) -> None:
+        from unittest import mock
+
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        toml = '[apply]\nenabled = true\n[apply.env]\nFAKE_CRED = "x"\n'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            with mock.patch.dict(os.environ, {"FAKE_CRED": "leaked"}):
+                proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
+            out = json.loads(proc.stdout)
+            rows = {r["label"]: r for r in out["rows"]}
+            self.assertIn("terraform on PATH (required: [apply].enabled)", rows)  # checked only when apply.enabled
+            leak_row = rows["apply credentials isolated from this shell"]
+            self.assertEqual(leak_row["status"], "FAIL")
+            self.assertIn("FAKE_CRED", leak_row["detail"])
+
 
 class DashboardTest(unittest.TestCase):
     def test_metrics_from_synthetic_tickets(self) -> None:
@@ -410,6 +426,109 @@ class DispatchTest(unittest.TestCase):
             log = Path(d) / "w.log"
             log.write_text("... Total cost: $0.25\nmore\nTotal cost: $1.00\n")
             self.assertEqual(dispatch.log_cost(log), 1.25)
+
+
+class ApplyConfigTest(unittest.TestCase):
+    def test_apply_table_parses(self) -> None:
+        toml = '[apply]\nenabled = true\ndir = "terraform/prod"\n[apply.env]\nAWS_PROFILE = "infra-apply"\n'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            self.assertEqual((cfg.apply_enabled, cfg.apply_dir), (True, "terraform/prod"))
+            self.assertEqual(cfg.apply_env, {"AWS_PROFILE": "infra-apply"})
+
+    def test_apply_env_is_host_owned_dir_and_enabled_are_not(self) -> None:
+        # Matches the dashboard.port split: [apply].env is credential-shaped
+        # and host-owned (never in the committed repo file); enabled/dir are
+        # policy about this repo and stay repo-owned.
+        self.assertEqual(config.HOST_KEYS["apply"], ("env",))
+        self.assertNotIn("apply", config.HOST_TABLES)
+
+
+class ApplyTest(unittest.TestCase):
+    def test_applied_tickets_from_events(self) -> None:
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            dispatch.record("applied", ticket=7, pr=1, ok=True)
+            dispatch.record("claimed", ticket=8, title="x")
+            self.assertEqual(apply.applied_tickets(), {7})
+
+    def test_merged_tickets_parses_agent_branch_prs_only(self) -> None:
+        from unittest import mock
+
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            prs = [
+                {"number": 5, "headRefName": "agent/9", "mergeCommit": {"oid": "abc123"}},
+                {"number": 6, "headRefName": "not-agent-branch", "mergeCommit": {"oid": "def456"}},
+                {"number": 7, "headRefName": "agent/10", "mergeCommit": None},
+            ]
+            with mock.patch.object(dispatch, "gh_json", return_value=prs):
+                tickets = apply.merged_tickets()
+            self.assertEqual(tickets, [{"pr": 5, "ticket": 9, "commit": "abc123"}])
+
+    def test_merge_stage_waits_for_human_review_when_apply_enabled(self) -> None:
+        from unittest import mock
+
+        from agent_factory import dispatch
+
+        toml = "[apply]\nenabled = true\n"
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            prs = [
+                {
+                    "number": 3,
+                    "headRefName": "agent/9",
+                    "isDraft": False,
+                    "labels": [{"name": config.LABEL_APPROVED}],
+                    "reviewDecision": "REVIEW_REQUIRED",
+                }
+            ]
+            with mock.patch.object(dispatch, "gh_json", return_value=prs), \
+                 mock.patch.object(dispatch, "pr_checks") as checks:
+                dispatch.merge_pass_locked(dry_run=True)
+            # No candidates survive the human-review gate, so the CI-check
+            # stage (and anything past it) is never reached.
+            checks.assert_not_called()
+
+    def test_merge_stage_proceeds_when_apply_disabled_and_only_llm_approved(self) -> None:
+        from unittest import mock
+
+        from agent_factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            cfg = config.load(repo)
+            self.assertFalse(cfg.apply_enabled)
+            dispatch.configure(cfg)
+            prs = [
+                {
+                    "number": 3,
+                    "headRefName": "agent/9",
+                    "isDraft": False,
+                    "labels": [{"name": config.LABEL_APPROVED}],
+                    "reviewDecision": "REVIEW_REQUIRED",
+                }
+            ]
+            with mock.patch.object(dispatch, "gh_json", return_value=prs), \
+                 mock.patch.object(dispatch, "pr_checks", return_value=[]) as checks:
+                dispatch.merge_pass_locked(dry_run=True)
+            # apply.enabled is unset for this (software) repo, so the LLM's
+            # factory-approved label is still enough to reach the CI-check
+            # stage even without a human review yet.
+            checks.assert_called_once_with(3)
 
 
 class TfPlanCheckTest(unittest.TestCase):

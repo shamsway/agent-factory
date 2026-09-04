@@ -57,7 +57,11 @@ DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "e
 # must run the same gate, so gate checks, leak scan and upstream never come
 # from here. Everything else in the host file is left for other tools (District).
 HOST_TABLES = frozenset({"triage", "workers", "review", "install"})
-HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",)}
+# `apply.env` is credential-shaped like `install.env` -- host-owned so it
+# never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
+# are policy about this repo (does merging it trigger terraform apply, and
+# where) and stay repo-owned, same split already used for `dashboard`.
+HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",), "apply": ("env",)}
 
 # Every key the loader reads, by table; `factory doctor` reports anything else.
 # `workers` is label-keyed, `gate.check` is a list of {name, run, exclusive}.
@@ -71,6 +75,7 @@ KNOWN_KEYS = {
     "triage": ("url", "model"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "env"),
+    "apply": ("enabled", "dir", "env"),
 }
 CHECK_KEYS = ("name", "run", "exclusive", "timeout")
 
@@ -122,6 +127,9 @@ class Config:
     dashboard_port: int = 8765
     dashboard_theme: Path | None = None  # CSS file served after the built-in stylesheet
     install: dict = field(default_factory=lambda: dict(DEFAULT_INSTALL))  # `factory install` defaults
+    apply_enabled: bool = False  # this repo's merges require a human review approval and are apply-eligible
+    apply_dir: str = "."  # terraform root, relative to repo root, that `factory apply` plans/applies
+    apply_env: dict = field(default_factory=dict)  # env for `factory apply` only; never the dispatcher's
     raw_repo: dict = field(default_factory=dict)  # the committed file alone, before host layering
 
     @property
@@ -278,4 +286,8 @@ def load(start: Path | None = None) -> Config:
     cfg.install = merge(DEFAULT_INSTALL, raw.get("install", {}))
     cfg.install["dashboard"] = bool(cfg.install["dashboard"])
     cfg.install["env"] = {k: str(v) for k, v in cfg.install["env"].items()}
+    apply_t = raw.get("apply", {})
+    cfg.apply_enabled = bool(apply_t.get("enabled", cfg.apply_enabled))
+    cfg.apply_dir = apply_t.get("dir", cfg.apply_dir)
+    cfg.apply_env = {k: str(v) for k, v in apply_t.get("env", {}).items()}
     return cfg
