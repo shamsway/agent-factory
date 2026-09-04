@@ -68,7 +68,8 @@ merge stage.
 | Command | What one invocation does |
 |---|---|
 | `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or a `wontfix` proposal comment. `--dry-run`, `--issue N`, `--replay a,b,c`. |
-| `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. `--ticket N` forces one issue; `--dry-run` prints the plan. |
+| `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. `ready-for-investigation` tickets take a shorter path instead: one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan. |
+| `factory apply` | No-op unless `[apply].enabled = true`. One stateless pass: finds merged, not-yet-applied tickets, checks out the merge commit fresh, re-runs the tf-plan-safety check against a fresh `terraform plan`, and applies using `[apply].env` credentials — never the dispatcher's. `--dry-run`. |
 | `factory gate` | Runs the deterministic gate in the current worktree and writes a Markdown report. Workers run it themselves; the dispatcher re-runs it as the evidence of record. |
 | `factory stats` | Ticket table: attempts, review rounds, hours to merge. `--json`. |
 | `factory learn` | Reads the last N finished tickets' event trail, failing-attempt log tails, reviewer findings, and escalation reasons; asks the local model for ≤10 repo-specific lessons; writes `.factory-lessons.md` (you commit it). Every worker prompt carries it. `--dry-run`, `--last N`. |
@@ -115,7 +116,9 @@ inside one of its worktrees.
    contains the current `main` tip. Behind `main` → rebase, re-gate on this
    host, force-push, merge next pass. Red CI → label removed, escalated once
    with the failing check names. A human blocks any merge by requesting
-   changes on the PR.
+   changes on the PR. With `[apply].enabled = true`, merging additionally
+   requires a genuine human GitHub review approval — the merge itself is
+   then the trigger `factory apply` waits for (below).
 7. **Escalation.** Budget exceeded, gate failed thrice, second `REVISE`,
    nothing to PR, rebase conflict, red CI: the issue gets `ready-for-human`,
    loses the assignee and `ready-for-agent`, and receives a comment with the

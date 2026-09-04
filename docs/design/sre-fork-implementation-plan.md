@@ -1,5 +1,18 @@
 # SRE Agent Fork — Implementation Plan
 
+**Status (2026-09-04): Phases 1, 2, 3, 4, 5, and 8 implemented and tested**
+(`triage.py`, `dispatch.py`, `gate.py`, `config.py`, `onboard.py`,
+`tf_plan_check.py`, `apply.py`, `cli.py`, `templates/factory.toml`,
+`README.md`, `tests/test_factory.py`). Phases 6 (`factory detect`) and 7
+(cross-repo state concurrency) remain deferred, per their own sections
+below — no concrete ops ticket flow exists yet to build them against. One
+implementation detail differs from the original draft: Phase 4's freshness
+re-check (step 5) reuses `tf_plan_check`'s own `AllowedDestroy:` allow-list
+mechanism directly (fetching the issue body fresh at apply time) rather
+than diffing against a stored copy of the merged PR's gate report — simpler,
+and the allow-list *is* what a human reviewed, so re-validating against it
+is the right comparison, not an approximation of one.
+
 Derived from `sre-fork-notes.md` in this directory (the carried-over design
 memory) after reading the current code on `main`: `config.py`, `gate.py`,
 `triage.py`, `dispatch.py`, `learn.py`, `cli.py`, `templates/factory.toml`,
@@ -168,15 +181,21 @@ Flow, modeled on `land_pass`'s locking pattern (dispatch.py:632-660):
    freshness (already handled by `merge_pass_locked`'s `behind_by` check,
    dispatch.py:726-733) says nothing about *live infra state* moving between
    plan-time and apply-time.
-5. Diff the fresh plan's destructive actions against what was visible in
-   the merged PR's gate report. Identical or a subset → proceed. Anything
-   *new* → abort, escalate (reuse `escalate()`'s pattern: comment + label
-   swap) rather than apply against a plan nobody signed off on — the human
-   approved the PR's plan, not whatever infra has drifted to since.
-6. `terraform apply -auto-approve` the fresh plan, using apply-capable
-   credentials.
+5. Re-validate the fresh plan the same way the gate did — fetch the issue
+   body fresh (`gh issue view`, works on a closed issue) and run
+   `tf_plan_check.unexpected_changes(plan, body)` again. Nothing unexpected →
+   proceed. Anything not covered by an `AllowedDestroy:` line → abort,
+   comment + record an `apply-escalate` event rather than apply against a
+   plan nobody signed off on — the human approved *that* allow-list, not
+   whatever infra has drifted to since. (Implemented this way rather than
+   diffing against a stored gate report — see the status note at the top of
+   this file.)
+6. `terraform apply -auto-approve` the fresh plan, using `[apply].env`
+   credentials, never the dispatcher's.
 7. Record a new `applied` event to `events.jsonl` (same `record()` helper,
    dispatch.py:204-214) and comment the apply output on the issue.
+   Merged PRs whose commit doesn't touch `[apply].dir` are recorded as
+   applied immediately with a no-op note, so they're never reconsidered.
 
 If real usage later shows a human approving the PR doesn't leave enough
 of a paper trail (e.g. they want to review the *fresh* re-plan from step 4
