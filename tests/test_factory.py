@@ -412,5 +412,53 @@ class DispatchTest(unittest.TestCase):
             self.assertEqual(dispatch.log_cost(log), 1.25)
 
 
+class TfPlanCheckTest(unittest.TestCase):
+    """Pure-function checks against a canned `terraform show -json` shape;
+    no terraform binary needed."""
+
+    CLEAN_PLAN = {
+        "resource_changes": [
+            {"address": "aws_instance.foo", "change": {"actions": ["no-op"]}},
+            {"address": "aws_s3_bucket.logs", "change": {"actions": ["create"]}},
+        ]
+    }
+    DESTRUCTIVE_PLAN = {
+        "resource_changes": [
+            {"address": "aws_instance.foo", "change": {"actions": ["no-op"]}},
+            {"address": "aws_instance.bar", "change": {"actions": ["delete", "create"]}},
+            {"address": "aws_db_instance.main", "change": {"actions": ["delete"]}},
+        ]
+    }
+
+    def test_clean_plan_has_no_destructive_changes(self) -> None:
+        from agent_factory import tf_plan_check
+
+        self.assertEqual(tf_plan_check.destructive_changes(self.CLEAN_PLAN), [])
+        self.assertEqual(tf_plan_check.unexpected_changes(self.CLEAN_PLAN, ""), [])
+
+    def test_destructive_plan_flags_delete_and_replace(self) -> None:
+        from agent_factory import tf_plan_check
+
+        changes = tf_plan_check.destructive_changes(self.DESTRUCTIVE_PLAN)
+        self.assertEqual(
+            {addr for addr, _ in changes}, {"aws_instance.bar", "aws_db_instance.main"}
+        )
+
+    def test_allowed_destroy_line_exempts_one_address(self) -> None:
+        from agent_factory import tf_plan_check
+
+        ticket = "Upgrade the DB.\n\nAllowedDestroy: aws_db_instance.main\n"
+        unexpected = tf_plan_check.unexpected_changes(self.DESTRUCTIVE_PLAN, ticket)
+        self.assertEqual([addr for addr, _ in unexpected], ["aws_instance.bar"])
+
+    def test_no_allow_list_flags_everything_destructive(self) -> None:
+        from agent_factory import tf_plan_check
+
+        unexpected = tf_plan_check.unexpected_changes(self.DESTRUCTIVE_PLAN, "no allow lines here")
+        self.assertEqual(
+            {addr for addr, _ in unexpected}, {"aws_instance.bar", "aws_db_instance.main"}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
