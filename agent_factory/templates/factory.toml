@@ -40,6 +40,11 @@
 # Checks run in order inside the worktree; nonzero exit = FAIL. Built-ins
 # `conflict-markers` (first) and `leak-scan` (last) are always on. Mark
 # checks that need the GPU or other single-tenant hardware `exclusive`.
+# `run` is arbitrary argv — nothing limits it to repo-local test commands:
+# a live-system health probe, a Prometheus query, or a `terraform plan`
+# safety check are all ordinary gate checks. Set a per-check `timeout` when
+# the default [gate].timeout doesn't fit (a health probe wants seconds, a
+# terraform plan wants minutes).
 [[gate.check]]
 name = "tests"
 run = ["true"]  # replace with your test command, e.g. ["cargo", "test", "--workspace"]
@@ -48,6 +53,17 @@ exclusive = false
 # [[gate.check]]
 # name = "lint"
 # run = ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+
+# [[gate.check]]
+# name = "service-health"
+# run = ["curl", "-fsS", "--max-time", "5", "http://localhost:8080/healthz"]
+# timeout = 15
+
+# A real secret scanner is stronger than the leak-scan regex below; wire it
+# in as an ordinary check rather than relying on the regex alone.
+# [[gate.check]]
+# name = "gitleaks"
+# run = ["gitleaks", "detect", "--source", ".", "--no-git"]
 
 [leak_scan]
 # Added lines in `origin/main..HEAD` matching this regex FAIL the gate.

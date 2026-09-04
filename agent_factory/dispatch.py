@@ -7,6 +7,12 @@ claimable issues (or --ticket N), run a worker agent in a git worktree, gate,
 open a PR, review with codex, bounce once. A codex APPROVE marks the PR
 `factory-approved`; the merge stage requires that label, green GitHub CI, and
 a head containing the current main tip before squash-merging.
+
+`ready-for-investigation` tickets take a second, shorter path: one worker
+pass that gathers evidence and writes a findings report — no gate, no PR, no
+review. The report is posted as a comment and the ticket is routed to
+`ready-for-human` for a person to decide what happens next.
+
 All state lives in GitHub and .factory/ on disk.
 """
 
@@ -27,6 +33,7 @@ from agent_factory.config import (
     LABEL_APPROVED,
     LABEL_CHORE,
     LABEL_HUMAN,
+    LABEL_INVESTIGATE,
     LESSONS_NAME,
     Config,
 )
@@ -77,6 +84,24 @@ STANDING_INSTRUCTIONS = """
 - Last, write `.factory/handoff-{n}.md` (gitignored): what you changed, what is
   still unverified, and what you would do next. The next attempt and the human
   who inherits this ticket read it.
+"""
+
+INVESTIGATION_INSTRUCTIONS = """
+## Instructions
+
+- This is an investigation, not an implementation. Do NOT modify tracked
+  files, commit, or open a PR — the worktree is discarded once this ticket
+  finishes; nothing you change here is kept.
+- Gather evidence: read logs, run read-only diagnostic commands, inspect
+  configuration and infrastructure state relevant to the ticket. Prefer
+  read-only commands; if you must run something with side effects to
+  reproduce the problem, say so explicitly in the report rather than doing
+  it silently.
+- Do not attempt to fix anything.
+- Last, write `.factory/handoff-{n}.md` (gitignored): what you found, the
+  likely cause (or the causes still open), and what you would do next. This
+  is posted verbatim as a comment on the issue; a human decides what happens
+  next, including whether to file a follow-up implementation ticket.
 """
 
 
@@ -147,7 +172,7 @@ def open_blockers(number: int, body: str) -> list[int]:
     return sorted(blockers)
 
 
-def frontier() -> list[dict]:
+def frontier(label: str = LABEL_AGENT) -> list[dict]:
     issues = gh_json(
         [
             "issue",
@@ -157,7 +182,7 @@ def frontier() -> list[dict]:
             "--state",
             "open",
             "--label",
-            LABEL_AGENT,
+            label,
             "--json",
             "number,title,body,labels,assignees",
         ]
@@ -176,7 +201,7 @@ def frontier() -> list[dict]:
     return ready
 
 
-def build_prompt(n: int, wt: Path, extra: str = "") -> str:
+def build_prompt(n: int, wt: Path, extra: str = "", investigation: bool = False) -> str:
     issue = gh_json(
         ["issue", "view", str(n), "--repo", REPO, "--json", "title,body,comments"]
     )
@@ -184,12 +209,15 @@ def build_prompt(n: int, wt: Path, extra: str = "") -> str:
     for c in issue.get("comments") or []:
         author = (c.get("author") or {}).get("login", "unknown")
         parts += ["", f"## Comment by {author}", "", c.get("body", "")]
-    commit_flag = " -s" if cfg.signoff else ""
-    parts.append(
-        STANDING_INSTRUCTIONS.format(
-            n=n, commit_flag=commit_flag, main=cfg.main, python=sys.executable
+    if investigation:
+        parts.append(INVESTIGATION_INSTRUCTIONS.format(n=n))
+    else:
+        commit_flag = " -s" if cfg.signoff else ""
+        parts.append(
+            STANDING_INSTRUCTIONS.format(
+                n=n, commit_flag=commit_flag, main=cfg.main, python=sys.executable
+            )
         )
-    )
     lessons = ROOT / LESSONS_NAME
     if lessons.exists():
         parts += ["", "## Lessons from previous tickets in this repository", "", lessons.read_text()]
@@ -313,6 +341,36 @@ def escalate(n: int, reason: str, log_path: Path | None) -> None:
     if handoff.exists():
         body += f"\n\nWorker handoff notes:\n\n{handoff.read_text().strip()[-4000:]}"
     run(["gh", "issue", "comment", str(n), "--repo", REPO, "--body", body], check=False)
+
+
+def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
+    """Terminal state for a ready-for-investigation ticket: no diff, no PR —
+    post the findings and route to a human to decide what happens next."""
+    handoff = wt / ".factory" / f"handoff-{n}.md"
+    if not handoff.exists() or not handoff.read_text().strip():
+        escalate(n, "investigation produced no findings report", logfile)
+        return
+    body = f"Investigation findings:\n\n{handoff.read_text().strip()}"
+    run(["gh", "issue", "comment", str(n), "--repo", REPO, "--body", body], check=False)
+    run(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(n),
+            "--repo",
+            REPO,
+            "--remove-assignee",
+            "@me",
+            "--remove-label",
+            LABEL_INVESTIGATE,
+            "--add-label",
+            LABEL_HUMAN,
+        ],
+        check=False,
+    )
+    record("investigated", ticket=n, log=str(logfile) if logfile else None)
+    log(f"#{n}: investigation complete; findings posted, routed to human")
 
 
 def review(wt: Path, n: int, gate_report: str) -> tuple[str, str]:
@@ -817,6 +875,8 @@ def process_ticket(
 ) -> None:
     n, title = issue["number"], issue["title"]
     labels = {label["name"] for label in issue.get("labels", [])}
+    investigation = LABEL_INVESTIGATE in labels
+    lane_label = LABEL_INVESTIGATE if investigation else LABEL_AGENT
     wt = FACTORY / f"wt-{n}"
     worker = cfg.worker(labels, wt / ".factory-prompt.md", wt)[0]
 
@@ -824,9 +884,11 @@ def process_ticket(
         log(f"#{n}: skipped (in flight, lock held on {ticket_lock(n)})")
         return
     if dry_run:
-        log(
-            f"#{n}: would claim (assign @me), create worktree {wt} on branch agent/{n}, "
+        tail = "run investigation worker, post findings, route to human" if investigation else (
             f"run {worker} worker, gate, push, open PR, codex-review"
+        )
+        log(
+            f"#{n}: would claim (assign @me), create worktree {wt} on branch agent/{n}, {tail}"
         )
         return
 
@@ -856,7 +918,7 @@ def process_ticket(
         if (
             fresh["state"].upper() != "OPEN"
             or fresh["assignees"]
-            or LABEL_AGENT not in {label["name"] for label in fresh["labels"]}
+            or lane_label not in {label["name"] for label in fresh["labels"]}
         ):
             log(f"#{n}: skipped (state changed since frontier query)")
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -867,6 +929,26 @@ def process_ticket(
     record("claimed", ticket=n, title=title, labels=sorted(labels))
     wt = ensure_worktree(n)
     LOGS.mkdir(parents=True, exist_ok=True)
+
+    if investigation:
+        try:
+            promptfile = wt / ".factory-prompt.md"
+            promptfile.write_text(build_prompt(n, wt, investigation=True))
+            logfile = LOGS / f"{n}-attempt-1.log"
+            started = time.monotonic()
+            code = run_worker(cfg.worker(labels, promptfile, wt), wt, logfile)
+            record(
+                "attempt", ticket=n, attempt=1, worker_exit=code, gate=None,
+                seconds=int(time.monotonic() - started), cost=log_cost(logfile), log=str(logfile),
+            )
+            finish_investigation(n, wt, logfile)
+        finally:
+            if wt.is_dir():
+                run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT, check=False)
+            run(["git", "branch", "-D", f"agent/{n}"], cwd=ROOT, check=False)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+        return
 
     try:
         # Attempts 1..MAX_ATTEMPTS: worker + gate, feeding the failed report back.
@@ -970,7 +1052,7 @@ def main(argv: list[str]) -> int:
     if capacity <= 0:
         log("at capacity, nothing to do")
         return 0
-    ready = frontier()
+    ready = frontier(LABEL_AGENT) + frontier(LABEL_INVESTIGATE)
     if not ready:
         log("frontier empty, nothing to do")
         return 0

@@ -34,30 +34,31 @@ def configure(c: Config) -> None:
     CHECK_TIMEOUT = cfg.check_timeout
 
 
-def timed(cmd: list[str]) -> subprocess.CompletedProcess:
-    """Run a command with the per-check timeout.
+def timed(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Run a command with the per-check timeout (or `timeout` if given).
 
     A wedged check must FAIL, not sit on the GPU lock (ticket #5's gate hung
     for 2h). The check runs in its own session so a timeout kills the whole
     tree (cargo/test grandchildren included), not just the direct child.
     """
+    t = CHECK_TIMEOUT if timeout is None else timeout
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True
     )
     try:
-        out, _ = proc.communicate(timeout=CHECK_TIMEOUT)
+        out, _ = proc.communicate(timeout=t)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, "")
     except subprocess.TimeoutExpired:
         os.killpg(proc.pid, signal.SIGKILL)
         out, _ = proc.communicate()
         return subprocess.CompletedProcess(
-            cmd, 124, f"{out}\ncheck timed out after {CHECK_TIMEOUT}s", ""
+            cmd, 124, f"{out}\ncheck timed out after {t}s", ""
         )
 
 
-def run(cmd: list[str]) -> tuple[bool, str]:
+def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
     """Run a command, return (passed, combined output)."""
-    proc = timed(cmd)
+    proc = timed(cmd, timeout)
     return proc.returncode == 0, proc.stdout + proc.stderr
 
 
@@ -126,7 +127,7 @@ def main(argv: list[str]) -> int:
 
     checks = [
         ("conflict-markers", check_conflict_markers),
-        *((check.name, (lambda c=check: run(c.run))) for check in cfg.checks),
+        *((check.name, (lambda c=check: run(c.run, c.timeout))) for check in cfg.checks),
         ("leak-scan", lambda: check_leaks(args.base)),
     ]
 

@@ -21,19 +21,29 @@ LESSONS_NAME = ".factory-lessons.md"  # committed; `factory learn` writes, every
 LABEL_TRIAGE = "needs-triage"
 LABEL_INFO = "needs-info"
 LABEL_AGENT = "ready-for-agent"
+LABEL_INVESTIGATE = "ready-for-investigation"
 LABEL_HUMAN = "ready-for-human"
 LABEL_APPROVED = "factory-approved"
 LABEL_CHORE = "chore"
+# Reporter/detector-applied marker, never a triage decision itself: exempts an
+# issue from the acceptance-criteria lint so "service is down, cause unknown"
+# incident reports aren't wrongly bounced to needs-info.
+LABEL_OPS = "kind/ops"
 LABELS = {
     LABEL_TRIAGE: ("FBCA04", "Maintainer needs to evaluate this issue"),
     LABEL_INFO: ("D4C5F9", "Waiting on reporter for more information"),
     LABEL_AGENT: ("0E8A16", "Fully specified and ready for an AFK agent"),
+    LABEL_INVESTIGATE: ("1D76DB", "Evidence-gathering pass; agent reports, does not diff"),
     LABEL_HUMAN: ("B60205", "Requires human implementation"),
     LABEL_APPROVED: ("0E8A16", "Reviewer APPROVE recorded by the factory; merge-stage precondition"),
     LABEL_CHORE: ("C2E0C6", "Mechanical task; routed to the chore worker"),
+    LABEL_OPS: ("5319E7", "Operational/infra issue; exempt from the acceptance-criteria triage lint"),
 }
 
-DEFAULT_LEAK_PATTERN = r"internal|confidential|proprietary|private|jira|confluence|\.corp|\.internal"
+DEFAULT_LEAK_PATTERN = (
+    r"internal|confidential|proprietary|private|jira|confluence|\.corp|\.internal"
+    r"|AKIA[0-9A-Z]{16}|-----BEGIN[ A-Z]*PRIVATE KEY-----"
+)
 DEFAULT_WORKER = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
 DEFAULT_CHORE_WORKER = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 DEFAULT_REVIEWER = ["codex", "exec", "{prompt}"]
@@ -62,7 +72,7 @@ KNOWN_KEYS = {
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "env"),
 }
-CHECK_KEYS = ("name", "run", "exclusive")
+CHECK_KEYS = ("name", "run", "exclusive", "timeout")
 
 
 class ConfigError(SystemExit):
@@ -75,12 +85,15 @@ class Check:
     """One gate check: argv run inside the worktree; nonzero exit = FAIL.
 
     `exclusive` checks hold the host lock (shared GPU, licence server, ...)
-    so two worktrees never run them at once.
+    so two worktrees never run them at once. `timeout` overrides the gate's
+    global per-check timeout for this one check (e.g. a live-system health
+    probe wants seconds, a Terraform plan wants minutes).
     """
 
     name: str
     run: list[str]
     exclusive: bool = False
+    timeout: int | None = None
 
 
 @dataclass
@@ -249,7 +262,8 @@ def load(start: Path | None = None) -> Config:
     cfg.check_timeout = int(gate.get("timeout", cfg.check_timeout))
     cfg.lock = Path(gate.get("lock", cfg.lock))
     cfg.checks = [
-        Check(c["name"], list(c["run"]), bool(c.get("exclusive", False))) for c in gate.get("check", [])
+        Check(c["name"], list(c["run"]), bool(c.get("exclusive", False)), c.get("timeout"))
+        for c in gate.get("check", [])
     ]
     names = [c.name for c in cfg.checks]
     if len(set(names)) != len(names) or {"conflict-markers", "leak-scan"} & set(names):

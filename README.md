@@ -81,8 +81,14 @@ inside one of its worktrees.
 ## How a ticket moves
 
 1. **Triage.** A deterministic lint rejects bodies under 80 characters or
-   without acceptance criteria (`needs-info` with a specific question). The
-   model then decides between the four labels; `wontfix` is only ever proposed.
+   without acceptance criteria (`needs-info` with a specific question) —
+   unless the issue carries `kind/ops`, which exempts it from the
+   acceptance-criteria check (an incident report has no done-condition
+   yet). The model then decides between the five labels; `wontfix` is only
+   ever proposed. `ready-for-investigation` tickets skip straight to a
+   shorter path: one worker pass gathers evidence and posts a findings
+   report as a comment — no gate, no PR, no review — then the ticket routes
+   to `ready-for-human` for a person to decide what happens next.
 2. **Claim.** The dispatcher re-reads the issue (search-backed listings lag),
    assigns itself, takes a per-ticket `flock`, and creates the worktree
    `.factory/wt-<n>` on branch `agent/<n>`.
@@ -91,9 +97,12 @@ inside one of its worktrees.
    `factory gate`), and — on retries — the previous gate report or the
    reviewer's findings. Up to `max_attempts` rounds within `budget_min`.
 4. **Gate.** `conflict-markers`, your `[[gate.check]]` list in order, then a
-   `leak-scan` of added lines against a regex. Checks marked `exclusive`
-   serialise on a host-wide lock (one GPU, many worktrees). Every check has a
-   timeout; a wedged check fails instead of holding the lock.
+   `leak-scan` of added lines against a regex. A check is arbitrary argv —
+   a live-system health probe or a `terraform plan` safety check work the
+   same as a test command — with an optional per-check `timeout` override.
+   Checks marked `exclusive` serialise on a host-wide lock (one GPU, many
+   worktrees). Every check has a timeout; a wedged check fails instead of
+   holding the lock.
 5. **Review.** The reviewer sees the diff, the issue, and the gate report;
    every finding must cite `path:line`; it ends with `VERDICT: APPROVE` or
    `VERDICT: REVISE`. Each `REVISE` goes back to the worker with the findings
