@@ -124,29 +124,42 @@ New module `agent_factory/tf_plan_check.py`:
 
 ## Phase 4 — Apply as a distinct, human-gated step
 
-This is the resolved design from the notes: automation's job stops at "PR
-merged with a verified plan and a passing gate"; a human action is what
-triggers `terraform apply`. That human action must be a *separate* label
-from anything the factory itself ever writes.
+Resolved design (confirmed 2026-09-04): **the PR merge itself is the human
+approval gate for apply** — no separate post-merge label/comment step.
+This matches the original vision directly ("PR approval is manual and is
+the gate that kicks off terraform deploy") but requires one change to how
+merging works, because merging is *not* currently a human action.
 
-New label in `config.py`: `LABEL_APPLY = "apply-approved"`. **Hard rule,
-enforced by code review of this fork, not by the library**: no path in
-`dispatch.py`, `triage.py`, or `learn.py` may ever add this label. It is
-added only by a human, via `gh issue edit` / the PR UI / a comment command
-a human types. `onboard.py`'s `init` (which creates the other labels) should
-still create this one so it exists with the right color/description, since
-label *creation* isn't the same as label *application*.
+**The gap this closes:** `merge_pass_locked()` (dispatch.py:663-777) merges
+automatically once the LLM reviewer's `factory-approved` label is present +
+CI is green + the branch is fresh (dispatch.py:681-733). `reviewDecision`
+is already fetched in the PR list (dispatch.py:673) but is only ever
+checked for `CHANGES_REQUESTED` as a block (dispatch.py:683-685) — it's
+never required to be `APPROVED`. So today, "merged" means "codex approved
+it," not "a human approved it." For software tickets that's the intended
+design (LLM review + CI is the whole evidence chain). For infra tickets, if
+merge = apply-trigger, merge has to mean a human actually clicked Approve.
+
+**Change to `merge_pass_locked()`:** for PRs against a repo/ticket flagged
+as apply-eligible (e.g. a `terraform` or `infra` label present at claim
+time, carried onto the PR), add a precondition alongside the existing
+`factory-approved` check: `pr["reviewDecision"] == "APPROVED"`. Until a
+human submits a real GitHub review approval, the PR sits exactly like a
+CI-pending PR does today — logged, not merged (mirrors the `buckets.get("pending")`
+branch at dispatch.py:720-721). Software-ticket merging is untouched: the
+new condition only applies when the ticket is marked apply-eligible.
 
 New module `agent_factory/apply.py`, new CLI entry in `cli.py`'s `COMMANDS`
-dict (cli.py:8-18): `"apply": ("apply", "main", "apply a human-approved,
-merged infra change (terraform apply)")`.
+dict (cli.py:8-18): `"apply": ("apply", "main", "apply following a human-
+approved, merged infra change (terraform apply)")`.
 
 Flow, modeled on `land_pass`'s locking pattern (dispatch.py:632-660):
 1. Take an `apply.lock` (own file under `.factory/locks/`, same
    `fcntl.flock` pattern as `merge.lock`) so concurrent apply runs never
    overlap.
-2. Find merged PRs whose closing issue carries `apply-approved` and not yet
-   an `applied` label/event.
+2. Find recently-merged PRs for apply-eligible tickets not yet recorded as
+   `applied` in `events.jsonl` — no label to look for; "merged" (which now
+   implies a real human review, per above) is itself the trigger.
 3. Fresh checkout at the merge commit — **not** the worker's worktree
    (which may be gone; `cleanup_after_merge`, dispatch.py:624-629, removes
    it after merge) and **not** using the dispatcher's credentials (Phase 5).
@@ -158,11 +171,20 @@ Flow, modeled on `land_pass`'s locking pattern (dispatch.py:632-660):
 5. Diff the fresh plan's destructive actions against what was visible in
    the merged PR's gate report. Identical or a subset → proceed. Anything
    *new* → abort, escalate (reuse `escalate()`'s pattern: comment + label
-   swap) rather than apply against a plan nobody signed off on.
+   swap) rather than apply against a plan nobody signed off on — the human
+   approved the PR's plan, not whatever infra has drifted to since.
 6. `terraform apply -auto-approve` the fresh plan, using apply-capable
    credentials.
 7. Record a new `applied` event to `events.jsonl` (same `record()` helper,
    dispatch.py:204-214) and comment the apply output on the issue.
+
+If real usage later shows a human approving the PR doesn't leave enough
+of a paper trail (e.g. they want to review the *fresh* re-plan from step 4
+before it applies, not just the plan that was visible at PR time), the
+fallback is the originally-drafted `apply-approved` label or a `/apply`
+PR-comment command as a second, explicit gate on top of the merge. Not
+building that now — it's more moving parts than the stated vision asked
+for, and easy to add later if the merge-is-approval model proves too thin.
 
 ## Phase 5 — Credential boundary (worker vs. apply)
 
@@ -261,15 +283,19 @@ in particular should ship with a unit test that feeds it a canned
 `terraform show -json` fixture with both a clean and a destroy/replace
 plan, independent of having Terraform installed in CI.
 
-## Open decisions (need your call before Phase 4 lands)
+## Open decisions
 
-- Exact trigger for `apply-approved`: a label a human adds directly via
-  `gh`/the web UI, or a PR comment command (e.g. `/apply`) that a thin
-  webhook translates into the label? The notes don't say; a raw label is
-  simpler and has no extra surface to secure, a comment command is more
-  discoverable. Recommend the raw label to start.
-- Where do apply-capable credentials live for local/manual runs — a
-  distinct 1Password item read once per `factory apply` invocation, or a
-  short-lived token minted per run? Notes reference "octant-agent-ro vs
-  write-scoped 1Password items" as the *pattern* to reuse, but this fork
-  has no existing write-scoped item to point at yet.
+- **Apply trigger (resolved 2026-09-04):** PR merge is the approval gate,
+  per the original vision — no separate `apply-approved` label. This
+  requires tightening `merge_pass_locked()` so apply-eligible PRs need a
+  real human `reviewDecision == "APPROVED"`, not just the LLM's
+  `factory-approved` label (see Phase 4). Fallback if this proves too thin
+  in practice (e.g. a human wants to see the fresh re-plan before it
+  applies, not just the plan visible at PR time): add an explicit
+  `apply-approved` label or `/apply` PR-comment step on top of the merge.
+  Not building that now.
+- **Credential storage for `factory apply` (undecided, needs hands-on
+  testing):** a distinct 1Password item read once per invocation, vs. a
+  short-lived token minted per run. No strong prior either way for this
+  fork — plan is to try both against Phase 4/5 once they're built and see
+  which is less friction, rather than settle it on paper now.
