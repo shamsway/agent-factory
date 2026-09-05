@@ -110,7 +110,7 @@ def main(argv: list[str]) -> int:
 
     cwd = Path(args.dir)
     planfile = Path(args.plan_out)
-    planfile.parent.mkdir(parents=True, exist_ok=True)
+    (cwd / planfile).parent.mkdir(parents=True, exist_ok=True)
 
     proc = run_plan(cwd, planfile)
     if proc.returncode != 0:

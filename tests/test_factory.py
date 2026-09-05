@@ -578,6 +578,38 @@ class TfPlanCheckTest(unittest.TestCase):
             {addr for addr, _ in unexpected}, {"aws_instance.bar", "aws_db_instance.main"}
         )
 
+    def test_plan_out_directory_created_under_dir_not_invocation_cwd(self) -> None:
+        """--plan-out is a path relative to --dir (that's what run_plan's
+        subprocess, cwd=--dir, actually resolves it against), so the mkdir
+        must create it there too -- not relative to wherever the check
+        itself happens to be invoked from (the worktree root)."""
+        from unittest import mock
+
+        from agent_factory import tf_plan_check
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d).resolve()
+            tf_root = tmp / "terraform" / "homelab-collectors"
+            tf_root.mkdir(parents=True)
+            invocation_cwd = tmp / "worktree-root"
+            invocation_cwd.mkdir()
+
+            original_cwd = Path.cwd()
+            os.chdir(invocation_cwd)
+            self.addCleanup(os.chdir, original_cwd)
+
+            clean_proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            with mock.patch.object(tf_plan_check, "run_plan", return_value=clean_proc) as run_plan, \
+                 mock.patch.object(tf_plan_check, "show_json", return_value=self.CLEAN_PLAN):
+                rc = tf_plan_check.main(
+                    ["--dir", str(tf_root), "--plan-out", ".factory/tfplan"]
+                )
+
+            self.assertEqual(rc, 0)
+            self.assertTrue((tf_root / ".factory").is_dir())
+            self.assertFalse((invocation_cwd / ".factory").exists())
+            run_plan.assert_called_once_with(Path(str(tf_root)), Path(".factory/tfplan"))
+
 
 if __name__ == "__main__":
     unittest.main()
