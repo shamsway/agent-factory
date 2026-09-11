@@ -223,8 +223,9 @@ def doctor(argv: list[str]) -> int:
     except (urllib.error.URLError, OSError, ValueError) as exc:
         report(None, "triage model endpoint", f"{cfg.llm_url} ({exc}); `factory triage` will not run")
 
-    timer = sh(["systemctl", "--user", "is-active", f"{cfg.unit}.timer"]).stdout.strip()
-    report(True if timer == "active" else None, f"systemd timer {cfg.unit}.timer", timer or "not installed (factory install)")
+    for unit in (f"{cfg.unit}.timer", f"{cfg.unit}-triage.timer"):
+        timer = sh(["systemctl", "--user", "is-active", unit]).stdout.strip()
+        report(True if timer == "active" else None, f"systemd timer {unit}", timer or "not installed (factory install)")
 
     if cfg.apply_enabled:
         report(shutil.which("terraform") is not None, "terraform on PATH (required: [apply].enabled)")
@@ -272,6 +273,14 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
         ),
         f"{cfg.unit}.timer": (
             f"[Unit]\nDescription=Run the agent-factory dispatcher for {cfg.repo} every {every}\n\n"
+            f"[Timer]\nOnBootSec=5min\nOnUnitActiveSec={every}\n\n[Install]\nWantedBy=timers.target\n"
+        ),
+        f"{cfg.unit}-triage.service": (
+            f"[Unit]\nDescription=agent-factory triage for {cfg.repo} (one pass)\n\n"
+            f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{env}ExecStart={exe} triage\n"
+        ),
+        f"{cfg.unit}-triage.timer": (
+            f"[Unit]\nDescription=Run agent-factory triage for {cfg.repo} every {every}\n\n"
             f"[Timer]\nOnBootSec=5min\nOnUnitActiveSec={every}\n\n[Install]\nWantedBy=timers.target\n"
         ),
         f"{cfg.unit}-dashboard.service": (
@@ -335,11 +344,11 @@ def install(argv: list[str]) -> int:
         (udir / dash_unit).unlink()
         print(f"removed {udir / dash_unit}")
     systemctl("daemon-reload")
-    timer = f"{cfg.unit}.timer"
-    systemctl("enable", "--now", timer)
-    if timer in changed:
-        systemctl("restart", timer)
-    print(f"{'restarted' if timer in changed else 'started'} {timer}")
+    for timer in (f"{cfg.unit}.timer", f"{cfg.unit}-triage.timer"):
+        systemctl("enable", "--now", timer)
+        if timer in changed:
+            systemctl("restart", timer)
+        print(f"{'restarted' if timer in changed else 'started'} {timer}")
     if args.dashboard:
         systemctl("enable", "--now", dash_unit)
         if dash_unit in changed:
@@ -347,5 +356,8 @@ def install(argv: list[str]) -> int:
         print(f"{'restarted' if dash_unit in changed else 'started'} {dash_unit}")
     if sh(["loginctl", "show-user", "--property=Linger", "--value", Path.home().name]).stdout.strip() != "yes":
         print("hint: `loginctl enable-linger` keeps user timers running after logout and at boot")
-    print(f"stop with: systemctl --user disable --now {cfg.unit}.timer{f' {dash_unit}' if args.dashboard else ''}")
+    print(
+        f"stop with: systemctl --user disable --now {cfg.unit}.timer {cfg.unit}-triage.timer"
+        f"{f' {dash_unit}' if args.dashboard else ''}"
+    )
     return 0

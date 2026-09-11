@@ -206,10 +206,15 @@ class HostConfigTest(unittest.TestCase):
             self.assertIn("OnUnitActiveSec=5min", proc.stdout)
             self.assertIn("Environment=UV_EXCLUDE_NEWER=2026-01-01T00:00:00Z", proc.stdout)
             self.assertIn("# factory-widgets-dashboard.service", proc.stdout)
+            self.assertIn("# factory-widgets-triage.service", proc.stdout)
+            self.assertIn("# factory-widgets-triage.timer", proc.stdout)
+            self.assertIn("ExecStart=", proc.stdout)
+            self.assertIn(" triage\n", proc.stdout)  # triage service actually invokes `factory triage`
             self.assertIn("--host 127.0.0.1", proc.stdout)
             (Path(d) / "b").mkdir()
             proc = factory(make_repo(Path(d) / "b"), "install", "--print", "--no-dashboard")
             self.assertNotIn("dashboard.service", proc.stdout)
+            self.assertIn("# factory-widgets-triage.service", proc.stdout)  # triage isn't gated by --dashboard
 
     def test_init_labels_only_touches_nothing_and_fails_on_gh(self) -> None:
         with tempfile.TemporaryDirectory() as d:
