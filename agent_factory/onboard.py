@@ -214,8 +214,11 @@ def doctor(argv: list[str]) -> int:
         report(bool(ident), "git identity for Signed-off-by", ident or "set user.name/user.email")
 
     base = cfg.llm_url.rsplit("/chat/completions", 1)[0]
+    req = urllib.request.Request(f"{base}/models")
+    if cfg.llm_key:
+        req.add_header("Authorization", f"Bearer {cfg.llm_key}")
     try:
-        with urllib.request.urlopen(f"{base}/models", timeout=3):
+        with urllib.request.urlopen(req, timeout=3):
             report(True, "triage model endpoint", cfg.llm_url)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         report(None, "triage model endpoint", f"{cfg.llm_url} ({exc}); `factory triage` will not run")

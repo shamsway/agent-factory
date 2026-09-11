@@ -121,6 +121,7 @@ pattern = ""
 exclude = ["vendor"]
 [triage]
 model = "m"
+key = "sk-abc"
 [dashboard]
 port = 1
 """
@@ -132,7 +133,7 @@ port = 1
             self.assertEqual(cfg.review_cmd("hi {x}"), ["rev", "--ask", "hi {x}"])
             self.assertEqual([(c.name, c.exclusive) for c in cfg.checks], [("unit", True)])
             self.assertIsNone(cfg.leak_pattern)
-            self.assertEqual((cfg.leak_exclude, cfg.llm_model, cfg.dashboard_port), (["vendor"], "m", 1))
+            self.assertEqual((cfg.leak_exclude, cfg.llm_model, cfg.llm_key, cfg.dashboard_port), (["vendor"], "m", "sk-abc", 1))
             # A worktree resolves to the main checkout, not itself.
             wt = Path(d) / "wt"
             git(repo, "worktree", "add", "-q", str(wt), "-b", "agent/1")
@@ -154,7 +155,7 @@ class HostConfigTest(unittest.TestCase):
 
     def test_precedence_and_filter(self) -> None:
         host_file(
-            '[defaults.triage]\nurl = "http://h/v1/chat/completions"\nmodel = "d"\n'
+            '[defaults.triage]\nurl = "http://h/v1/chat/completions"\nmodel = "d"\nkey = "sk-default"\n'
             '[defaults.dashboard]\nport = 9000\ntheme = "host.css"\n'
             '[defaults.gate]\nlock = "/tmp/host.lock"\n[[defaults.gate.check]]\nname = "evil"\nrun = ["true"]\n'
             '[defaults.leak_scan]\npattern = ""\n[defaults.repo]\nupstream = "evil"\n'
@@ -165,8 +166,9 @@ class HostConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), '[triage]\nmodel = "f"\n')
             cfg = config.load(repo)
-            # defaults < per-repo < repo file
-            self.assertEqual((cfg.llm_url, cfg.llm_model, cfg.dashboard_port), ("http://h/v1/chat/completions", "f", 9001))
+            # defaults < per-repo < repo file; key comes only from defaults here
+            # (a per-repo/committed key would be a real secret leaking into git).
+            self.assertEqual((cfg.llm_url, cfg.llm_model, cfg.llm_key, cfg.dashboard_port), ("http://h/v1/chat/completions", "f", "sk-default", 9001))
             self.assertEqual(cfg.lock, Path("/tmp/host.lock"))
             self.assertEqual(cfg.install, {"every": "5min", "dashboard": True, "host": "127.0.0.1", "env": {"A": "1"}})
             # repo-owned keys never come from the host
@@ -426,6 +428,48 @@ class DispatchTest(unittest.TestCase):
             log = Path(d) / "w.log"
             log.write_text("... Total cost: $0.25\nmore\nTotal cost: $1.00\n")
             self.assertEqual(dispatch.log_cost(log), 1.25)
+
+
+class TriageTest(unittest.TestCase):
+    def test_call_llm_sends_bearer_header_only_when_key_configured(self) -> None:
+        """A gated OpenAI-compatible endpoint (e.g. LiteLLM) needs an
+        Authorization header -- without one, call_llm's request looks
+        identical to a plain unauthenticated local-Ollama call and the
+        endpoint 401s. The header must appear iff a key is configured, and
+        never for the (still-supported) no-auth local-model case."""
+        from unittest import mock
+
+        from agent_factory import triage
+
+        class FakeResponse:
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+
+        captured: dict = {}
+
+        def fake_urlopen(req: object, timeout: int | None = None) -> FakeResponse:
+            captured["auth"] = req.get_header("Authorization")  # type: ignore[attr-defined]
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[triage]\nurl = "http://h/v1/chat/completions"\nkey = "sk-secret"\n')
+            triage.configure(config.load(repo))
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                self.assertEqual(triage.call_llm([{"role": "user", "content": "hi"}]), "ok")
+            self.assertEqual(captured["auth"], "Bearer sk-secret")
+
+        with tempfile.TemporaryDirectory() as d:
+            repo2 = make_repo(Path(d), '[triage]\nurl = "http://h/v1/chat/completions"\n')
+            triage.configure(config.load(repo2))
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                triage.call_llm([{"role": "user", "content": "hi"}])
+            self.assertIsNone(captured["auth"])
 
 
 class ApplyConfigTest(unittest.TestCase):

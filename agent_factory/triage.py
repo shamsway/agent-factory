@@ -31,13 +31,15 @@ from agent_factory.config import (
 cfg: Config
 LLM_URL = os.environ.get("FACTORY_LLM_URL", config.DEFAULT_LLM_URL)
 LLM_MODEL = os.environ.get("FACTORY_LLM_MODEL", config.DEFAULT_LLM_MODEL)
+LLM_KEY = os.environ.get("FACTORY_LLM_KEY", "")
 
 
 def configure(c: Config) -> None:
-    global cfg, LLM_URL, LLM_MODEL
+    global cfg, LLM_URL, LLM_MODEL, LLM_KEY
     cfg = c
     LLM_URL = os.environ.get("FACTORY_LLM_URL", cfg.llm_url)
     LLM_MODEL = os.environ.get("FACTORY_LLM_MODEL", cfg.llm_model)
+    LLM_KEY = os.environ.get("FACTORY_LLM_KEY", cfg.llm_key)
 
 
 LABEL_TABLE = "\n".join(
@@ -127,10 +129,13 @@ def call_llm(messages: list[dict]) -> str:
             "temperature": 0.1,
         }
     ).encode()
+    headers = {"Content-Type": "application/json"}
+    if LLM_KEY:
+        headers["Authorization"] = f"Bearer {LLM_KEY}"
     req = urllib.request.Request(
         LLM_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
