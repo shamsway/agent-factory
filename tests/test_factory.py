@@ -192,6 +192,11 @@ class HostConfigTest(unittest.TestCase):
     def test_unknown_keys(self) -> None:
         raw = {"triage": {"mdoel": "x"}, "gate": {"check": [{"name": "a", "run": [], "exclusiv": True}]}, "bogus": {}}
         self.assertEqual(config.unknown_keys(raw), ["triage.mdoel", "gate.check[0].exclusiv", "bogus"])
+        # triage.key (the Authorization-header bearer token) is loader-known,
+        # not drift -- regression check for the gap where config.load() read
+        # it fine but doctor's "host config: ignored (not host-owned)" check
+        # flagged it as unknown anyway (KNOWN_KEYS wasn't updated alongside).
+        self.assertEqual(config.unknown_keys({"triage": {"key": "sk-x"}}), [])
 
     def test_install_print_uses_host_defaults_and_env(self) -> None:
         host_file('[defaults.install]\nevery = "5min"\ndashboard = true\n[defaults.install.env]\nUV_EXCLUDE_NEWER = "2026-01-01T00:00:00Z"\n')

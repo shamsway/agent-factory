@@ -72,7 +72,7 @@ KNOWN_KEYS = {
     "review": ("command",),
     "gate": ("timeout", "lock", "check"),
     "leak_scan": ("pattern", "exclude"),
-    "triage": ("url", "model"),
+    "triage": ("url", "model", "key"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "env"),
     "apply": ("enabled", "dir", "env"),
