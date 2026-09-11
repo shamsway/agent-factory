@@ -426,6 +426,37 @@ class DispatchTest(unittest.TestCase):
             with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b", "comments": []}):
                 self.assertIn("## Lessons from previous tickets", dispatch.build_prompt(3, wt))
 
+    def test_review_prompt_inlines_issue_text(self) -> None:
+        """The review command runs sandboxed (no --dangerously-skip-permissions),
+        so it can't fetch the issue itself -- confirmed live on ticket #45,
+        where the reviewer stalled asking for `gh issue view` approval it
+        could never get non-interactively, twice, then escalated. The issue's
+        title/body must be inlined into the prompt instead."""
+        from unittest import mock
+
+        from agent_factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            issue = {"title": "Add a widget", "body": "Acceptance: widget exists."}
+            captured = {}
+
+            def fake_run(cmd, cwd=None, capture_output=None, text=None):
+                captured["prompt"] = cmd[-1]
+                return subprocess.CompletedProcess(cmd, 0, stdout="VERDICT: APPROVE", stderr="")
+
+            with mock.patch.object(dispatch, "gh_json", return_value=issue) as gh_mock, \
+                 mock.patch("subprocess.run", side_effect=fake_run):
+                verdict, findings = dispatch.review(repo, 45, "gate report")
+            self.assertEqual(verdict, "APPROVE")
+            self.assertIn("Add a widget", captured["prompt"])
+            self.assertIn("Acceptance: widget exists.", captured["prompt"])
+            self.assertIn("do not try to fetch it yourself", captured["prompt"])
+            gh_mock.assert_called_once_with(
+                ["issue", "view", "45", "--repo", dispatch.REPO, "--json", "title,body"]
+            )
+
     def test_cost_pattern_sums_worker_log(self) -> None:
         from agent_factory import dispatch
 

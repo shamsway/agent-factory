@@ -374,13 +374,27 @@ def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
 
 
 def review(wt: Path, n: int, gate_report: str) -> tuple[str, str]:
-    """Run codex two-axis review. Returns (verdict, findings markdown)."""
+    """Run codex two-axis review. Returns (verdict, findings markdown).
+
+    The issue's own title/body is fetched here and inlined into the prompt --
+    the review command runs sandboxed (no `--dangerously-skip-permissions`,
+    unlike the worker), so it has no reliable way to fetch #n itself. Without
+    this, "check the diff against issue #n" is an instruction the reviewer
+    cannot act on: it either stalls asking for `gh` approval it can never get
+    non-interactively, or (worse) guesses from whatever's lying around the
+    worktree (a stale handoff file, say) -- confirmed live on ticket #45,
+    which escalated after both review rounds got stuck on exactly this.
+    """
+    issue = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "title,body"])
+    issue_text = f"# {issue['title']}\n\n{issue.get('body') or '(no body)'}"
     prompt = (
         f"Review `git diff origin/{cfg.main}..HEAD` in this repository on two axes:\n"
         f"1. Standards: does the code follow this repo's documented conventions "
         f"(AGENTS.md, CONTRIBUTING.md, docs/)?\n"
         f"2. Spec: does the diff satisfy the text and acceptance criteria of "
-        f"GitHub issue #{n} in {REPO}?\n"
+        f"GitHub issue #{n} in {REPO}, reproduced below -- do not try to fetch "
+        f"it yourself, this is the full text:\n\n"
+        f"```\n{issue_text}\n```\n\n"
         f"Review the DIFF only. Do NOT execute builds or tests: your sandbox "
         f"differs from the target host, so your results are not evidence. The "
         f"deterministic gate already ran on the target host; its report is "
