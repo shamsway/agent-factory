@@ -631,21 +631,29 @@ FACTORY_APPROVED = LABEL_APPROVED
 
 
 def approve_pr(n: int) -> None:
-    """Record the codex APPROVE durably on the PR (merge-stage precondition)."""
+    """Record the codex APPROVE durably on the PR (merge-stage precondition).
+
+    Resolves the PR number via `pr list --head` rather than passing the
+    branch name to `gh pr edit` directly -- confirmed live (ticket #45) that
+    `gh pr edit agent/{n}` silently no-ops here: the dispatcher's cwd stays
+    on `main`, never the branch itself, and branch-name resolution isn't
+    reliable in that situation. `merge_pass_locked` already uses the numeric
+    PR id for its own `gh pr edit` calls; this matches that.
+    """
     record("approved", ticket=n)
-    run(
-        [
-            "gh",
-            "pr",
-            "edit",
-            f"agent/{n}",
-            "--repo",
-            REPO,
-            "--add-label",
-            FACTORY_APPROVED,
-        ],
+    existing = gh_json(
+        ["pr", "list", "--repo", REPO, "--head", f"agent/{n}", "--json", "number"]
+    )
+    if not existing:
+        log(f"#{n}: approve_pr found no open PR for agent/{n}; {FACTORY_APPROVED} not added")
+        return
+    pr_num = existing[0]["number"]
+    proc = run(
+        ["gh", "pr", "edit", str(pr_num), "--repo", REPO, "--add-label", FACTORY_APPROVED],
         check=False,
     )
+    if proc.returncode != 0:
+        log(f"PR #{pr_num}: failed to add {FACTORY_APPROVED} label: {proc.stderr.strip()}")
 
 
 def signoff() -> str:

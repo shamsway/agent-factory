@@ -457,6 +457,38 @@ class DispatchTest(unittest.TestCase):
                 ["issue", "view", "45", "--repo", dispatch.REPO, "--json", "title,body"]
             )
 
+    def test_approve_pr_uses_resolved_pr_number_not_branch_name(self) -> None:
+        """Confirmed live (ticket #45): `gh pr edit agent/{n}` silently no-ops
+        from the dispatcher's cwd (always `main`, never the branch), so the
+        factory-approved label never lands even though dispatch logs
+        "done (approved)". Must resolve the PR number first, same as
+        push_and_pr/merge_pass_locked already do, and log on failure."""
+        from unittest import mock
+
+        from agent_factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            calls = []
+
+            def fake_run(cmd, cwd=None, check=True):
+                calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(dispatch, "gh_json", return_value=[{"number": 46}]), \
+                 mock.patch.object(dispatch, "run", side_effect=fake_run):
+                dispatch.approve_pr(45)
+            edit_call = next(c for c in calls if c[:3] == ["gh", "pr", "edit"])
+            self.assertEqual(edit_call[3], "46")
+            self.assertNotIn("agent/45", edit_call)
+
+            # No open PR found: logs instead of calling gh pr edit at all.
+            with mock.patch.object(dispatch, "gh_json", return_value=[]), \
+                 mock.patch.object(dispatch, "run", side_effect=fake_run) as run_mock:
+                dispatch.approve_pr(99)
+            run_mock.assert_not_called()
+
     def test_cost_pattern_sums_worker_log(self) -> None:
         from agent_factory import dispatch
 
