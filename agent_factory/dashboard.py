@@ -50,6 +50,7 @@ UPSTREAM: str | None  # GitHub slug of the upstream repo; None = sync disabled
 GPU_LOCK: Path
 LLM_URL: str
 LLM_MODEL: str
+LLM_KEY: str
 GATE_CHECKS: list[str]
 cleanup_after_merge = dispatch.cleanup_after_merge
 lock_held = dispatch.lock_held
@@ -85,7 +86,7 @@ VERDICT = re.compile(r"VERDICT:\s*(APPROVE|REVISE)")
 
 def configure(c: Config) -> None:
     global cfg, FACTORY, LOGS, MAX_ACTIVE, MAX_ATTEMPTS, REPO, ROOT, SYNC_LOG
-    global SYNC_TITLE, UPSTREAM, GPU_LOCK, LLM_URL, LLM_MODEL, GATE_CHECKS
+    global SYNC_TITLE, UPSTREAM, GPU_LOCK, LLM_URL, LLM_MODEL, LLM_KEY, GATE_CHECKS
     cfg = c
     dispatch.configure(c)
     FACTORY = dispatch.FACTORY
@@ -100,6 +101,7 @@ def configure(c: Config) -> None:
     GPU_LOCK = c.lock
     LLM_URL = c.llm_url
     LLM_MODEL = c.llm_model
+    LLM_KEY = c.llm_key
     GATE_CHECKS = ["conflict-markers", *(k.name for k in c.checks), "leak-scan"]
 
 
@@ -609,8 +611,11 @@ def metrics(tickets: list[dict]) -> dict:
 
 def triage_llm_online() -> bool:
     base = LLM_URL.rsplit("/chat/completions", 1)[0]
+    req = urllib.request.Request(f"{base}/models")
+    if LLM_KEY:
+        req.add_header("Authorization", f"Bearer {LLM_KEY}")
     try:
-        with urllib.request.urlopen(f"{base}/models", timeout=1.5) as resp:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
             return resp.status == 200
     except (urllib.error.URLError, OSError, ValueError):
         return False

@@ -273,6 +273,46 @@ class HostConfigTest(unittest.TestCase):
 
 
 class DashboardTest(unittest.TestCase):
+    def test_triage_llm_online_sends_bearer_header_only_when_key_configured(self) -> None:
+        """Same gap as call_llm() and doctor()'s endpoint check, found in a
+        third place: a gated endpoint (e.g. LiteLLM) 401s without a bearer
+        header, so this reported "offline" in the dashboard even while
+        triage was working fine through the (correctly authenticated)
+        call_llm() path. Confirmed live: the dashboard showed the triage LLM
+        as offline against a real, healthy, authenticated LiteLLM endpoint."""
+        from unittest import mock
+
+        from agent_factory import dashboard
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[triage]\nurl = "http://h/v1/chat/completions"\nkey = "sk-secret"\n')
+            dashboard.configure(config.load(repo))
+            captured = {}
+
+            def fake_urlopen(req, timeout=None):
+                captured["auth"] = req.get_header("Authorization")
+                return FakeResponse()
+
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                self.assertTrue(dashboard.triage_llm_online())
+            self.assertEqual(captured["auth"], "Bearer sk-secret")
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[triage]\nurl = "http://h/v1/chat/completions"\n')
+            dashboard.configure(config.load(repo))
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                dashboard.triage_llm_online()
+            self.assertIsNone(captured["auth"])
+
     def test_metrics_from_synthetic_tickets(self) -> None:
         from agent_factory import dashboard
 
