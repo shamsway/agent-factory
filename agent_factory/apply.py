@@ -202,6 +202,16 @@ def main(argv: list[str]) -> int:
         lock_fd.close()
         return 0
     try:
+        # touches_apply_dir() diffs {commit}~1..commit locally -- if this repo's
+        # main hasn't independently fetched since the merge (e.g. `factory
+        # apply` invoked standalone, not right after a dispatch pass), the
+        # merge commit doesn't exist locally yet, the diff silently fails
+        # (check=False), and touches_apply_dir wrongly reports False.
+        # Confirmed live (ticket #45): a genuinely apply-dir-touching merge
+        # was skipped with "doesn't touch ...; nothing to apply" for exactly
+        # this reason. fresh_checkout() also fetches, but only runs *after*
+        # touches_apply_dir already (wrongly) decided there was nothing to do.
+        dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
         done = applied_tickets()
         pending = [t for t in merged_tickets() if t["ticket"] not in done]
         if not pending:

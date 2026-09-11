@@ -594,6 +594,47 @@ class ApplyTest(unittest.TestCase):
                 tickets = apply.merged_tickets()
             self.assertEqual(tickets, [{"pr": 5, "ticket": 9, "commit": "abc123"}])
 
+    def test_apply_fetches_main_before_scanning_merged_tickets(self) -> None:
+        """touches_apply_dir() diffs {commit}~1..commit locally; if main
+        hasn't independently fetched since the merge (`factory apply`
+        invoked standalone, not right after a dispatch pass), the merge
+        commit doesn't exist locally yet, the diff silently fails
+        (check=False), and touches_apply_dir wrongly reports False.
+        Confirmed live on ticket #45: a real apply-dir-touching merge was
+        skipped as "doesn't touch ...; nothing to apply". The fetch must
+        happen unconditionally, before merged_tickets/touches_apply_dir
+        ever run -- not only inside fresh_checkout(), which runs after."""
+        from unittest import mock
+
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            toml = "[apply]\nenabled = true\n"
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            calls: list[tuple] = []
+
+            def fake_run(cmd, cwd=None, check=True):
+                calls.append(("run", cmd))
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            def fake_gh_json(args):
+                calls.append(("gh_json", args))
+                return []
+
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run", side_effect=fake_run), \
+                 mock.patch.object(dispatch, "gh_json", side_effect=fake_gh_json):
+                self.assertEqual(apply.main([]), 0)
+
+            fetch_idx = next(
+                i for i, c in enumerate(calls) if c[0] == "run" and c[1][:3] == ["git", "fetch", "origin"]
+            )
+            prlist_idx = next(i for i, c in enumerate(calls) if c[0] == "gh_json")
+            self.assertLess(fetch_idx, prlist_idx)
+
     def test_merge_stage_waits_for_human_review_when_apply_enabled(self) -> None:
         from unittest import mock
 
