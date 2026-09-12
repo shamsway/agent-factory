@@ -413,7 +413,16 @@ def review(wt: Path, n: int, gate_report: str) -> tuple[str, str]:
     )
     findings = proc.stdout.strip() or proc.stderr.strip()
     m = re.search(r"VERDICT:\s*(APPROVE|REVISE)", findings)
-    verdict = m.group(1) if m else "REVISE"
+    if not m and proc.returncode != 0:
+        # The reviewer process itself failed (auth, crash, network, ...) rather
+        # than genuinely reviewing and finding nothing to flag. Treating this
+        # as REVISE would silently burn a worker round chasing findings that
+        # were never actually produced -- surface it as its own verdict so
+        # dispatch_one escalates on the real cause instead of misdiagnosing
+        # broken reviewer credentials as requested changes.
+        verdict = "ERROR"
+    else:
+        verdict = m.group(1) if m else "REVISE"
     record("review", ticket=n, verdict=verdict, parsed=bool(m))
     return verdict, findings
 
@@ -1004,6 +1013,9 @@ def process_ticket(
             return
         verdict, findings = review(wt, n, report)
         pr_comment(n, findings)
+        if verdict == "ERROR":
+            escalate(n, f"reviewer process failed (no verdict parsed): {findings[:2000]}", logfile)
+            return
         # Review rounds: each REVISE goes back to the worker with the findings,
         # then re-gate, push, re-review. `review_rounds` bounces max.
         for bounce in range(1, cfg.review_rounds + 1):
@@ -1028,6 +1040,9 @@ def process_ticket(
             run(["git", "push", "origin", f"agent/{n}"], cwd=wt)
             verdict, findings = review(wt, n, report)
             pr_comment(n, findings)
+            if verdict == "ERROR":
+                escalate(n, f"reviewer process failed on bounce {bounce} (no verdict parsed): {findings[:2000]}", logfile)
+                return
         if verdict != "APPROVE":
             escalate(n, f"REVISE verdict after {cfg.review_rounds} review round(s)", logfile)
         else:

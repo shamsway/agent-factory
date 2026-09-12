@@ -550,6 +550,36 @@ class DispatchTest(unittest.TestCase):
                 ["issue", "view", "45", "--repo", dispatch.REPO, "--json", "title,body"]
             )
 
+    def test_review_reports_error_verdict_when_reviewer_process_fails(self) -> None:
+        """SHA-177: a reviewer process failure (auth, crash, network -- not a
+        genuine review) must not be silently treated as REVISE, which would
+        burn a worker round chasing findings that were never produced."""
+        from unittest import mock
+
+        from agent_factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+
+            def fake_run(cmd, cwd=None, capture_output=None, text=None):
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="OAuth 401: token expired")
+
+            with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}), \
+                 mock.patch("subprocess.run", side_effect=fake_run):
+                verdict, findings = dispatch.review(repo, 45, "gate report")
+            self.assertEqual(verdict, "ERROR")
+            self.assertIn("OAuth 401", findings)
+
+            # A genuine REVISE (reviewer ran fine, just found problems) is unaffected.
+            def fake_revise(cmd, cwd=None, capture_output=None, text=None):
+                return subprocess.CompletedProcess(cmd, 0, stdout="some findings\nVERDICT: REVISE", stderr="")
+
+            with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}), \
+                 mock.patch("subprocess.run", side_effect=fake_revise):
+                verdict, findings = dispatch.review(repo, 45, "gate report")
+            self.assertEqual(verdict, "REVISE")
+
     def test_approve_pr_uses_resolved_pr_number_not_branch_name(self) -> None:
         """Confirmed live (ticket #45): `gh pr edit agent/{n}` silently no-ops
         from the dispatcher's cwd (always `main`, never the branch), so the
