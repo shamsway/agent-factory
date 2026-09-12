@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 from agent_factory import __version__, config
-from agent_factory.config import CONFIG_NAME, LABELS, ConfigError
+from agent_factory.config import CONFIG_NAME, DASHBOARD_ALLOW_REMOTE_VAR, LABELS, LOOPBACK_HOSTS, ConfigError
 
 TEMPLATES = Path(__file__).with_name("templates")
 GITIGNORE_LINES = ("/.factory/", ".factory-prompt.md")
@@ -226,6 +226,23 @@ def doctor(argv: list[str]) -> int:
     for unit in (f"{cfg.unit}.timer", f"{cfg.unit}-triage.timer"):
         timer = sh(["systemctl", "--user", "is-active", unit]).stdout.strip()
         report(True if timer == "active" else None, f"systemd timer {unit}", timer or "not installed (factory install)")
+
+    host = cfg.install.get("host", "127.0.0.1")
+    allow_remote = DASHBOARD_ALLOW_REMOTE_VAR in cfg.install["env"]
+    if host in LOOPBACK_HOSTS:
+        report(True, "dashboard bind", f"{host} (loopback; reach it via an SSH tunnel)")
+    elif allow_remote:
+        report(
+            None, "dashboard bind",
+            f"{host} (non-loopback), {DASHBOARD_ALLOW_REMOTE_VAR} set -- confirm real "
+            "auth (e.g. a reverse proxy) actually sits in front of it",
+        )
+    else:
+        report(
+            False, "dashboard bind",
+            f"{host} (non-loopback) -- `factory dashboard` refuses to start without "
+            f"{DASHBOARD_ALLOW_REMOTE_VAR}=1 in [install].env",
+        )
 
     if cfg.apply_enabled:
         report(shutil.which("terraform") is not None, "terraform on PATH (required: [apply].enabled)")

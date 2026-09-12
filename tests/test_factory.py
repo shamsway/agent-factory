@@ -255,6 +255,27 @@ class HostConfigTest(unittest.TestCase):
             self.assertEqual(rows["push access to acme/widgets"]["status"], "PASS")
             self.assertEqual(out["ok"], proc.returncode == 0)
 
+    def test_doctor_flags_non_loopback_dashboard_bind(self) -> None:
+        """SHA-176: policy is loopback-only + SSH tunnel; doctor should FAIL a
+        non-loopback [install].host with no escape hatch, and only WARN (not
+        pass silently) once FACTORY_DASHBOARD_ALLOW_REMOTE is set."""
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            host_file('[repo."acme/widgets".install]\nhost = "0.0.0.0"\n')
+            proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
+            rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
+            self.assertEqual(rows["dashboard bind"]["status"], "FAIL")
+            self.assertIn("FACTORY_DASHBOARD_ALLOW_REMOTE", rows["dashboard bind"]["detail"])
+
+            host_file(
+                '[repo."acme/widgets".install]\nhost = "0.0.0.0"\n'
+                '[repo."acme/widgets".install.env]\nFACTORY_DASHBOARD_ALLOW_REMOTE = "1"\n'
+            )
+            proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
+            rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
+            self.assertEqual(rows["dashboard bind"]["status"], "WARN")
+
     def test_doctor_flags_leaked_apply_credential(self) -> None:
         from unittest import mock
 
@@ -273,6 +294,38 @@ class HostConfigTest(unittest.TestCase):
 
 
 class DashboardTest(unittest.TestCase):
+    def test_dashboard_refuses_non_loopback_bind_without_escape_hatch(self) -> None:
+        """SHA-176: /api/act mutates GitHub with the operator's own `gh`
+        credentials and the dashboard has no auth of its own -- binding
+        beyond loopback must be a hard refusal, not just a --help warning."""
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            proc = factory(repo, "dashboard", "--host", "0.0.0.0", "--no-open")
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("refusing to bind", proc.stderr)
+            self.assertIn("FACTORY_DASHBOARD_ALLOW_REMOTE", proc.stderr)
+
+    def test_dashboard_allows_non_loopback_with_escape_hatch(self) -> None:
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            env = {**os.environ, "PYTHONPATH": str(ROOT), "FACTORY_DASHBOARD_ALLOW_REMOTE": "1"}
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_factory", "dashboard", "--host", "127.0.0.1", "--port", "0", "--no-open"],
+                cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+            )
+            try:
+                line = proc.stdout.readline()
+                self.assertIn("listening on 127.0.0.1:0", line)
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
     def test_triage_llm_online_sends_bearer_header_only_when_key_configured(self) -> None:
         """Same gap as call_llm() and doctor()'s endpoint check, found in a
         third place: a gated endpoint (e.g. LiteLLM) 401s without a bearer

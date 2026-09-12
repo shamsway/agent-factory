@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -28,11 +29,13 @@ from urllib.parse import parse_qs, urlparse
 
 from agent_factory import __version__, config, dispatch
 from agent_factory.config import (
+    DASHBOARD_ALLOW_REMOTE_VAR,
     LABEL_AGENT,
     LABEL_APPROVED,
     LABEL_HUMAN,
     LABEL_INFO,
     LABEL_TRIAGE,
+    LOOPBACK_HOSTS,
     Config,
 )
 
@@ -1002,6 +1005,19 @@ def main(argv: list[str]) -> int:
     if args.json:
         print(json.dumps(snapshot(), indent=2))
         return 0
+
+    if args.host not in LOOPBACK_HOSTS and os.environ.get(DASHBOARD_ALLOW_REMOTE_VAR) != "1":
+        print(
+            f"factory dashboard: refusing to bind {args.host} -- /api/act performs real "
+            "GitHub mutations (labels, comments, closes) using your own `gh` credentials, "
+            "and this server has no authentication of its own. Policy is loopback-only, "
+            "reached via an SSH tunnel (ssh -L 8765:127.0.0.1:8765 <host>). If you "
+            "deliberately want this exposed beyond loopback -- and have put real auth in "
+            f"front of it (e.g. a reverse proxy) -- set {DASHBOARD_ALLOW_REMOTE_VAR}=1 "
+            "(e.g. in [install].env, for the systemd unit).",
+            file=sys.stderr,
+        )
+        return 1
 
     server = ThreadingHTTPServer((args.host, port), Handler)
     url = f"http://127.0.0.1:{port}/"
