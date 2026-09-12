@@ -64,9 +64,15 @@ def unexpected_changes(
     ]
 
 
-def run_plan(cwd: Path, planfile: Path) -> subprocess.CompletedProcess:
+def run_plan(cwd: Path, planfile: Path, env: dict | None = None) -> subprocess.CompletedProcess:
+    """`env=None` inherits the calling process's environment (the gate's own
+    CLI use: install.env is already baked into that process by the
+    dispatcher's systemd unit). `factory apply`'s fresh re-plan needs
+    apply.env explicitly instead -- confirmed live, that plan 401'd against
+    1Password's desktop-app flow because apply_env()'s credentials were
+    computed but never actually passed to this subprocess."""
     init = subprocess.run(
-        ["terraform", "init", "-input=false"], cwd=cwd, capture_output=True, text=True
+        ["terraform", "init", "-input=false"], cwd=cwd, capture_output=True, text=True, env=env
     )
     if init.returncode != 0:
         return init
@@ -75,6 +81,7 @@ def run_plan(cwd: Path, planfile: Path) -> subprocess.CompletedProcess:
         cwd=cwd,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 

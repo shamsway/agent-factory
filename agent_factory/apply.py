@@ -133,7 +133,7 @@ def apply_one(ticket: dict, dry_run: bool) -> None:
     try:
         planfile = wt / ".factory" / f"apply-plan-{n}"
         planfile.parent.mkdir(parents=True, exist_ok=True)
-        proc = tf_plan_check.run_plan(tf_dir, planfile)
+        proc = tf_plan_check.run_plan(tf_dir, planfile, env=apply_env())
         if proc.returncode != 0:
             apply_escalate(n, pr, f"fresh terraform plan failed:\n\n{proc.stdout + proc.stderr}")
             return

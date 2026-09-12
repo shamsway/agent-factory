@@ -733,6 +733,34 @@ class TfPlanCheckTest(unittest.TestCase):
     """Pure-function checks against a canned `terraform show -json` shape;
     no terraform binary needed."""
 
+    def test_run_plan_passes_env_to_both_subprocess_calls(self) -> None:
+        """apply_env()'s credentials (e.g. OP_SERVICE_ACCOUNT_TOKEN) were
+        computed but never actually passed to the plan subprocess -- run_plan
+        had no env parameter at all, always inheriting the calling process's
+        plain environment. Confirmed live: factory apply's fresh re-plan
+        401'd against 1Password's interactive desktop-app flow because of
+        this, even with apply_env() correctly populated. env=None (the
+        gate's own CLI use, which already has install.env baked into its
+        process by the dispatcher's systemd unit) must keep inheriting."""
+        from unittest import mock
+
+        from agent_factory import tf_plan_check
+
+        calls = []
+
+        def fake_run(cmd, cwd=None, capture_output=None, text=None, env=None):
+            calls.append(env)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            tf_plan_check.run_plan(Path("/tmp"), Path("/tmp/plan"), env={"FAKE": "1"})
+        self.assertEqual(calls, [{"FAKE": "1"}, {"FAKE": "1"}])
+
+        calls.clear()
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            tf_plan_check.run_plan(Path("/tmp"), Path("/tmp/plan"))
+        self.assertEqual(calls, [None, None])
+
     CLEAN_PLAN = {
         "resource_changes": [
             {"address": "aws_instance.foo", "change": {"actions": ["no-op"]}},
