@@ -9,6 +9,7 @@ COMMANDS = {
     "init": ("onboard", "init", "prepare this repository: .factory.toml, labels, issue template"),
     "doctor": ("onboard", "doctor", "check tools, auth, remotes, and the triage model"),
     "install": ("onboard", "install", "install the systemd user timer (and dashboard)"),
+    "verify-secrets": ("verify_secrets", "main", "check [install].env credentials are live and match installed units"),
     "triage": ("triage", "main", "label needs-triage issues with the local model"),
     "dispatch": ("dispatch", "main", "one pass: sync, merge stage, claim and work tickets"),
     "apply": ("apply", "main", "terraform apply for merged, apply-eligible tickets"),
