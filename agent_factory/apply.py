@@ -111,13 +111,15 @@ def apply_escalate(n: int, pr: int, reason: str) -> None:
     only comments + records an event rather than touching labels the way
     `dispatch.escalate` does for in-flight tickets."""
     dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason)
+    body = f"`factory apply` did not proceed: {reason}."
     dispatch.run(
         [
             "gh", "issue", "comment", str(n), "--repo", cfg.repo,
-            "--body", f"`factory apply` did not proceed: {reason}.",
+            "--body", body,
         ],
         check=False,
     )
+    dispatch.pr_comment(n, body)
     log(f"#{n}: apply escalated ({reason})")
 
 
@@ -163,14 +165,18 @@ def apply_one(ticket: dict, dry_run: bool) -> None:
         )
         output = (result.stdout + result.stderr)[-4000:]
         dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=result.returncode == 0, output=output)
+        summary = (
+            f"`terraform apply` {'succeeded' if result.returncode == 0 else 'FAILED'} "
+            f"for the merged change:\n\n```\n{output}\n```"
+        )
         dispatch.run(
             [
                 "gh", "issue", "comment", str(n), "--repo", cfg.repo,
-                "--body", f"`terraform apply` {'succeeded' if result.returncode == 0 else 'FAILED'} "
-                f"for the merged change:\n\n```\n{output}\n```",
+                "--body", summary,
             ],
             check=False,
         )
+        dispatch.pr_comment(n, summary)
         if result.returncode != 0:
             apply_escalate(n, pr, "terraform apply failed")
         else:
