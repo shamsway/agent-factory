@@ -163,8 +163,16 @@ Ticket `#11` failed during apply. Subsequent commits touching the target are blo
 
 **Recovery Procedure:**
 1. Check the failure summary on issue `#11` or PR.
-2. Open a fix PR addressing the issue and merge it via the normal human review workflow.
-3. The fix PR will be deployed following topological commit order.
+2. Acknowledge the failure to authorize repair deployment (or reconcile with status `acknowledged`):
+   ```sh
+   factory apply --target collectors --acknowledge-failure 11
+   ```
+   Or if reconciling an interrupted run that should not block repair PRs:
+   ```sh
+   factory apply --target collectors --reconcile-run deploy-collectors-c1a2b3c4-1 --reconcile-status acknowledged --reconcile-note "operator acknowledged failure, authorizing repair"
+   ```
+3. Open a fix PR addressing the issue and merge it via the normal human review workflow.
+4. The fix PR will be deployed following topological commit order.
 
 ### 3. Unauthorized Direct Merge Detected
 

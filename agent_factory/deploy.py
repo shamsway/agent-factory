@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
 import subprocess
 import time
@@ -31,6 +32,8 @@ class DeployStatus(str, Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     CANCELLED = "cancelled"
+    ACKNOWLEDGED = "acknowledged"
+    SUPERSEDED = "superseded"
 
 
 TERMINAL_STATUSES = frozenset(
@@ -39,6 +42,8 @@ TERMINAL_STATUSES = frozenset(
         DeployStatus.FAILED,
         DeployStatus.SKIPPED,
         DeployStatus.CANCELLED,
+        DeployStatus.ACKNOWLEDGED,
+        DeployStatus.SUPERSEDED,
     }
 )
 
@@ -103,11 +108,12 @@ class TargetState:
     runs: list[DeployRun] = field(default_factory=list)
     runs_by_commit: dict[str, list[DeployRun]] = field(default_factory=dict)
     runs_by_ticket: dict[int, list[DeployRun]] = field(default_factory=dict)
+    acknowledged_failures: set[str] = field(default_factory=set)
 
     @property
     def has_interrupted_run(self) -> bool:
-        """True if the latest run started but never reached a terminal state."""
-        return bool(self.latest_run and not self.latest_run.is_terminal())
+        """True if any run started but never reached a terminal state."""
+        return bool(self.interrupted_runs)
 
     @property
     def interrupted_runs(self) -> list[DeployRun]:
@@ -130,6 +136,17 @@ class TargetState:
         for ticket, runs in self.runs_by_ticket.items():
             if runs and runs[-1].status == DeployStatus.FAILED:
                 out.add(ticket)
+        return out
+
+    @property
+    def unacknowledged_failed_tickets(self) -> set[int]:
+        """Tickets whose latest run for this target ended in failure and has not been acknowledged or superseded."""
+        out = set()
+        for ticket, runs in self.runs_by_ticket.items():
+            if runs and runs[-1].status == DeployStatus.FAILED:
+                last_run = runs[-1]
+                if str(ticket) not in self.acknowledged_failures and last_run.run_id not in self.acknowledged_failures:
+                    out.add(ticket)
         return out
 
     @property
@@ -169,7 +186,16 @@ def parse_legacy_row(row: dict[str, Any]) -> DeployRun | None:
 
     pr = int(row["pr"]) if row.get("pr") is not None else None
     commit = str(row.get("commit", ""))
-    target = str(row.get("target", "default"))
+    target = row.get("target")
+    run_id_val = str(row.get("run_id") or "")
+    if not target:
+        if run_id_val:
+            m = re.match(r"(?:deploy|legacy)-([a-zA-Z0-9_.-]+)-[0-9a-fA-F]+-\d+", run_id_val)
+            if m:
+                target = m.group(1)
+        if not target:
+            target = "default"
+    target = str(target)
     at = str(row.get("at", ""))
     output = str(row.get("output", ""))
 
@@ -243,6 +269,16 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
             continue
 
         event = row.get("event")
+        if event in ("deploy_acknowledged", "deploy_superseded"):
+            tgt = str(row.get("target") or "default")
+            if tgt not in states:
+                states[tgt] = TargetState(target=tgt)
+            if "run_id" in row and row["run_id"]:
+                states[tgt].acknowledged_failures.add(str(row["run_id"]))
+            if "ticket" in row and row["ticket"] is not None:
+                states[tgt].acknowledged_failures.add(str(row["ticket"]))
+            continue
+
         run: DeployRun | None = None
         if event == "deploy_run":
             data = dict(row)
@@ -261,7 +297,6 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
         target = run.target or "default"
         if target not in states:
             states[target] = TargetState(target=target)
-        tstate = states[target]
 
         if run.run_id in runs_by_id:
             existing = runs_by_id[run.run_id]
@@ -270,15 +305,31 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
             existing.duration_sec = run.duration_sec or existing.duration_sec
             existing.output = run.output or existing.output
             existing.error = run.error if run.error is not None else existing.error
-        else:
-            runs_by_id[run.run_id] = run
-            tstate.runs.append(run)
-            tstate.runs_by_commit.setdefault(run.commit, []).append(run)
-            tstate.runs_by_ticket.setdefault(run.ticket, []).append(run)
+            # Ensure target state for existing.target reflects this run
+            orig_target = existing.target or "default"
+            if orig_target not in states:
+                states[orig_target] = TargetState(target=orig_target)
+            orig_state = states[orig_target]
+            if orig_state.runs and orig_state.runs[-1].run_id == existing.run_id:
+                orig_state.latest_run = existing
+            if existing.status == DeployStatus.SUCCEEDED and existing.commit:
+                orig_state.latest_succeeded_commit = existing.commit
+            if existing.status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
+                orig_state.acknowledged_failures.add(existing.run_id)
+                orig_state.acknowledged_failures.add(str(existing.ticket))
+            continue
 
+        runs_by_id[run.run_id] = run
+        tstate = states[target]
+        tstate.runs.append(run)
+        tstate.runs_by_commit.setdefault(run.commit, []).append(run)
+        tstate.runs_by_ticket.setdefault(run.ticket, []).append(run)
         tstate.latest_run = run
         if run.status == DeployStatus.SUCCEEDED and run.commit:
             tstate.latest_succeeded_commit = run.commit
+        if run.status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
+            tstate.acknowledged_failures.add(run.run_id)
+            tstate.acknowledged_failures.add(str(run.ticket))
 
     return states
 
@@ -406,33 +457,68 @@ def sort_candidates_topologically(
 
 def verify_revision_authorization(pr_data: dict, commit: str = "") -> tuple[bool, str]:
     """Verify that a candidate PR has explicit human review approval on the merged revision."""
-    if "reviewDecision" in pr_data and pr_data["reviewDecision"] != "APPROVED":
-        return False, f"reviewDecision is '{pr_data['reviewDecision']}', expected APPROVED"
+    review_decision = pr_data.get("reviewDecision")
+    if not review_decision:
+        return False, "missing reviewDecision in PR approval evidence"
+    if review_decision != "APPROVED":
+        return False, f"reviewDecision is '{review_decision}', expected APPROVED"
 
-    reviews = pr_data.get("latestReviews") or []
-    head_commit = pr_data.get("head_commit")
-    if reviews and head_commit:
-        approved = [r for r in reviews if r.get("state") == "APPROVED"]
-        if not approved:
-            return False, "no APPROVED reviews found in latestReviews"
-        matching = False
-        approved_commits = []
-        for r in approved:
-            rev_commit = (
-                r.get("commit", {}).get("oid", "")
-                if isinstance(r.get("commit"), dict)
-                else str(r.get("commit", ""))
-            )
-            if rev_commit:
-                approved_commits.append(rev_commit[:8])
-                if rev_commit.startswith(head_commit[:8]) or head_commit.startswith(rev_commit[:8]):
-                    matching = True
-                    break
-        if not matching:
-            return (
-                False,
-                f"approval is on revision {approved_commits}, but merged head is {head_commit[:8]} (stale review on unapproved revision)",
-            )
+    head_commit = pr_data.get("head_commit") or pr_data.get("headRefOid")
+    if not head_commit:
+        return False, "missing head commit in PR approval evidence"
+
+    raw_reviews = pr_data.get("latestReviews") or pr_data.get("reviews")
+    if not raw_reviews:
+        return False, "missing review details in PR approval evidence"
+
+    if isinstance(raw_reviews, dict) and "nodes" in raw_reviews:
+        reviews = raw_reviews["nodes"]
+    elif isinstance(raw_reviews, list):
+        reviews = raw_reviews
+    else:
+        return False, "invalid review details format in PR approval evidence"
+
+    if not reviews:
+        return False, "missing review details in PR approval evidence"
+
+    matching = False
+    approved_commits = []
+    has_trusted_human_approval = False
+
+    for r in reviews:
+        if not isinstance(r, dict):
+            continue
+        if r.get("state") != "APPROVED":
+            continue
+
+        # Verify author is a trusted human, not a bot
+        assoc = str(r.get("authorAssociation") or "")
+        author_dict = r.get("author") if isinstance(r.get("author"), dict) else {}
+        author_login = str(author_dict.get("login", "") if author_dict else r.get("author", ""))
+        if assoc == "BOT" or author_login.endswith("[bot]") or author_login.lower() == "github-actions":
+            continue
+
+        has_trusted_human_approval = True
+        rev_commit = (
+            r.get("commit", {}).get("oid", "")
+            if isinstance(r.get("commit"), dict)
+            else str(r.get("commit", ""))
+        )
+        if rev_commit:
+            approved_commits.append(rev_commit)
+            # Require exact full head SHA matching (no prefix match)
+            if rev_commit == head_commit:
+                matching = True
+                break
+
+    if not has_trusted_human_approval:
+        return False, "no trusted human APPROVED reviews found in review details"
+
+    if not matching:
+        return (
+            False,
+            f"approval is on revision {approved_commits}, but merged head is {head_commit} (stale review on unapproved revision)",
+        )
     return True, ""
 
 
@@ -475,6 +561,28 @@ def find_unauthorized_direct_merges(
     """Find commits on main touching target_dir that were not merged via an authorized PR."""
     ref = resolve_main_ref(root, main_branch)
     rev_range = f"{since_commit}..{ref}" if since_commit else ref
+
+    # Expand authorized commits to include all internal commits introduced by authorized merges
+    expanded_authorized = set(authorized_commits)
+    for auth in list(authorized_commits):
+        proc_parents = subprocess.run(
+            ["git", "log", "-1", "--format=%P", auth],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
+        if proc_parents.returncode == 0 and proc_parents.stdout.strip():
+            parents = proc_parents.stdout.strip().split()
+            if len(parents) >= 2:
+                # Mainline merge commit: parents[0] is mainline prior, parents[1] is PR head
+                proc_covered = subprocess.run(
+                    ["git", "rev-list", f"{parents[0]}..{auth}"],
+                    cwd=root, capture_output=True, text=True, check=False,
+                )
+                if proc_covered.returncode == 0:
+                    for cov in proc_covered.stdout.splitlines():
+                        c_cov = cov.strip()
+                        if c_cov:
+                            expanded_authorized.add(c_cov)
+
     proc = subprocess.run(
         ["git", "log", "--min-parents=1", "--format=%H", rev_range, "--", target_dir],
         cwd=root, capture_output=True, text=True, check=False,
@@ -488,7 +596,7 @@ def find_unauthorized_direct_merges(
         if not c:
             continue
         matched = False
-        for auth in authorized_commits:
+        for auth in expanded_authorized:
             if c.startswith(auth) or auth.startswith(c):
                 matched = True
                 break
@@ -497,13 +605,32 @@ def find_unauthorized_direct_merges(
     return unauthorized
 
 
+def get_shared_lock_dir() -> Path:
+    """Return a host-shared lock directory across repositories and checkouts."""
+    env_dir = os.environ.get("AGENT_FACTORY_LOCK_DIR")
+    if env_dir:
+        d = Path(env_dir)
+    else:
+        xdg_state = os.environ.get("XDG_STATE_HOME")
+        if xdg_state:
+            d = Path(xdg_state) / "agent-factory" / "locks"
+        else:
+            d = Path.home() / ".local" / "state" / "agent-factory" / "locks"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except OSError:
+        fallback = Path("/tmp/agent-factory-locks")
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 def acquire_backend_lock(factory_dir: Path, backend_key: str) -> tuple[bool, Any]:
-    """Acquire exclusive flock on backend_key so concurrent targets do not overlap."""
+    """Acquire exclusive flock on backend_key in a host-shared lock directory."""
     if not backend_key:
         return True, None
     safe_key = re.sub(r"[^a-zA-Z0-9_.-]", "_", backend_key)
-    locks_dir = factory_dir / "locks"
-    locks_dir.mkdir(parents=True, exist_ok=True)
+    locks_dir = get_shared_lock_dir()
     lock_file = locks_dir / f"backend-{safe_key}.lock"
     lock_fd = lock_file.open("w")
     try:
@@ -548,6 +675,9 @@ def select_candidates_for_target(
     baseline: str | None = None,
     events_path: Path | None = None,
     touches_fn: Any = None,
+    supersession: str = "sequential",
+    repo: str = "",
+    fetch_evidence_fn: Any = None,
 ) -> tuple[list[dict], list[str]]:
     """Select, filter, and order deployment candidates for a target.
 
@@ -562,7 +692,9 @@ def select_candidates_for_target(
       (ordered_candidates, unauthorized_direct_merges)
     """
     tstate = get_target_state(target=target_name, events_path=events_path)
-    if tstate.has_interrupted_run or tstate.failed_tickets:
+    if tstate.has_interrupted_run:
+        return [], []
+    if supersession == "sequential" and tstate.unacknowledged_failed_tickets:
         return [], []
 
     check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root))
@@ -608,9 +740,23 @@ def select_candidates_for_target(
     if unauthorized:
         return [], unauthorized
 
-    # Verify revision-bound authorization
+    # Verify revision-bound authorization (enrich evidence if missing)
     for c in candidates:
-        ok, reason = verify_revision_authorization(c, c["commit"])
+        if not c.get("reviewDecision") or not c.get("latestReviews") or not (c.get("head_commit") or c.get("headRefOid")):
+            if fetch_evidence_fn is not None:
+                evidence = fetch_evidence_fn(c["pr"])
+            else:
+                from agent_factory import apply
+                evidence = apply.fetch_pr_review_evidence(c["pr"], repo=repo)
+            if evidence:
+                if evidence.get("reviewDecision"):
+                    c["reviewDecision"] = evidence["reviewDecision"]
+                if evidence.get("headRefOid") and not c.get("head_commit"):
+                    c["head_commit"] = evidence["headRefOid"]
+                if evidence.get("latestReviews"):
+                    c["latestReviews"] = evidence["latestReviews"]
+
+        ok, reason = verify_revision_authorization(c, c.get("commit", ""))
         if not ok:
             c["unauthorized_reason"] = reason
 
@@ -676,6 +822,15 @@ class DeployAdapter:
         return False, f"interrupted run {interrupted_run.run_id} requires operator reconciliation"
 
 
+def _safe_decode_stream(stream: Any) -> str:
+    """Safely decode bytes or string stream into a string without TypeError."""
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return str(stream)
+
+
 class TerraformDeployAdapter(DeployAdapter):
     """Deploy adapter for Terraform roots with bounded subprocess execution."""
 
@@ -737,7 +892,9 @@ class TerraformDeployAdapter(DeployAdapter):
                 timeout=self.timeout_sec,
             )
             duration = round(time.monotonic() - t0, 3)
-            output = (result.stdout + result.stderr)[-4000:]
+            out_str = _safe_decode_stream(result.stdout)
+            err_str = _safe_decode_stream(result.stderr)
+            output = (out_str + err_str)[-4000:]
             ok = result.returncode == 0
             return DeployExecutionResult(
                 ok=ok,
@@ -747,8 +904,10 @@ class TerraformDeployAdapter(DeployAdapter):
             )
         except subprocess.TimeoutExpired as exc:
             duration = round(time.monotonic() - t0, 3)
-            out_str = (getattr(exc, "output", None) or getattr(exc, "stdout", None) or "")
-            err_str = exc.stderr or ""
+            raw_out = getattr(exc, "output", None) or getattr(exc, "stdout", None) or ""
+            raw_err = getattr(exc, "stderr", None) or ""
+            out_str = _safe_decode_stream(raw_out)
+            err_str = _safe_decode_stream(raw_err)
             out = (out_str + err_str)[-4000:]
             return DeployExecutionResult(
                 ok=False,
@@ -895,7 +1054,63 @@ def reconcile_interrupted_run(
             status=status.value,
             note=note,
         )
+        if status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
+            dispatch.record(
+                "deploy_acknowledged",
+                run_id=run_id,
+                target=target,
+                ticket=run.ticket,
+                note=note,
+            )
+    else:
+        rec_entry = {
+            "event": "deploy_reconciled",
+            "at": now,
+            "run_id": run_id,
+            "target": target,
+            "status": status.value,
+            "note": note,
+        }
+        with events_path.open("a") as f:
+            f.write(json.dumps(rec_entry) + "\n")
+        if status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
+            ack_entry = {
+                "event": "deploy_acknowledged",
+                "at": now,
+                "run_id": run_id,
+                "target": target,
+                "ticket": run.ticket,
+                "note": note,
+            }
+            with events_path.open("a") as f:
+                f.write(json.dumps(ack_entry) + "\n")
     return reconciled_run
+
+
+def acknowledge_failure(
+    target: str,
+    ticket_or_run_id: int | str,
+    note: str = "failure acknowledged for repair",
+    events_path: Path | None = None,
+) -> None:
+    """Record explicit operator acknowledgment of a failed run or ticket, authorizing repairs."""
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    entry: dict[str, Any] = {
+        "event": "deploy_acknowledged",
+        "at": now,
+        "target": target,
+        "note": note,
+    }
+    if isinstance(ticket_or_run_id, int) or str(ticket_or_run_id).isdigit():
+        entry["ticket"] = int(ticket_or_run_id)
+    else:
+        entry["run_id"] = str(ticket_or_run_id)
+
+    if events_path is None:
+        from agent_factory import dispatch
+        events_path = dispatch.EVENTS
+    with events_path.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 ADAPTERS: dict[str, type[DeployAdapter]] = {

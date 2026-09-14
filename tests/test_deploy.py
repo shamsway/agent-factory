@@ -5,6 +5,7 @@ run persistence, and legacy event replay (SHA-186).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -448,13 +449,15 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
             git(repo, "commit", "-q", "-m", "unauthorized direct commit")
             direct_sha = git(repo, "rev-parse", "HEAD")
 
-            # Mock PR list with an authorized PR that is NOT the direct commit
             approved_pr = {
                 "pr": 20,
                 "ticket": 30,
                 "commit": "other_commit_123",
                 "head_commit": "other_commit_123",
                 "reviewDecision": "APPROVED",
+                "latestReviews": [
+                    {"state": "APPROVED", "commit": {"oid": "other_commit_123"}}
+                ],
             }
 
             with mock.patch.object(config, "load", return_value=cfg), \
@@ -566,8 +569,14 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
             c_b = git(repo, "rev-parse", "HEAD")
 
             # Feed PR list in REVERSE order: B before A
-            pr_b = {"pr": 2, "ticket": 12, "commit": c_b, "head_commit": c_b, "reviewDecision": "APPROVED"}
-            pr_a = {"pr": 1, "ticket": 11, "commit": c_a, "head_commit": c_a, "reviewDecision": "APPROVED"}
+            pr_b = {
+                "pr": 2, "ticket": 12, "commit": c_b, "head_commit": c_b, "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": c_b}}],
+            }
+            pr_a = {
+                "pr": 1, "ticket": 11, "commit": c_a, "head_commit": c_a, "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": c_a}}],
+            }
             all_prs = [pr_b, pr_a]
 
             candidates, unauth = deploy.select_candidates_for_target(
@@ -797,6 +806,7 @@ adapter = "terraform"
                 "commit": "commit61",
                 "head_commit": "commit61",
                 "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": "commit61"}}],
             }
             with mock.patch.object(config, "load", return_value=cfg), \
                  mock.patch.object(dispatch, "run"), \
@@ -872,6 +882,7 @@ adapter = "terraform"
                 "commit": "commit70",
                 "head_commit": "commit70",
                 "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": "commit70"}}],
             }
             with mock.patch.object(config, "load", return_value=cfg), \
                  mock.patch.object(dispatch, "run"), \
@@ -927,6 +938,7 @@ adapter = "terraform"
                 "commit": "c90",
                 "head_commit": "c90",
                 "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": "c90"}}],
             }
             with mock.patch.object(config, "load", return_value=cfg), \
                  mock.patch.object(dispatch, "run"), \
@@ -942,6 +954,375 @@ adapter = "terraform"
                  mock.patch.object(apply, "touches_apply_dir", return_value=True), \
                  mock.patch.object(apply, "apply_one", return_value=True):
                 self.assertEqual(apply.main(["--dry-run"]), 0)
+
+
+class ReviewDefectsRegressionTest(unittest.TestCase):
+    """Targeted regression tests for 8 defects identified in delivery phase 1 review."""
+
+    def test_defect_1_missing_approval_evidence_blocks_execution(self) -> None:
+        """[P1] Authorization requires complete review evidence, trusted human review, and exact head SHA."""
+        # 1. Missing reviewDecision
+        pr_missing_decision = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_1234567890",
+            "latestReviews": [{"state": "APPROVED", "commit": {"oid": "sha_1234567890"}}],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_missing_decision)
+        self.assertFalse(ok)
+        self.assertIn("missing reviewDecision", reason)
+
+        # 2. Missing latestReviews
+        pr_missing_reviews = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_1234567890",
+            "reviewDecision": "APPROVED",
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_missing_reviews)
+        self.assertFalse(ok)
+        self.assertIn("missing review details", reason)
+
+        # 3. Bot approval only
+        pr_bot_review = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_1234567890",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {"state": "APPROVED", "authorAssociation": "BOT", "commit": {"oid": "sha_1234567890"}}
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_bot_review)
+        self.assertFalse(ok)
+        self.assertIn("no trusted human APPROVED reviews found", reason)
+
+        # 4. Prefix match (different full head SHA) must be rejected
+        pr_prefix_mismatch = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_prefix_11111111",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {"state": "APPROVED", "commit": {"oid": "sha_prefix_22222222"}}
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_prefix_mismatch)
+        self.assertFalse(ok)
+        self.assertIn("stale review on unapproved revision", reason)
+
+        # 5. Trusted human approval on exact full head SHA succeeds
+        pr_valid = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_exact_full_head_1234567890",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {"state": "APPROVED", "authorAssociation": "MEMBER", "commit": {"oid": "sha_exact_full_head_1234567890"}}
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_valid)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_defect_2_named_target_events_do_not_mask_default_interrupted_runs(self) -> None:
+        """[P1] Compatibility events with custom targets do not overwrite default.latest_run or mask interrupted runs."""
+        with tempfile.TemporaryDirectory() as d:
+            events_file = Path(d) / "events.jsonl"
+            # 1. Default target has an interrupted RUNNING run
+            default_running = deploy.DeployRun(
+                run_id="deploy-default-11111111-1",
+                target="default",
+                commit="11111111",
+                ticket=1,
+                attempt=1,
+                status=deploy.DeployStatus.RUNNING,
+                started_at="2026-09-14T00:00:00Z",
+            )
+            deploy.record_deploy_run(default_running, events_path=events_file)
+
+            # 2. Custom target 'collectors' succeeds and emits modern run + legacy applied row without target
+            collectors_run = deploy.DeployRun(
+                run_id="deploy-collectors-22222222-1",
+                target="collectors",
+                commit="22222222",
+                ticket=2,
+                attempt=1,
+                status=deploy.DeployStatus.SUCCEEDED,
+                started_at="2026-09-14T00:05:00Z",
+            )
+            deploy.record_deploy_run(collectors_run, events_path=events_file)
+
+            # Compatibility row reusing collectors run_id but omitting target
+            legacy_entry = {
+                "event": "applied",
+                "ticket": 2,
+                "commit": "22222222",
+                "ok": True,
+                "run_id": "deploy-collectors-22222222-1",
+            }
+            with events_file.open("a") as f:
+                f.write(json.dumps(legacy_entry) + "\n")
+
+            states = deploy.replay_events(events_file)
+            # Default target MUST still have interrupted run detected
+            self.assertTrue(states["default"].has_interrupted_run)
+            self.assertEqual(len(states["default"].interrupted_runs), 1)
+            self.assertEqual(states["default"].interrupted_runs[0].run_id, "deploy-default-11111111-1")
+            # Collectors target latest run is preserved
+            self.assertEqual(states["collectors"].latest_run.status, deploy.DeployStatus.SUCCEEDED)
+
+    def test_defect_3_failed_run_recovery_unblocks_repair_prs(self) -> None:
+        """[P1] Acknowledged failures unblock sequential candidate selection for repair PRs while preserving audit history."""
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            events_file = Path(d) / "events.jsonl"
+
+            # Ticket 11 failed
+            failed_run = deploy.DeployRun(
+                run_id="deploy-default-c11-1",
+                target="default",
+                commit="c11",
+                ticket=11,
+                attempt=1,
+                status=deploy.DeployStatus.FAILED,
+                started_at="2026-09-14T01:00:00Z",
+            )
+            deploy.record_deploy_run(failed_run, events_path=events_file)
+
+            tstate = deploy.get_target_state("default", events_path=events_file)
+            self.assertIn(11, tstate.failed_tickets)
+            self.assertIn(11, tstate.unacknowledged_failed_tickets)
+
+            repair_pr = {
+                "pr": 2, "ticket": 12, "commit": "c12", "head_commit": "c12",
+                "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": "c12"}}],
+            }
+
+            # Under sequential supersession, unacknowledged failure blocks selection
+            cands, _ = deploy.select_candidates_for_target(
+                "default", "terraform", [repair_pr], repo,
+                events_path=events_file, touches_fn=lambda c: True, supersession="sequential",
+            )
+            self.assertEqual(cands, [])
+
+            # Under supersession = "none", selection does not block
+            cands_none, _ = deploy.select_candidates_for_target(
+                "default", "terraform", [repair_pr], repo,
+                events_path=events_file, touches_fn=lambda c: True, supersession="none",
+            )
+            self.assertEqual(len(cands_none), 1)
+
+            # Explicitly acknowledge failure to authorize repair
+            deploy.acknowledge_failure("default", 11, note="acknowledged to authorize fix PR 12", events_path=events_file)
+            tstate_ack = deploy.get_target_state("default", events_path=events_file)
+            # Failure is preserved in history
+            self.assertIn(11, tstate_ack.failed_tickets)
+            # But no longer in unacknowledged failed tickets
+            self.assertNotIn(11, tstate_ack.unacknowledged_failed_tickets)
+
+            # Repair PR is now selected under sequential mode
+            cands_ack, _ = deploy.select_candidates_for_target(
+                "default", "terraform", [repair_pr], repo,
+                events_path=events_file, touches_fn=lambda c: True, supersession="sequential",
+            )
+            self.assertEqual(len(cands_ack), 1)
+            self.assertEqual(cands_ack[0]["ticket"], 12)
+
+    def test_defect_4_dry_run_is_strictly_side_effect_free(self) -> None:
+        """[P1] Dry-run never records events, never posts comments, even on skipped, unauthorized, or prepare failure paths."""
+        from unittest import mock
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            toml = '[apply]\nenabled = true\ndir = "terraform"\n'
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+            events_file = cfg.factory / "events.jsonl"
+
+            # Candidate that doesn't touch target
+            pr_skip = {
+                "pr": 1, "ticket": 10, "commit": "c10", "head_commit": "c10",
+                "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": "c10"}}],
+            }
+            # Candidate that fails adapter check/prepare
+            pr_fail = {
+                "pr": 2, "ticket": 11, "commit": "c11", "head_commit": "c11",
+                "reviewDecision": "APPROVED",
+                "latestReviews": [{"state": "APPROVED", "commit": {"oid": "c11"}}],
+            }
+
+            fake_adapter = mock.Mock()
+            fake_adapter.prepare.return_value = (False, "prepare failed in dry-run test")
+            fake_adapter.cleanup = mock.Mock()
+
+            pr_comment_mock = mock.Mock()
+            run_mock = mock.Mock()
+
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run", run_mock), \
+                 mock.patch.object(dispatch, "pr_comment", pr_comment_mock), \
+                 mock.patch.object(apply, "fetch_all_merged_prs", return_value=[pr_skip, pr_fail]), \
+                 mock.patch.object(apply, "touches_apply_dir", side_effect=lambda c: c == "c11"), \
+                 mock.patch.object(deploy, "get_adapter", return_value=fake_adapter):
+                apply.main(["--dry-run"])
+
+            # 1. Zero events written to events.jsonl
+            if events_file.exists():
+                self.assertEqual(events_file.read_text().strip(), "")
+
+            # 2. Zero issue or PR comments posted
+            pr_comment_mock.assert_not_called()
+            for call in run_mock.call_args_list:
+                args = call[0][0]
+                self.assertNotIn("comment", args)
+
+    def test_defect_5_pagination_stops_at_raw_boundary_not_matching_count(self) -> None:
+        """[P2] Pagination stops only when raw results are exhausted, not based on factory branch matches."""
+        from unittest import mock
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            cfg = config.load(repo)
+            apply.configure(cfg)
+
+            # GraphQL responses:
+            # Page 1: 2 PRs, none are agent/* (non-factory PRs), hasNextPage=True
+            page1_response = {
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "pageInfo": {"hasNextPage": True, "endCursor": "cursor_page1"},
+                            "nodes": [
+                                {"number": 101, "headRefName": "dependabot/foo", "mergeCommit": {"oid": "m1"}},
+                                {"number": 102, "headRefName": "feature/bar", "mergeCommit": {"oid": "m2"}},
+                            ],
+                        }
+                    }
+                }
+            }
+            # Page 2: 1 PR matching agent/55, hasNextPage=False
+            page2_response = {
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "pageInfo": {"hasNextPage": False, "endCursor": "cursor_page2"},
+                            "nodes": [
+                                {
+                                    "number": 103,
+                                    "headRefName": "agent/55",
+                                    "headRefOid": "head55",
+                                    "mergeCommit": {"oid": "m55"},
+                                    "reviewDecision": "APPROVED",
+                                    "latestReviews": [{"state": "APPROVED", "commit": {"oid": "head55"}}],
+                                }
+                            ],
+                        }
+                    }
+                }
+            }
+
+            responses = [page1_response, page2_response]
+            with mock.patch.object(dispatch, "gh_json", side_effect=responses):
+                prs = apply.fetch_all_merged_prs(page_size=2, max_pages=5)
+
+            # Page 2 PR must be discovered despite page 1 having 0 matching factory PRs
+            self.assertEqual(len(prs), 1)
+            self.assertEqual(prs[0]["pr"], 103)
+            self.assertEqual(prs[0]["ticket"], 55)
+
+    def test_defect_6_approved_multi_commit_merges_not_flagged_unauthorized(self) -> None:
+        """[P2] Multi-commit approved mainline merges cover their entire internal branch history."""
+        from tests.test_factory import git
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            (repo / "terraform").mkdir(exist_ok=True)
+            (repo / "terraform" / "main.tf").write_text("v1")
+            git(repo, "add", "terraform/main.tf")
+            git(repo, "commit", "-q", "-m", "init")
+            init_commit = git(repo, "rev-parse", "HEAD")
+
+            # Create branch agent/20 with 2 commits
+            git(repo, "checkout", "-b", "agent/20")
+            (repo / "terraform" / "main.tf").write_text("v2")
+            git(repo, "commit", "-q", "-am", "commit 1 of PR")
+            c1 = git(repo, "rev-parse", "HEAD")
+
+            (repo / "terraform" / "main.tf").write_text("v3")
+            git(repo, "commit", "-q", "-am", "commit 2 of PR")
+            c2 = git(repo, "rev-parse", "HEAD")
+
+            # Merge to main with --no-ff
+            git(repo, "checkout", "main")
+            git(repo, "merge", "--no-ff", "agent/20", "-m", "Merge PR #20")
+            merge_commit = git(repo, "rev-parse", "HEAD")
+
+            # Allowlist only has merge commit and head commit (c2)
+            authorized = {merge_commit, c2}
+
+            # Internal commit c1 must NOT be flagged as unauthorized
+            unauth = deploy.find_unauthorized_direct_merges("terraform", authorized, repo, since_commit=init_commit)
+            self.assertEqual(unauth, [])
+
+            # A real direct push to main without a PR MUST be detected
+            (repo / "terraform" / "main.tf").write_text("v4 direct push")
+            git(repo, "commit", "-q", "-am", "direct commit on main")
+            direct_sha = git(repo, "rev-parse", "HEAD")
+
+            unauth_direct = deploy.find_unauthorized_direct_merges("terraform", authorized, repo, since_commit=init_commit)
+            self.assertIn(direct_sha, unauth_direct)
+
+    def test_defect_7_backend_locks_serialize_across_distinct_checkouts(self) -> None:
+        """[P2] Backend locks serialize across two independent checkouts using a host-shared lock namespace."""
+        with tempfile.TemporaryDirectory() as d:
+            shared_lock_dir = Path(d) / "shared_locks"
+            checkout_a = Path(d) / "checkout_a" / ".factory"
+            checkout_b = Path(d) / "checkout_b" / ".factory"
+            checkout_a.mkdir(parents=True)
+            checkout_b.mkdir(parents=True)
+
+            with mock.patch.dict(os.environ, {"AGENT_FACTORY_LOCK_DIR": str(shared_lock_dir)}):
+                # Checkout A acquires backend lock
+                ok_a, fd_a = deploy.acquire_backend_lock(checkout_a, "shared_backend_key")
+                self.assertTrue(ok_a)
+                self.assertIsNotNone(fd_a)
+
+                # Checkout B attempting to acquire the SAME backend lock must fail
+                ok_b, fd_b = deploy.acquire_backend_lock(checkout_b, "shared_backend_key")
+                self.assertFalse(ok_b)
+                self.assertIsNone(fd_b)
+
+                # After Checkout A releases, Checkout B succeeds
+                deploy.release_lock(fd_a)
+                ok_b2, fd_b2 = deploy.acquire_backend_lock(checkout_b, "shared_backend_key")
+                self.assertTrue(ok_b2)
+                deploy.release_lock(fd_b2)
+
+    def test_defect_8_timeout_expired_bytes_streams_decoded_safely(self) -> None:
+        """[P2] TimeoutExpired with bytes output/stderr is safely decoded without raising TypeError."""
+        from unittest import mock
+
+        adapter = deploy.TerraformDeployAdapter(timeout_sec=1)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = deploy.DeployContext(
+                target=config.DeployTarget(name="default", dir="."),
+                ticket={"ticket": 99, "pr": 44, "commit": "c99"},
+                root=Path(d),
+                factory_dir=Path(d) / ".factory",
+                worktree=Path(d),
+                planfile=Path(d) / "plan",
+            )
+            ctx.planfile.touch()
+
+            def fake_timeout_bytes(*args, **kwargs):
+                exc = subprocess.TimeoutExpired(cmd=["terraform", "apply"], timeout=1)
+                exc.output = b"partial bytes stdout..."
+                exc.stderr = b"partial bytes stderr..."
+                raise exc
+
+            with mock.patch("subprocess.run", side_effect=fake_timeout_bytes):
+                res = adapter.execute(ctx, dry_run=False)
+                self.assertFalse(res.ok)
+                self.assertIn("timed out after 1s", res.error)
+                self.assertIn("partial bytes stdout", res.output)
+                self.assertIn("partial bytes stderr", res.output)
 
 
 if __name__ == "__main__":
