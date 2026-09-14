@@ -1495,9 +1495,23 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
                 version=deploy.CONTRACT_VERSION,
             )
             deploy.record_deploy_run(running_run, events_path=events_file)
+
+            # Create a FAILED run
+            failed_run = deploy.DeployRun(
+                run_id="deploy-default-c3333333-1",
+                target="default",
+                commit="c3333333",
+                ticket=52,
+                attempt=1,
+                status=deploy.DeployStatus.FAILED,
+                started_at="2026-09-14T00:00:00Z",
+                completed_at="2026-09-14T00:01:00Z",
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(failed_run, events_path=events_file)
             size_before = events_file.stat().st_size
 
-            # Dry-run reconciliation
+            # Dry-run reconciliation on RUNNING run
             with mock.patch.object(config, "load", return_value=cfg):
                 ret = apply.main([
                     "--dry-run",
@@ -1507,13 +1521,31 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
                 self.assertEqual(ret, 0)
                 self.assertEqual(events_file.stat().st_size, size_before)
 
-            # Dry-run acknowledge failure
+            # Dry-run acknowledge failure on FAILED run
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main([
+                    "--dry-run",
+                    "--acknowledge-failure", "52",
+                ])
+                self.assertEqual(ret, 0)
+                self.assertEqual(events_file.stat().st_size, size_before)
+
+            # Dry-run acknowledge failure on RUNNING run fails validation
             with mock.patch.object(config, "load", return_value=cfg):
                 ret = apply.main([
                     "--dry-run",
                     "--acknowledge-failure", "51",
                 ])
-                self.assertEqual(ret, 0)
+                self.assertEqual(ret, 1)
+                self.assertEqual(events_file.stat().st_size, size_before)
+
+            # Dry-run acknowledge failure on nonexistent ticket fails validation
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main([
+                    "--dry-run",
+                    "--acknowledge-failure", "999",
+                ])
+                self.assertEqual(ret, 1)
                 self.assertEqual(events_file.stat().st_size, size_before)
 
             # Dry-run with nonexistent run fails validation
@@ -1524,6 +1556,73 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
                 ])
                 self.assertEqual(ret, 1)
                 self.assertEqual(events_file.stat().st_size, size_before)
+
+    def test_followup_5_cannot_preauthorize_future_failures(self) -> None:
+        """[P2] Acknowledgment cannot pre-authorize future failures for nonexistent or unfailed tickets."""
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[apply]\nenabled = true\n')
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+            events_file = cfg.factory / "events.jsonl"
+
+            # 1. Attempting to acknowledge nonexistent ticket 999 fails
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main(["--acknowledge-failure", "999"])
+                self.assertEqual(ret, 1)
+
+            # Zero events recorded
+            tstate = deploy.get_target_state("default", events_path=events_file)
+            self.assertEqual(len(tstate.acknowledged_failures), 0)
+
+            # 2. Ticket 999 later runs and fails
+            run_1 = deploy.DeployRun(
+                run_id="deploy-default-c999a-1",
+                target="default",
+                commit="c999a",
+                ticket=999,
+                attempt=1,
+                status=deploy.DeployStatus.FAILED,
+                started_at="2026-09-14T01:00:00Z",
+                completed_at="2026-09-14T01:01:00Z",
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(run_1, events_path=events_file)
+
+            # Ticket 999 MUST be in unacknowledged_failed_tickets (it was not pre-authorized!)
+            tstate = deploy.get_target_state("default", events_path=events_file)
+            self.assertIn(999, tstate.unacknowledged_failed_tickets)
+
+            # 3. Now acknowledge ticket 999 (or run_1.run_id)
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main(["--acknowledge-failure", "999"])
+                self.assertEqual(ret, 0)
+
+            # It is now acknowledged and bound to deploy-default-c999a-1
+            tstate_ack = deploy.get_target_state("default", events_path=events_file)
+            self.assertNotIn(999, tstate_ack.unacknowledged_failed_tickets)
+            self.assertIn("deploy-default-c999a-1", tstate_ack.acknowledged_failures)
+
+            # 4. Ticket 999 later runs again (attempt 2) and fails again
+            run_2 = deploy.DeployRun(
+                run_id="deploy-default-c999b-2",
+                target="default",
+                commit="c999b",
+                ticket=999,
+                attempt=2,
+                status=deploy.DeployStatus.FAILED,
+                started_at="2026-09-14T02:00:00Z",
+                completed_at="2026-09-14T02:01:00Z",
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(run_2, events_path=events_file)
+
+            # Ticket 999 MUST be in unacknowledged_failed_tickets! Acknowledging attempt 1 does not pre-authorize attempt 2
+            tstate_new = deploy.get_target_state("default", events_path=events_file)
+            self.assertIn(999, tstate_new.unacknowledged_failed_tickets)
 
     def test_followup_4_failed_execution_does_not_create_synthetic_duplicate_attempt(self) -> None:
         """[P2] Failed adapter execution attaches escalation to the existing run without creating attempt N+1."""

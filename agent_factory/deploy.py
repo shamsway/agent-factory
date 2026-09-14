@@ -145,7 +145,7 @@ class TargetState:
         for ticket, runs in self.runs_by_ticket.items():
             if runs and runs[-1].status == DeployStatus.FAILED:
                 last_run = runs[-1]
-                if str(ticket) not in self.acknowledged_failures and last_run.run_id not in self.acknowledged_failures:
+                if last_run.run_id not in self.acknowledged_failures:
                     out.add(ticket)
         return out
 
@@ -275,8 +275,12 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
                 states[tgt] = TargetState(target=tgt)
             if "run_id" in row and row["run_id"]:
                 states[tgt].acknowledged_failures.add(str(row["run_id"]))
-            if "ticket" in row and row["ticket"] is not None:
-                states[tgt].acknowledged_failures.add(str(row["ticket"]))
+            elif "ticket" in row and row["ticket"] is not None:
+                # Legacy event without run_id: bind only to the latest failed run that preceded this event
+                t_val = int(row["ticket"])
+                runs = states[tgt].runs_by_ticket.get(t_val)
+                if runs and runs[-1].status == DeployStatus.FAILED:
+                    states[tgt].acknowledged_failures.add(runs[-1].run_id)
             continue
 
         run: DeployRun | None = None
@@ -316,7 +320,6 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
                 orig_state.latest_succeeded_commit = existing.commit
             if existing.status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
                 orig_state.acknowledged_failures.add(existing.run_id)
-                orig_state.acknowledged_failures.add(str(existing.ticket))
             continue
 
         runs_by_id[run.run_id] = run
@@ -329,7 +332,6 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
             tstate.latest_succeeded_commit = run.commit
         if run.status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
             tstate.acknowledged_failures.add(run.run_id)
-            tstate.acknowledged_failures.add(str(run.ticket))
 
     return states
 
@@ -1125,30 +1127,64 @@ def reconcile_interrupted_run(
     return reconciled_run
 
 
+def resolve_failed_run(
+    target: str,
+    ticket_or_run_id: int | str,
+    events_path: Path | None = None,
+) -> DeployRun | None:
+    """Resolve an existing failed run on target matching a run_id or ticket number."""
+    tstate = get_target_state(target=target, events_path=events_path)
+    ref = str(ticket_or_run_id).strip()
+
+    # Match exact run_id first
+    matching_runs = [r for r in tstate.runs if r.run_id == ref]
+    if matching_runs:
+        run = matching_runs[-1]
+        if run.status == DeployStatus.FAILED:
+            return run
+        return None
+
+    # Match ticket number
+    if isinstance(ticket_or_run_id, int) or ref.isdigit():
+        ticket_num = int(ticket_or_run_id)
+        runs = tstate.runs_by_ticket.get(ticket_num)
+        if runs:
+            run = runs[-1]
+            if run.status == DeployStatus.FAILED:
+                return run
+            return None
+
+    return None
+
+
 def acknowledge_failure(
     target: str,
     ticket_or_run_id: int | str,
     note: str = "failure acknowledged for repair",
     events_path: Path | None = None,
-) -> None:
-    """Record explicit operator acknowledgment of a failed run or ticket, authorizing repairs."""
+) -> DeployRun | None:
+    """Record explicit operator acknowledgment of an existing failed run, authorizing repairs."""
+    failed_run = resolve_failed_run(target, ticket_or_run_id, events_path=events_path)
+    if not failed_run:
+        return None
+
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     entry: dict[str, Any] = {
         "event": "deploy_acknowledged",
         "at": now,
         "target": target,
+        "run_id": failed_run.run_id,
+        "ticket": failed_run.ticket,
         "note": note,
     }
-    if isinstance(ticket_or_run_id, int) or str(ticket_or_run_id).isdigit():
-        entry["ticket"] = int(ticket_or_run_id)
-    else:
-        entry["run_id"] = str(ticket_or_run_id)
 
     if events_path is None:
         from agent_factory import dispatch
         events_path = dispatch.EVENTS
+    events_path.parent.mkdir(parents=True, exist_ok=True)
     with events_path.open("a") as f:
         f.write(json.dumps(entry) + "\n")
+    return failed_run
 
 
 ADAPTERS: dict[str, type[DeployAdapter]] = {

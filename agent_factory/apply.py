@@ -461,7 +461,15 @@ def main(argv: list[str]) -> int:
     if args.acknowledge_failure:
         target_name = args.target or "default"
         if args.dry_run:
-            log(f"would acknowledge failure for `{args.acknowledge_failure}` on target `{target_name}`")
+            failed_run = deploy.resolve_failed_run(
+                target=target_name,
+                ticket_or_run_id=args.acknowledge_failure,
+                events_path=dispatch.EVENTS,
+            )
+            if not failed_run:
+                log(f"error: no failed run found on target `{target_name}` matching `{args.acknowledge_failure}`")
+                return 1
+            log(f"would acknowledge failure for `{failed_run.run_id}` (ticket #{failed_run.ticket}) on target `{target_name}`")
             return 0
 
         a_ok, a_fd = deploy.acquire_apply_lock(cfg.factory)
@@ -476,13 +484,16 @@ def main(argv: list[str]) -> int:
             return 1
 
         try:
-            deploy.acknowledge_failure(
+            ack_run = deploy.acknowledge_failure(
                 target=target_name,
                 ticket_or_run_id=args.acknowledge_failure,
                 note=args.reconcile_note,
                 events_path=dispatch.EVENTS,
             )
-            log(f"acknowledged failure for `{args.acknowledge_failure}` on target `{target_name}`")
+            if not ack_run:
+                log(f"error: no failed run found on target `{target_name}` matching `{args.acknowledge_failure}`")
+                return 1
+            log(f"acknowledged failure for `{ack_run.run_id}` (ticket #{ack_run.ticket}) on target `{target_name}`")
             return 0
         finally:
             deploy.release_lock(t_fd)
