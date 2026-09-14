@@ -5,11 +5,14 @@ run persistence, and legacy event replay (SHA-186).
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent_factory import config, deploy
+from unittest import mock
+
+from agent_factory import apply, config, deploy, dispatch
 from tests.test_factory import make_repo
 
 
@@ -666,5 +669,281 @@ backend_key = "shared_homelab"
             deploy.release_lock(b_fd)
 
 
+class DeployAdapterAndRecoveryTest(unittest.TestCase):
+    """Regression and contract tests for SHA-188:
+    - DeployAdapter prepare/check/execute/verify lifecycle hooks
+    - Fake second adapter proving pluggability without external platform
+    - Interrupted run recovery and reconciliation requirement
+    - Durable persistence prior to notification failure preventing re-execution
+    - Bounded subprocess execution with truthful exit codes and dry-run behavior
+    """
+
+    def test_fake_adapter_lifecycle_hooks_and_pluggability(self) -> None:
+        """Fake adapter executes all hooks in sequence and writes versioned runs."""
+        with tempfile.TemporaryDirectory() as d:
+            toml = """
+[apply]
+enabled = true
+
+[apply.targets.custom]
+dir = "services/app"
+adapter = "fake"
+"""
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+
+            fake_adapter = deploy.FakeDeployAdapter(name="fake", output="custom service deployed successfully")
+            deploy.register_adapter("fake", lambda: fake_adapter)
+
+            ticket = {"ticket": 50, "pr": 15, "commit": "commit50"}
+
+            with mock.patch.object(apply, "touches_target_dir", return_value=True), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(dispatch, "pr_comment"):
+                success = apply.apply_one(ticket, dry_run=False, target="custom", adapter=fake_adapter)
+                self.assertTrue(success)
+
+            # Assert all lifecycle hooks were called in order
+            self.assertEqual(fake_adapter.calls, ["prepare", "check", "execute", "verify", "cleanup"])
+
+            # Verify durable state
+            state = deploy.get_target_state("custom", events_path=cfg.factory / "events.jsonl")
+            self.assertEqual(len(state.runs), 1)
+            run = state.latest_run
+            self.assertIsNotNone(run)
+            self.assertEqual(run.status, deploy.DeployStatus.SUCCEEDED)
+            self.assertEqual(run.ticket, 50)
+            self.assertIn("custom service deployed successfully", run.output)
+
+    def test_fake_adapter_dry_run_executes_no_mutations(self) -> None:
+        """Dry-run invokes execute with dry_run=True and records no mutations."""
+        with tempfile.TemporaryDirectory() as d:
+            toml = """
+[apply]
+enabled = true
+
+[apply.targets.custom]
+dir = "services/app"
+adapter = "fake"
+"""
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+
+            fake_adapter = deploy.FakeDeployAdapter(name="fake")
+            deploy.register_adapter("fake", lambda: fake_adapter)
+
+            ticket = {"ticket": 51, "pr": 16, "commit": "commit51"}
+
+            with mock.patch.object(apply, "touches_target_dir", return_value=True), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(dispatch, "pr_comment"):
+                success = apply.apply_one(ticket, dry_run=True, target="custom", adapter=fake_adapter)
+                self.assertTrue(success)
+
+            # Only prepare, check, execute, cleanup called; verify skipped on dry-run
+            self.assertEqual(fake_adapter.calls, ["prepare", "check", "execute", "cleanup"])
+
+            # No runs recorded on dry-run
+            state = deploy.get_target_state("custom", events_path=cfg.factory / "events.jsonl")
+            self.assertEqual(len(state.runs), 0)
+
+    def test_partial_apply_or_crash_requires_reconciliation(self) -> None:
+        """A crashed or interrupted run halts subsequent deploys until reconciled."""
+        with tempfile.TemporaryDirectory() as d:
+            toml = """
+[apply]
+enabled = true
+
+[apply.targets.collectors]
+dir = "terraform/collectors"
+adapter = "terraform"
+"""
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+
+            events_file = cfg.factory / "events.jsonl"
+            # Simulate an interrupted run (started mid-flight, process crashed/killed before completion)
+            interrupted_run = deploy.DeployRun(
+                run_id="deploy-collectors-c1a2b3c4-1",
+                target="collectors",
+                commit="c1a2b3c4",
+                ticket=60,
+                attempt=1,
+                status=deploy.DeployStatus.RUNNING,
+                started_at="2026-09-14T01:00:00Z",
+                completed_at=None,
+                pr=25,
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(interrupted_run, events_path=events_file)
+
+            tstate = deploy.get_target_state("collectors", events_path=events_file)
+            self.assertTrue(tstate.has_interrupted_run)
+            self.assertEqual(len(tstate.interrupted_runs), 1)
+
+            # Attempting factory apply must refuse execution because interrupted run requires reconciliation
+            candidate_pr = {
+                "pr": 26,
+                "ticket": 61,
+                "commit": "commit61",
+                "head_commit": "commit61",
+                "reviewDecision": "APPROVED",
+            }
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(apply, "fetch_all_merged_prs", return_value=[candidate_pr]), \
+                 mock.patch.object(apply, "apply_one") as mock_apply_one:
+                ret = apply.main([])
+                # Exit code must be 1 indicating reconciliation is required
+                self.assertEqual(ret, 1)
+                mock_apply_one.assert_not_called()
+
+            # Now perform explicit operator reconciliation via CLI
+            with mock.patch.object(config, "load", return_value=cfg):
+                rec_ret = apply.main([
+                    "--target", "collectors",
+                    "--reconcile-run", "deploy-collectors-c1a2b3c4-1",
+                    "--reconcile-status", "succeeded",
+                    "--reconcile-note", "operator verified resources in state",
+                ])
+                self.assertEqual(rec_ret, 0)
+
+            # Check target state after reconciliation: interrupted run is cleared
+            reconciled_state = deploy.get_target_state("collectors", events_path=events_file)
+            self.assertFalse(reconciled_state.has_interrupted_run)
+            self.assertEqual(reconciled_state.latest_run.status, deploy.DeployStatus.SUCCEEDED)
+
+    def test_notification_failure_never_reexecutes_terraform(self) -> None:
+        """Durable persistence occurs before notifications; notification errors never re-execute."""
+        with tempfile.TemporaryDirectory() as d:
+            toml = '[apply]\nenabled = true\ndir = "terraform"\n'
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+
+            tf_call_count = 0
+
+            class TrackedAdapter(deploy.DeployAdapter):
+                def execute(self, ctx, dry_run=False):
+                    nonlocal tf_call_count
+                    tf_call_count += 1
+                    return deploy.DeployExecutionResult(ok=True, output="Apply complete!")
+
+            tracked_adapter = TrackedAdapter()
+            ticket = {"ticket": 70, "pr": 30, "commit": "commit70"}
+
+            # First run: GitHub notification fails with an unhandled network error
+            def fail_notify(*args, **kwargs):
+                cmd = args[0] if args else []
+                if isinstance(cmd, list) and cmd[:2] == ["gh", "issue"]:
+                    raise RuntimeError("GitHub API 500 Internal Server Error")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(apply, "touches_apply_dir", return_value=True), \
+                 mock.patch.object(dispatch, "run", side_effect=fail_notify), \
+                 mock.patch.object(dispatch, "pr_comment", side_effect=RuntimeError("PR comment error")):
+                # Must not raise an exception because notification errors are safely handled
+                success = apply.apply_one(ticket, dry_run=False, target="default", adapter=tracked_adapter)
+                self.assertTrue(success)
+
+            self.assertEqual(tf_call_count, 1)
+
+            # Verify durable state was saved BEFORE notification failed
+            events = (cfg.factory / "events.jsonl").read_text()
+            self.assertIn("deploy_run", events)
+            self.assertIn("commit70", events)
+            self.assertIn(70, deploy.terminal_tickets("default", events_path=cfg.factory / "events.jsonl"))
+
+            # Second pass: candidate is terminal, so apply_one is NEVER called again
+            candidate_pr = {
+                "pr": 30,
+                "ticket": 70,
+                "commit": "commit70",
+                "head_commit": "commit70",
+                "reviewDecision": "APPROVED",
+            }
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(apply, "fetch_all_merged_prs", return_value=[candidate_pr]), \
+                 mock.patch.object(apply, "touches_apply_dir", return_value=True):
+                apply.main([])
+
+            # Execution count MUST remain 1 -- no duplicate apply!
+            self.assertEqual(tf_call_count, 1)
+
+    def test_bounded_subprocess_execution_timeout(self) -> None:
+        """TerraformDeployAdapter catches subprocess timeout and records durable error."""
+        adapter = deploy.TerraformDeployAdapter(timeout_sec=1)
+        with tempfile.TemporaryDirectory() as d:
+            ctx = deploy.DeployContext(
+                target=config.DeployTarget(name="default", dir="."),
+                ticket={"ticket": 80, "pr": 35, "commit": "c80"},
+                root=Path(d),
+                factory_dir=Path(d) / ".factory",
+                worktree=Path(d),
+                planfile=Path(d) / "plan",
+            )
+            ctx.planfile.touch()
+
+            def fake_timeout(*args, **kwargs):
+                raise subprocess.TimeoutExpired(cmd=["terraform", "apply"], timeout=1, output="partial...", stderr="")
+
+            with mock.patch("subprocess.run", side_effect=fake_timeout):
+                res = adapter.execute(ctx, dry_run=False)
+                self.assertFalse(res.ok)
+                self.assertIn("timed out after 1s", res.error)
+
+    def test_truthful_exit_codes(self) -> None:
+        """Exit code is 0 on success/dry-run, and 1 on error/reconciliation required."""
+        with tempfile.TemporaryDirectory() as d:
+            toml = '[apply]\nenabled = true\ndir = "terraform"\n'
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+
+            # Case 1: Nothing to apply -> 0
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(apply, "fetch_all_merged_prs", return_value=[]):
+                self.assertEqual(apply.main([]), 0)
+
+            # Case 2: Candidate failed -> 1
+            failing_pr = {
+                "pr": 40,
+                "ticket": 90,
+                "commit": "c90",
+                "head_commit": "c90",
+                "reviewDecision": "APPROVED",
+            }
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(apply, "fetch_all_merged_prs", return_value=[failing_pr]), \
+                 mock.patch.object(apply, "touches_apply_dir", return_value=True), \
+                 mock.patch.object(apply, "apply_one", return_value=False):
+                self.assertEqual(apply.main([]), 1)
+
+            # Case 3: Dry run on candidate -> 0
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(apply, "fetch_all_merged_prs", return_value=[failing_pr]), \
+                 mock.patch.object(apply, "touches_apply_dir", return_value=True), \
+                 mock.patch.object(apply, "apply_one", return_value=True):
+                self.assertEqual(apply.main(["--dry-run"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
+

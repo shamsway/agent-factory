@@ -189,23 +189,28 @@ def apply_escalate(n: int, pr: int, reason: str, commit: str = "", target: str =
     deploy.record_deploy_run(run)
     dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason, run_id=run.run_id)
     body = f"`factory apply` did not proceed: {reason}."
-    dispatch.run(
-        [
-            "gh", "issue", "comment", str(n), "--repo", cfg.repo,
-            "--body", body,
-        ],
-        check=False,
-    )
-    dispatch.pr_comment(n, body)
+    try:
+        dispatch.run(
+            [
+                "gh", "issue", "comment", str(n), "--repo", cfg.repo,
+                "--body", body,
+            ],
+            check=False,
+        )
+        dispatch.pr_comment(n, body)
+    except Exception as exc:
+        log(f"#{n}: notification failed: {exc}")
     log(f"#{n}: apply escalated ({reason})")
 
 
-def apply_one(ticket: dict, dry_run: bool, target: str = "default") -> None:
+def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: deploy.DeployAdapter | None = None) -> bool:
     n, pr, commit = ticket["ticket"], ticket["pr"], ticket["commit"]
     attempt = deploy.next_attempt(target, n, commit, events_path=dispatch.EVENTS)
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    target_obj = cfg.targets.get(target)
+    target_obj = cfg.targets.get(target) or config.DeployTarget(
+        name=target, dir=cfg.apply_dir, enabled=cfg.apply_enabled
+    )
     target_dir = target_obj.dir if target_obj else cfg.apply_dir
     touches = touches_apply_dir(commit) if target == "default" else touches_target_dir(commit, target_dir)
 
@@ -226,95 +231,137 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default") -> None:
         )
         deploy.record_deploy_run(run)
         dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=True, note=f"no changes under {target_dir}", run_id=run.run_id)
-        return
+        return True
 
-    wt = fresh_checkout(commit)
-    tf_dir = wt / target_dir
+    if adapter is None:
+        adapter = deploy.get_adapter(target_obj.adapter)
+
+    ctx = deploy.DeployContext(
+        target=target_obj,
+        ticket=ticket,
+        root=cfg.root,
+        factory_dir=cfg.factory,
+        env=apply_env(),
+        repo=cfg.repo,
+    )
+
     try:
-        planfile = wt / ".factory" / f"apply-plan-{target}-{n}"
-        planfile.parent.mkdir(parents=True, exist_ok=True)
-        proc = tf_plan_check.run_plan(tf_dir, planfile, env=apply_env())
-        if proc.returncode != 0:
-            apply_escalate(n, pr, f"fresh terraform plan failed:\n\n{proc.stdout + proc.stderr}", commit=commit, target=target)
-            return
+        prep_ok, prep_err = adapter.prepare(ctx)
+        if not prep_ok:
+            apply_escalate(n, pr, prep_err or "adapter prepare failed", commit=commit, target=target)
+            return False
 
-        # Re-validate against the *fresh* plan, not the one the gate saw at PR
-        # time: this is the freshness check dispatch's git-ancestry check
-        # can't provide -- live infra can drift independent of git entirely.
-        issue = dispatch.gh_json(["issue", "view", str(n), "--repo", cfg.repo, "--json", "body"])
-        plan = tf_plan_check.show_json(tf_dir, planfile)
-        unexpected = tf_plan_check.unexpected_changes(plan, issue.get("body") or "")
-        if unexpected:
-            detail = ", ".join(f"{addr} ({'/'.join(actions)})" for addr, actions in unexpected)
-            apply_escalate(
-                n, pr,
-                f"fresh plan destroys/replaces {detail}, not covered by an `AllowedDestroy:` "
-                "line in the ticket -- live infra may have drifted since the PR was approved",
-                commit=commit, target=target,
-            )
-            return
+        check_ok, check_err = adapter.check(ctx)
+        if not check_ok:
+            apply_escalate(n, pr, check_err or "pre-apply check failed", commit=commit, target=target)
+            return False
 
         if dry_run:
-            log(f"#{n}: would terraform apply (PR #{pr})")
-            return
+            res = adapter.execute(ctx, dry_run=True)
+            log(f"#{n}: {res.output}")
+            return True
 
-        started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        t0 = time.monotonic()
-        result = subprocess.run(
-            ["terraform", "apply", "-input=false", "-auto-approve", str(planfile)],
-            cwd=tf_dir, capture_output=True, text=True, env=apply_env(),
-        )
-        duration = round(time.monotonic() - t0, 3)
-        completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        output = (result.stdout + result.stderr)[-4000:]
-        ok = result.returncode == 0
-
-        run = deploy.DeployRun(
-            run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+        # Durable RUNNING state recorded BEFORE execution!
+        run_id = f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}"
+        running_run = deploy.DeployRun(
+            run_id=run_id,
             target=target,
             commit=commit,
             ticket=n,
             attempt=attempt,
-            status=deploy.DeployStatus.SUCCEEDED if ok else deploy.DeployStatus.FAILED,
-            started_at=started_at,
-            completed_at=completed_at,
-            duration_sec=duration,
+            status=deploy.DeployStatus.RUNNING,
+            started_at=now,
             pr=pr,
-            output=output,
-            error=None if ok else "terraform apply failed",
             version=deploy.CONTRACT_VERSION,
         )
-        deploy.record_deploy_run(run)
-        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=ok, output=output, run_id=run.run_id)
+        deploy.record_deploy_run(running_run)
+
+        exec_res = adapter.execute(ctx, dry_run=False)
+
+        if exec_res.ok:
+            v_ok, v_err = adapter.verify(ctx)
+            if not v_ok:
+                exec_res.ok = False
+                exec_res.error = v_err or "post-apply verify failed"
+
+        completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        final_run = deploy.DeployRun(
+            run_id=run_id,
+            target=target,
+            commit=commit,
+            ticket=n,
+            attempt=attempt,
+            status=deploy.DeployStatus.SUCCEEDED if exec_res.ok else deploy.DeployStatus.FAILED,
+            started_at=now,
+            completed_at=completed_at,
+            duration_sec=exec_res.duration_sec,
+            pr=pr,
+            output=exec_res.output,
+            error=exec_res.error,
+            version=deploy.CONTRACT_VERSION,
+        )
+
+        # Durable disk persistence written BEFORE notifications!
+        deploy.record_deploy_run(final_run)
+        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=exec_res.ok, output=exec_res.output, run_id=final_run.run_id)
+
+        verb = "succeeded" if exec_res.ok else "FAILED"
+        prefix = "terraform apply" if target_obj.adapter == "terraform" else f"{target_obj.adapter} deploy"
         summary = (
-            f"`terraform apply` {'succeeded' if ok else 'FAILED'} "
-            f"for the merged change:\n\n```\n{output}\n```"
+            f"`{prefix}` {verb} "
+            f"for the merged change:\n\n```\n{exec_res.output}\n```"
         )
-        dispatch.run(
-            [
-                "gh", "issue", "comment", str(n), "--repo", cfg.repo,
-                "--body", summary,
-            ],
-            check=False,
-        )
-        dispatch.pr_comment(n, summary)
-        if not ok:
-            apply_escalate(n, pr, "terraform apply failed", commit=commit, target=target)
+        try:
+            dispatch.run(
+                [
+                    "gh", "issue", "comment", str(n), "--repo", cfg.repo,
+                    "--body", summary,
+                ],
+                check=False,
+            )
+            dispatch.pr_comment(n, summary)
+        except Exception as notify_err:
+            log(f"#{n}: notification failed: {notify_err}")
+
+        if not exec_res.ok:
+            apply_escalate(n, pr, exec_res.error or "deploy failed", commit=commit, target=target)
+            return False
         else:
             log(f"#{n}: applied (PR #{pr})")
+            return True
     finally:
-        dispatch.run(["git", "worktree", "remove", "--force", str(wt)], cwd=cfg.root, check=False)
+        adapter.cleanup(ctx)
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory apply",
-        description="terraform apply for merged, human-review-approved, apply-eligible "
+        description="deploy merged, human-review-approved, apply-eligible "
         "tickets (one pass, stateless). No-op unless [apply].enabled = true.",
     )
     parser.add_argument("--dry-run", action="store_true", help="print planned applies; no side effects")
+    parser.add_argument("--reconcile-run", metavar="RUN_ID", help="run_id of interrupted run to reconcile")
+    parser.add_argument("--reconcile-status", choices=["succeeded", "failed"], default="failed", help="status to mark reconciled run")
+    parser.add_argument("--reconcile-note", default="manual operator reconciliation", help="reconciliation explanation")
+    parser.add_argument("--target", help="optional target name to limit apply or reconciliation")
     args = parser.parse_args(argv)
     configure(config.load())
+
+    if args.reconcile_run:
+        target_name = args.target or "default"
+        st = deploy.DeployStatus.SUCCEEDED if args.reconcile_status == "succeeded" else deploy.DeployStatus.FAILED
+        rec = deploy.reconcile_interrupted_run(
+            target=target_name,
+            run_id=args.reconcile_run,
+            status=st,
+            note=args.reconcile_note,
+            events_path=dispatch.EVENTS,
+        )
+        if rec:
+            log(f"reconciled {args.reconcile_run} on target `{target_name}` as {args.reconcile_status}")
+            return 0
+        log(f"error: run {args.reconcile_run} not found for target `{target_name}`")
+        return 1
 
     if not cfg.apply_enabled:
         log("apply not enabled for this repo ([apply].enabled = true to turn on)")
@@ -337,7 +384,10 @@ def main(argv: list[str]) -> int:
         }
 
         any_candidates_found = False
+        has_errors = False
         for target_name, target in targets.items():
+            if args.target and target_name != args.target:
+                continue
             if not target.enabled:
                 continue
 
@@ -353,6 +403,24 @@ def main(argv: list[str]) -> int:
                 continue
 
             try:
+                tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
+                if tstate.has_interrupted_run:
+                    interrupted = tstate.interrupted_runs[0]
+                    log(f"target `{target_name}`: interrupted run detected ({interrupted.run_id}); reconciliation required")
+                    adapter = deploy.get_adapter(target.adapter)
+                    rec_ok, rec_msg = adapter.reconcile(target, interrupted, events_path=dispatch.EVENTS)
+                    if not rec_ok:
+                        log(f"target `{target_name}`: stopped (reconciliation required: {rec_msg})")
+                        has_errors = True
+                        continue
+                    log(f"target `{target_name}`: {rec_msg}")
+                    tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
+
+                if tstate.failed_tickets and cfg.apply_supersession == "sequential":
+                    log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.failed_tickets)})")
+                    has_errors = True
+                    continue
+
                 def check_touch(c: str) -> bool:
                     if target.dir == cfg.apply_dir:
                         return touches_apply_dir(c)
@@ -374,6 +442,7 @@ def main(argv: list[str]) -> int:
                         msg = f"unauthorized direct merge detected for target `{target_name}`: commit {unauth_commit[:8]} touches {target.dir} without an approved PR"
                         log(msg)
                         deploy.record_unauthorized_event(unauth_commit, target_name, msg, events_path=dispatch.EVENTS)
+                    has_errors = True
                     continue
 
                 if not candidates:
@@ -385,14 +454,17 @@ def main(argv: list[str]) -> int:
                         reason = candidate["unauthorized_reason"]
                         log(f"#{candidate['ticket']}: apply rejected ({reason})")
                         apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name)
+                        has_errors = True
                         if cfg.apply_supersession == "sequential":
                             log(f"target `{target_name}`: stopping further applies after unauthorized revision #{candidate['ticket']}")
                             break
                         continue
 
-                    apply_one(candidate, args.dry_run, target=target_name)
+                    success = apply_one(candidate, args.dry_run, target=target_name)
                     latest_state = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
-                    if candidate["ticket"] in latest_state.failed_tickets:
+                    is_failed = (success is False) or (candidate["ticket"] in latest_state.failed_tickets)
+                    if is_failed:
+                        has_errors = True
                         if cfg.apply_supersession == "sequential":
                             log(f"target `{target_name}`: stopping further applies after failure of #{candidate['ticket']}")
                             break
@@ -400,13 +472,13 @@ def main(argv: list[str]) -> int:
                 deploy.release_lock(b_fd)
                 deploy.release_lock(t_fd)
 
-        if not any_candidates_found:
+        if not any_candidates_found and not has_errors:
             log("nothing to apply")
             return 0
+        return 1 if has_errors and not args.dry_run else 0
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
-    return 0
 
 
 if __name__ == "__main__":

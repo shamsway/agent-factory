@@ -110,6 +110,11 @@ class TargetState:
         return bool(self.latest_run and not self.latest_run.is_terminal())
 
     @property
+    def interrupted_runs(self) -> list[DeployRun]:
+        """Runs that started but never reached a terminal state."""
+        return [r for r in self.runs if not r.is_terminal()]
+
+    @property
     def terminal_tickets(self) -> set[int]:
         """Tickets whose latest run for this target is in a terminal state."""
         out = set()
@@ -568,13 +573,14 @@ def select_candidates_for_target(
     for pr in all_prs:
         commit = pr.get("commit", "")
         pr_num = int(pr["pr"])
+        ticket_num = int(pr.get("ticket") or pr["pr"])
         authorized_commits.add(commit)
         if head := pr.get("head_commit"):
             authorized_commits.add(head)
 
         if not check_touches(commit):
             continue
-        if pr_num in tstate.terminal_tickets:
+        if pr_num in tstate.terminal_tickets or ticket_num in tstate.terminal_tickets:
             continue
         if is_before_baseline(pr_num, commit, baseline, root):
             continue
@@ -610,4 +616,303 @@ def select_candidates_for_target(
 
     ordered = sort_candidates_topologically(candidates, root=root, main_branch=main_branch)
     return ordered, []
+
+
+@dataclass
+class DeployContext:
+    """Execution context passed through deploy adapter lifecycle hooks."""
+
+    target: Any
+    ticket: dict
+    root: Path
+    factory_dir: Path
+    env: dict[str, str] = field(default_factory=dict)
+    repo: str = ""
+    worktree: Path | None = None
+    planfile: Path | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DeployExecutionResult:
+    """Bounded subprocess execution result from an adapter."""
+
+    ok: bool
+    output: str = ""
+    error: str | None = None
+    duration_sec: float = 0.0
+
+
+class DeployAdapter:
+    """Base interface for deployment adapters (Terraform, fake/mock, etc.)."""
+
+    def prepare(self, ctx: DeployContext) -> tuple[bool, str]:
+        """Prepare worktree, environment, plan files, or deployment artifacts."""
+        return True, ""
+
+    def check(self, ctx: DeployContext) -> tuple[bool, str]:
+        """Pre-apply safety, freshness, drift, and destroy validation."""
+        return True, ""
+
+    def execute(self, ctx: DeployContext, dry_run: bool = False) -> DeployExecutionResult:
+        """Execute bounded subprocess mutation."""
+        raise NotImplementedError
+
+    def verify(self, ctx: DeployContext) -> tuple[bool, str]:
+        """Post-apply verification check."""
+        return True, ""
+
+    def cleanup(self, ctx: DeployContext) -> None:
+        """Guaranteed cleanup of temporary resources."""
+        pass
+
+    def reconcile(
+        self,
+        target: Any,
+        interrupted_run: DeployRun,
+        events_path: Path | None = None,
+    ) -> tuple[bool, str]:
+        """Inspect and reconcile an interrupted run."""
+        return False, f"interrupted run {interrupted_run.run_id} requires operator reconciliation"
+
+
+class TerraformDeployAdapter(DeployAdapter):
+    """Deploy adapter for Terraform roots with bounded subprocess execution."""
+
+    def __init__(self, timeout_sec: int = 1800) -> None:
+        self.timeout_sec = timeout_sec
+
+    def prepare(self, ctx: DeployContext) -> tuple[bool, str]:
+        from agent_factory import apply
+        wt = apply.fresh_checkout(ctx.ticket["commit"])
+        ctx.worktree = wt
+        ctx.planfile = wt / ".factory" / f"apply-plan-{ctx.target.name}-{ctx.ticket['ticket']}"
+        ctx.planfile.parent.mkdir(parents=True, exist_ok=True)
+        return True, ""
+
+    def check(self, ctx: DeployContext) -> tuple[bool, str]:
+        if not ctx.worktree or not ctx.planfile:
+            return False, "worktree or planfile missing in check phase"
+        from agent_factory import dispatch, tf_plan_check
+
+        tf_dir = ctx.worktree / ctx.target.dir
+        proc = tf_plan_check.run_plan(tf_dir, ctx.planfile, env=ctx.env)
+        if proc.returncode != 0:
+            return False, f"fresh terraform plan failed:\n\n{proc.stdout + proc.stderr}"
+
+        repo_arg = ["--repo", ctx.repo] if ctx.repo else []
+        issue = dispatch.gh_json(["issue", "view", str(ctx.ticket["ticket"]), *repo_arg, "--json", "body"])
+        plan = tf_plan_check.show_json(tf_dir, ctx.planfile)
+        unexpected = tf_plan_check.unexpected_changes(plan, issue.get("body") or "")
+        if unexpected:
+            detail = ", ".join(f"{addr} ({'/'.join(actions)})" for addr, actions in unexpected)
+            return False, (
+                f"fresh plan destroys/replaces {detail}, not covered by an `AllowedDestroy:` "
+                "line in the ticket -- live infra may have drifted since the PR was approved"
+            )
+        return True, ""
+
+    def execute(self, ctx: DeployContext, dry_run: bool = False) -> DeployExecutionResult:
+        if dry_run:
+            return DeployExecutionResult(
+                ok=True,
+                output=f"would terraform apply (PR #{ctx.ticket.get('pr')})",
+                duration_sec=0.0,
+            )
+        if not ctx.worktree or not ctx.planfile:
+            return DeployExecutionResult(
+                ok=False,
+                error="worktree or planfile missing in execute phase",
+            )
+
+        tf_dir = ctx.worktree / ctx.target.dir
+        t0 = time.monotonic()
+        try:
+            result = subprocess.run(
+                ["terraform", "apply", "-input=false", "-auto-approve", str(ctx.planfile)],
+                cwd=tf_dir,
+                capture_output=True,
+                text=True,
+                env=ctx.env,
+                timeout=self.timeout_sec,
+            )
+            duration = round(time.monotonic() - t0, 3)
+            output = (result.stdout + result.stderr)[-4000:]
+            ok = result.returncode == 0
+            return DeployExecutionResult(
+                ok=ok,
+                output=output,
+                error=None if ok else "terraform apply failed",
+                duration_sec=duration,
+            )
+        except subprocess.TimeoutExpired as exc:
+            duration = round(time.monotonic() - t0, 3)
+            out_str = (getattr(exc, "output", None) or getattr(exc, "stdout", None) or "")
+            err_str = exc.stderr or ""
+            out = (out_str + err_str)[-4000:]
+            return DeployExecutionResult(
+                ok=False,
+                output=out,
+                error=f"terraform apply timed out after {self.timeout_sec}s",
+                duration_sec=duration,
+            )
+
+    def verify(self, ctx: DeployContext) -> tuple[bool, str]:
+        return True, ""
+
+    def cleanup(self, ctx: DeployContext) -> None:
+        if ctx.worktree:
+            from agent_factory import dispatch
+            dispatch.run(["git", "worktree", "remove", "--force", str(ctx.worktree)], cwd=ctx.root, check=False)
+
+    def reconcile(
+        self,
+        target: Any,
+        interrupted_run: DeployRun,
+        events_path: Path | None = None,
+    ) -> tuple[bool, str]:
+        return False, f"interrupted terraform run {interrupted_run.run_id} requires operator reconciliation"
+
+
+class FakeDeployAdapter(DeployAdapter):
+    """Second deploy adapter demonstrating the contract without external platforms."""
+
+    def __init__(
+        self,
+        name: str = "fake",
+        can_auto_reconcile: bool = False,
+        prepare_error: str | None = None,
+        check_error: str | None = None,
+        execute_error: str | None = None,
+        verify_error: str | None = None,
+        output: str = "fake deploy succeeded",
+        duration_sec: float = 0.05,
+    ) -> None:
+        self.name = name
+        self.can_auto_reconcile = can_auto_reconcile
+        self.prepare_error = prepare_error
+        self.check_error = check_error
+        self.execute_error = execute_error
+        self.verify_error = verify_error
+        self.output = output
+        self.duration_sec = duration_sec
+        self.calls: list[str] = []
+
+    def prepare(self, ctx: DeployContext) -> tuple[bool, str]:
+        self.calls.append("prepare")
+        if self.prepare_error:
+            return False, self.prepare_error
+        return True, ""
+
+    def check(self, ctx: DeployContext) -> tuple[bool, str]:
+        self.calls.append("check")
+        if self.check_error:
+            return False, self.check_error
+        return True, ""
+
+    def execute(self, ctx: DeployContext, dry_run: bool = False) -> DeployExecutionResult:
+        self.calls.append("execute")
+        if dry_run:
+            return DeployExecutionResult(ok=True, output=f"would fake deploy {ctx.target.name} (PR #{ctx.ticket.get('pr')})")
+        if self.execute_error:
+            return DeployExecutionResult(
+                ok=False,
+                output=self.output,
+                error=self.execute_error,
+                duration_sec=self.duration_sec,
+            )
+        return DeployExecutionResult(
+            ok=True,
+            output=self.output,
+            duration_sec=self.duration_sec,
+        )
+
+    def verify(self, ctx: DeployContext) -> tuple[bool, str]:
+        self.calls.append("verify")
+        if self.verify_error:
+            return False, self.verify_error
+        return True, ""
+
+    def cleanup(self, ctx: DeployContext) -> None:
+        self.calls.append("cleanup")
+
+    def reconcile(
+        self,
+        target: Any,
+        interrupted_run: DeployRun,
+        events_path: Path | None = None,
+    ) -> tuple[bool, str]:
+        self.calls.append("reconcile")
+        if self.can_auto_reconcile:
+            reconcile_interrupted_run(
+                target=target.name,
+                run_id=interrupted_run.run_id,
+                status=DeployStatus.SUCCEEDED,
+                note="auto-reconciled by fake adapter",
+                events_path=events_path,
+            )
+            return True, "interrupted run reconciled automatically by fake adapter"
+        return False, f"fake adapter requires operator reconciliation for {interrupted_run.run_id}"
+
+
+def reconcile_interrupted_run(
+    target: str,
+    run_id: str,
+    status: DeployStatus = DeployStatus.FAILED,
+    note: str = "manual operator reconciliation",
+    events_path: Path | None = None,
+) -> DeployRun | None:
+    """Reconcile an interrupted run by marking it terminal in events.jsonl."""
+    tstate = get_target_state(target=target, events_path=events_path)
+    matching = [r for r in tstate.runs if r.run_id == run_id]
+    if not matching:
+        return None
+
+    run = matching[-1]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    reconciled_run = DeployRun(
+        run_id=run.run_id,
+        target=run.target,
+        commit=run.commit,
+        ticket=run.ticket,
+        attempt=run.attempt,
+        status=status,
+        started_at=run.started_at or now,
+        completed_at=now,
+        duration_sec=run.duration_sec,
+        pr=run.pr,
+        output=run.output,
+        error=note,
+        version=CONTRACT_VERSION,
+    )
+    record_deploy_run(reconciled_run, events_path=events_path)
+    if events_path is None:
+        from agent_factory import dispatch
+        dispatch.record(
+            "deploy_reconciled",
+            run_id=run_id,
+            target=target,
+            status=status.value,
+            note=note,
+        )
+    return reconciled_run
+
+
+ADAPTERS: dict[str, type[DeployAdapter]] = {
+    "terraform": TerraformDeployAdapter,
+    "fake": FakeDeployAdapter,
+    "mock": FakeDeployAdapter,
+}
+
+
+def get_adapter(name: str = "terraform") -> DeployAdapter:
+    """Get an instantiated deploy adapter by name."""
+    cls = ADAPTERS.get(name.lower(), TerraformDeployAdapter)
+    return cls()
+
+
+def register_adapter(name: str, adapter_cls: type[DeployAdapter]) -> None:
+    """Register a deploy adapter class by name."""
+    ADAPTERS[name.lower()] = adapter_cls
+
 

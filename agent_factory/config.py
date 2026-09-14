@@ -85,7 +85,7 @@ KNOWN_KEYS = {
     "triage": ("url", "model", "key"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "env"),
-    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession"),
+    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter"),
 }
 CHECK_KEYS = ("name", "run", "exclusive", "timeout")
 
@@ -103,6 +103,7 @@ class DeployTarget:
     dir: str
     enabled: bool = True
     backend_key: str = ""
+    adapter: str = "terraform"
 
 
 @dataclass
@@ -319,6 +320,7 @@ def load(start: Path | None = None) -> Config:
     cfg.apply_supersession = str(apply_t.get("supersession", cfg.apply_supersession))
 
     raw_targets = apply_t.get("targets")
+    default_adapter = str(apply_t.get("adapter", "terraform"))
     targets: dict[str, DeployTarget] = {}
     if isinstance(raw_targets, list):
         for item in raw_targets:
@@ -329,6 +331,7 @@ def load(start: Path | None = None) -> Config:
                     dir=str(item.get("dir", cfg.apply_dir)),
                     enabled=bool(item.get("enabled", True)),
                     backend_key=str(item.get("backend_key", "")),
+                    adapter=str(item.get("adapter", default_adapter)),
                 )
     elif isinstance(raw_targets, dict):
         for name, item in raw_targets.items():
@@ -338,18 +341,14 @@ def load(start: Path | None = None) -> Config:
                     dir=str(item.get("dir", cfg.apply_dir)),
                     enabled=bool(item.get("enabled", True)),
                     backend_key=str(item.get("backend_key", "")),
+                    adapter=str(item.get("adapter", default_adapter)),
                 )
     if not targets:
         targets["default"] = DeployTarget(
             name="default",
             dir=cfg.apply_dir,
             enabled=cfg.apply_enabled,
-        )
-    elif "default" not in targets and cfg.apply_enabled:
-        targets["default"] = DeployTarget(
-            name="default",
-            dir=cfg.apply_dir,
-            enabled=cfg.apply_enabled,
+            adapter=default_adapter,
         )
     cfg.targets = targets
     return cfg
