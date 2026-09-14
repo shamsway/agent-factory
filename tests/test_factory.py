@@ -85,7 +85,7 @@ def gate(cwd: Path, *args: str) -> tuple[int, str, str]:
 class ConfigTest(unittest.TestCase):
     def test_defaults_from_origin(self) -> None:
         with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d))
+            repo = make_repo(Path(d).resolve())
             cfg = config.load(repo)
             self.assertEqual(cfg.repo, "acme/widgets")
             self.assertEqual(cfg.name, "widgets")
@@ -126,7 +126,7 @@ key = "sk-abc"
 port = 1
 """
         with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d), toml)
+            repo = make_repo(Path(d).resolve(), toml)
             cfg = config.load(repo)
             self.assertEqual((cfg.repo, cfg.upstream, cfg.main), ("other/name", "up", "trunk"))
             self.assertEqual((cfg.max_active, cfg.signoff, cfg.check_timeout), (5, False, 7))
@@ -135,7 +135,7 @@ port = 1
             self.assertIsNone(cfg.leak_pattern)
             self.assertEqual((cfg.leak_exclude, cfg.llm_model, cfg.llm_key, cfg.dashboard_port), (["vendor"], "m", "sk-abc", 1))
             # A worktree resolves to the main checkout, not itself.
-            wt = Path(d) / "wt"
+            wt = Path(d).resolve() / "wt"
             git(repo, "worktree", "add", "-q", str(wt), "-b", "agent/1")
             self.assertEqual(config.load(wt).root, repo)
 
@@ -234,7 +234,7 @@ class HostConfigTest(unittest.TestCase):
         gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
         toml = '[triage]\nmodel = "m"\n[dashboard]\ntheme = "t.css"\n[gate]\nlock = "/tmp/l"\ntimeout = 5\n[dispatch]\nmax_atempts = 2\n'
         with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d), toml)
+            repo = make_repo(Path(d).resolve(), toml)
             (repo / ".github/ISSUE_TEMPLATE").mkdir(parents=True)
             (repo / ".github/ISSUE_TEMPLATE/agent_task.md").write_text("custom\n")
             proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
