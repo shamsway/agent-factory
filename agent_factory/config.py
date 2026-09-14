@@ -85,7 +85,7 @@ KNOWN_KEYS = {
     "triage": ("url", "model", "key"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "env"),
-    "apply": ("enabled", "dir", "env"),
+    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession"),
 }
 CHECK_KEYS = ("name", "run", "exclusive", "timeout")
 
@@ -93,6 +93,16 @@ CHECK_KEYS = ("name", "run", "exclusive", "timeout")
 class ConfigError(SystemExit):
     def __init__(self, msg: str) -> None:
         super().__init__(f"factory: {msg}")
+
+
+@dataclass
+class DeployTarget:
+    """One deployment target (e.g. Terraform root, Nomad cluster, etc.)."""
+
+    name: str
+    dir: str
+    enabled: bool = True
+    backend_key: str = ""
 
 
 @dataclass
@@ -141,6 +151,9 @@ class Config:
     apply_enabled: bool = False  # this repo's merges require a human review approval and are apply-eligible
     apply_dir: str = "."  # terraform root, relative to repo root, that `factory apply` plans/applies
     apply_env: dict = field(default_factory=dict)  # env for `factory apply` only; never the dispatcher's
+    targets: dict[str, DeployTarget] = field(default_factory=dict)  # deployment targets, keyed by name
+    apply_baseline: str | None = None  # commit SHA or PR number prior to which deployments are ignored
+    apply_supersession: str = "sequential"  # "sequential" (strict commit order) or "none"
     raw_repo: dict = field(default_factory=dict)  # the committed file alone, before host layering
 
     @property
@@ -302,4 +315,41 @@ def load(start: Path | None = None) -> Config:
     cfg.apply_enabled = bool(apply_t.get("enabled", cfg.apply_enabled))
     cfg.apply_dir = apply_t.get("dir", cfg.apply_dir)
     cfg.apply_env = {k: str(v) for k, v in apply_t.get("env", {}).items()}
+    cfg.apply_baseline = str(apply_t["baseline"]) if "baseline" in apply_t else None
+    cfg.apply_supersession = str(apply_t.get("supersession", cfg.apply_supersession))
+
+    raw_targets = apply_t.get("targets")
+    targets: dict[str, DeployTarget] = {}
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if isinstance(item, dict) and "name" in item:
+                name = str(item["name"])
+                targets[name] = DeployTarget(
+                    name=name,
+                    dir=str(item.get("dir", cfg.apply_dir)),
+                    enabled=bool(item.get("enabled", True)),
+                    backend_key=str(item.get("backend_key", "")),
+                )
+    elif isinstance(raw_targets, dict):
+        for name, item in raw_targets.items():
+            if isinstance(item, dict):
+                targets[name] = DeployTarget(
+                    name=name,
+                    dir=str(item.get("dir", cfg.apply_dir)),
+                    enabled=bool(item.get("enabled", True)),
+                    backend_key=str(item.get("backend_key", "")),
+                )
+    if not targets:
+        targets["default"] = DeployTarget(
+            name="default",
+            dir=cfg.apply_dir,
+            enabled=cfg.apply_enabled,
+        )
+    elif "default" not in targets and cfg.apply_enabled:
+        targets["default"] = DeployTarget(
+            name="default",
+            dir=cfg.apply_dir,
+            enabled=cfg.apply_enabled,
+        )
+    cfg.targets = targets
     return cfg

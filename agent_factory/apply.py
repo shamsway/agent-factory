@@ -25,9 +25,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from agent_factory import config, dispatch, tf_plan_check
+from agent_factory import config, deploy, dispatch, tf_plan_check
 from agent_factory.config import Config
 
 cfg: Config
@@ -43,37 +44,93 @@ def log(msg: str) -> None:
     print(f"[apply] {msg}", flush=True)
 
 
-def applied_tickets() -> set[int]:
-    """Ticket numbers with a recorded `applied` event -- never re-apply."""
-    if not dispatch.EVENTS.exists():
-        return set()
-    out = set()
-    for line in dispatch.EVENTS.read_text().splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if row.get("event") == "applied" and "ticket" in row:
-            out.add(row["ticket"])
-    return out
+def applied_tickets(target: str = "default") -> set[int]:
+    """Ticket numbers with a recorded terminal state -- never re-apply.
+
+    Failed runs are terminal and never silently auto-retried.
+    """
+    return deploy.terminal_tickets(target=target, events_path=dispatch.EVENTS)
 
 
-def merged_tickets() -> list[dict]:
-    """Merged factory PRs for this repo: [{pr, ticket, commit}], any order."""
+def merged_tickets(limit: int = 100) -> list[dict]:
+    """Merged factory PRs for this repo: [{pr, ticket, commit, ...}], any order."""
     prs = dispatch.gh_json(
         [
             "pr", "list", "--repo", cfg.repo, "--state", "merged",
-            "--json", "number,headRefName,mergeCommit",
-            "--limit", "100",
+            "--json", "number,headRefName,mergeCommit,reviewDecision,headRefOid,latestReviews",
+            "--limit", str(limit),
         ]
     )
     out = []
+    if not isinstance(prs, list):
+        return out
     for pr in prs:
-        m = re.fullmatch(r"agent/(\d+)", pr["headRefName"])
+        m = re.fullmatch(r"agent/(\d+)", pr.get("headRefName", ""))
         if not m or not pr.get("mergeCommit"):
             continue
-        out.append({"pr": pr["number"], "ticket": int(m.group(1)), "commit": pr["mergeCommit"]["oid"]})
+        merge_oid = (
+            pr["mergeCommit"]["oid"]
+            if isinstance(pr["mergeCommit"], dict)
+            else str(pr["mergeCommit"])
+        )
+        row = {"pr": pr["number"], "ticket": int(m.group(1)), "commit": merge_oid}
+        if "headRefOid" in pr and pr["headRefOid"] is not None:
+            row["head_commit"] = pr["headRefOid"]
+        if "reviewDecision" in pr and pr["reviewDecision"] is not None:
+            row["reviewDecision"] = pr["reviewDecision"]
+        if "latestReviews" in pr and pr["latestReviews"] is not None:
+            row["latestReviews"] = pr["latestReviews"]
+        out.append(row)
     return out
+
+
+def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict]:
+    """Discover merged PRs with pagination up to max_pages."""
+    prs = merged_tickets(limit=page_size)
+    if len(prs) < page_size:
+        return prs
+
+    all_prs: list[dict] = list(prs)
+    seen_prs = {p["pr"] for p in all_prs}
+    for page in range(2, max_pages + 1):
+        proc = dispatch.run(
+            [
+                "gh", "api", f"repos/{cfg.repo}/pulls?state=closed&per_page={page_size}&page={page}",
+            ],
+            cwd=cfg.root,
+            check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            break
+        try:
+            page_data = json.loads(proc.stdout)
+        except ValueError:
+            break
+        if not isinstance(page_data, list) or not page_data:
+            break
+        found_new = False
+        for raw_pr in page_data:
+            if not raw_pr.get("merged_at"):
+                continue
+            head_ref = (raw_pr.get("head") or {}).get("ref", "")
+            m = re.fullmatch(r"agent/(\d+)", head_ref)
+            merge_commit = raw_pr.get("merge_commit_sha")
+            if not m or not merge_commit:
+                continue
+            pr_num = raw_pr["number"]
+            if pr_num in seen_prs:
+                continue
+            seen_prs.add(pr_num)
+            found_new = True
+            all_prs.append({
+                "pr": pr_num,
+                "ticket": int(m.group(1)),
+                "commit": merge_commit,
+                "head_commit": (raw_pr.get("head") or {}).get("sha", ""),
+            })
+        if not found_new:
+            break
+    return all_prs
 
 
 def fresh_checkout(commit: str) -> Path:
@@ -88,13 +145,17 @@ def fresh_checkout(commit: str) -> Path:
     return wt
 
 
-def touches_apply_dir(commit: str) -> bool:
+def touches_target_dir(commit: str, target_dir: str) -> bool:
     proc = dispatch.run(
-        ["git", "diff", "--name-only", f"{commit}~1", commit, "--", cfg.apply_dir],
+        ["git", "diff", "--name-only", f"{commit}~1", commit, "--", target_dir],
         cwd=cfg.root,
         check=False,
     )
     return bool(proc.stdout.strip())
+
+
+def touches_apply_dir(commit: str) -> bool:
+    return touches_target_dir(commit, cfg.apply_dir)
 
 
 def apply_env() -> dict:
@@ -106,11 +167,27 @@ def apply_env() -> dict:
     return env
 
 
-def apply_escalate(n: int, pr: int, reason: str) -> None:
+def apply_escalate(n: int, pr: int, reason: str, commit: str = "", target: str = "default") -> None:
     """Post-merge escalation: the tracking issue is already closed, so this
     only comments + records an event rather than touching labels the way
     `dispatch.escalate` does for in-flight tickets."""
-    dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason)
+    attempt = deploy.next_attempt(target, n, commit, events_path=dispatch.EVENTS)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    run = deploy.DeployRun(
+        run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+        target=target,
+        commit=commit,
+        ticket=n,
+        attempt=attempt,
+        status=deploy.DeployStatus.FAILED,
+        started_at=now,
+        completed_at=now,
+        pr=pr,
+        error=reason,
+        version=deploy.CONTRACT_VERSION,
+    )
+    deploy.record_deploy_run(run)
+    dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason, run_id=run.run_id)
     body = f"`factory apply` did not proceed: {reason}."
     dispatch.run(
         [
@@ -123,21 +200,42 @@ def apply_escalate(n: int, pr: int, reason: str) -> None:
     log(f"#{n}: apply escalated ({reason})")
 
 
-def apply_one(ticket: dict, dry_run: bool) -> None:
+def apply_one(ticket: dict, dry_run: bool, target: str = "default") -> None:
     n, pr, commit = ticket["ticket"], ticket["pr"], ticket["commit"]
-    if not touches_apply_dir(commit):
-        log(f"#{n}: PR #{pr} doesn't touch {cfg.apply_dir}; nothing to apply")
-        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=True, note="no changes under apply dir")
+    attempt = deploy.next_attempt(target, n, commit, events_path=dispatch.EVENTS)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    target_obj = cfg.targets.get(target)
+    target_dir = target_obj.dir if target_obj else cfg.apply_dir
+    touches = touches_apply_dir(commit) if target == "default" else touches_target_dir(commit, target_dir)
+
+    if not touches:
+        log(f"#{n}: PR #{pr} doesn't touch {target_dir}; nothing to apply")
+        run = deploy.DeployRun(
+            run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+            target=target,
+            commit=commit,
+            ticket=n,
+            attempt=attempt,
+            status=deploy.DeployStatus.SKIPPED,
+            started_at=now,
+            completed_at=now,
+            pr=pr,
+            output=f"no changes under {target_dir}",
+            version=deploy.CONTRACT_VERSION,
+        )
+        deploy.record_deploy_run(run)
+        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=True, note=f"no changes under {target_dir}", run_id=run.run_id)
         return
 
     wt = fresh_checkout(commit)
-    tf_dir = wt / cfg.apply_dir
+    tf_dir = wt / target_dir
     try:
-        planfile = wt / ".factory" / f"apply-plan-{n}"
+        planfile = wt / ".factory" / f"apply-plan-{target}-{n}"
         planfile.parent.mkdir(parents=True, exist_ok=True)
         proc = tf_plan_check.run_plan(tf_dir, planfile, env=apply_env())
         if proc.returncode != 0:
-            apply_escalate(n, pr, f"fresh terraform plan failed:\n\n{proc.stdout + proc.stderr}")
+            apply_escalate(n, pr, f"fresh terraform plan failed:\n\n{proc.stdout + proc.stderr}", commit=commit, target=target)
             return
 
         # Re-validate against the *fresh* plan, not the one the gate saw at PR
@@ -152,6 +250,7 @@ def apply_one(ticket: dict, dry_run: bool) -> None:
                 n, pr,
                 f"fresh plan destroys/replaces {detail}, not covered by an `AllowedDestroy:` "
                 "line in the ticket -- live infra may have drifted since the PR was approved",
+                commit=commit, target=target,
             )
             return
 
@@ -159,14 +258,36 @@ def apply_one(ticket: dict, dry_run: bool) -> None:
             log(f"#{n}: would terraform apply (PR #{pr})")
             return
 
+        started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        t0 = time.monotonic()
         result = subprocess.run(
             ["terraform", "apply", "-input=false", "-auto-approve", str(planfile)],
             cwd=tf_dir, capture_output=True, text=True, env=apply_env(),
         )
+        duration = round(time.monotonic() - t0, 3)
+        completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         output = (result.stdout + result.stderr)[-4000:]
-        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=result.returncode == 0, output=output)
+        ok = result.returncode == 0
+
+        run = deploy.DeployRun(
+            run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+            target=target,
+            commit=commit,
+            ticket=n,
+            attempt=attempt,
+            status=deploy.DeployStatus.SUCCEEDED if ok else deploy.DeployStatus.FAILED,
+            started_at=started_at,
+            completed_at=completed_at,
+            duration_sec=duration,
+            pr=pr,
+            output=output,
+            error=None if ok else "terraform apply failed",
+            version=deploy.CONTRACT_VERSION,
+        )
+        deploy.record_deploy_run(run)
+        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=ok, output=output, run_id=run.run_id)
         summary = (
-            f"`terraform apply` {'succeeded' if result.returncode == 0 else 'FAILED'} "
+            f"`terraform apply` {'succeeded' if ok else 'FAILED'} "
             f"for the merged change:\n\n```\n{output}\n```"
         )
         dispatch.run(
@@ -177,8 +298,8 @@ def apply_one(ticket: dict, dry_run: bool) -> None:
             check=False,
         )
         dispatch.pr_comment(n, summary)
-        if result.returncode != 0:
-            apply_escalate(n, pr, "terraform apply failed")
+        if not ok:
+            apply_escalate(n, pr, "terraform apply failed", commit=commit, target=target)
         else:
             log(f"#{n}: applied (PR #{pr})")
     finally:
@@ -208,23 +329,80 @@ def main(argv: list[str]) -> int:
         lock_fd.close()
         return 0
     try:
-        # touches_apply_dir() diffs {commit}~1..commit locally -- if this repo's
-        # main hasn't independently fetched since the merge (e.g. `factory
-        # apply` invoked standalone, not right after a dispatch pass), the
-        # merge commit doesn't exist locally yet, the diff silently fails
-        # (check=False), and touches_apply_dir wrongly reports False.
-        # Confirmed live (ticket #45): a genuinely apply-dir-touching merge
-        # was skipped with "doesn't touch ...; nothing to apply" for exactly
-        # this reason. fresh_checkout() also fetches, but only runs *after*
-        # touches_apply_dir already (wrongly) decided there was nothing to do.
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
-        done = applied_tickets()
-        pending = [t for t in merged_tickets() if t["ticket"] not in done]
-        if not pending:
+        all_prs = fetch_all_merged_prs()
+
+        targets = cfg.targets or {
+            "default": config.DeployTarget(name="default", dir=cfg.apply_dir, enabled=cfg.apply_enabled)
+        }
+
+        any_candidates_found = False
+        for target_name, target in targets.items():
+            if not target.enabled:
+                continue
+
+            t_ok, t_fd = deploy.acquire_target_lock(cfg.factory, target_name)
+            if not t_ok:
+                log(f"target `{target_name}`: skipped (another process holds target lock)")
+                continue
+
+            b_ok, b_fd = deploy.acquire_backend_lock(cfg.factory, target.backend_key)
+            if not b_ok:
+                log(f"target `{target_name}`: skipped (another process holds backend lock for `{target.backend_key}`)")
+                deploy.release_lock(t_fd)
+                continue
+
+            try:
+                def check_touch(c: str) -> bool:
+                    if target.dir == cfg.apply_dir:
+                        return touches_apply_dir(c)
+                    return touches_target_dir(c, target.dir)
+
+                candidates, unauthorized = deploy.select_candidates_for_target(
+                    target_name=target_name,
+                    target_dir=target.dir,
+                    all_prs=all_prs,
+                    root=cfg.root,
+                    main_branch=cfg.main,
+                    baseline=cfg.apply_baseline,
+                    events_path=dispatch.EVENTS,
+                    touches_fn=check_touch,
+                )
+
+                if unauthorized:
+                    for unauth_commit in unauthorized:
+                        msg = f"unauthorized direct merge detected for target `{target_name}`: commit {unauth_commit[:8]} touches {target.dir} without an approved PR"
+                        log(msg)
+                        deploy.record_unauthorized_event(unauth_commit, target_name, msg, events_path=dispatch.EVENTS)
+                    continue
+
+                if not candidates:
+                    continue
+
+                any_candidates_found = True
+                for candidate in candidates:
+                    if "unauthorized_reason" in candidate:
+                        reason = candidate["unauthorized_reason"]
+                        log(f"#{candidate['ticket']}: apply rejected ({reason})")
+                        apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name)
+                        if cfg.apply_supersession == "sequential":
+                            log(f"target `{target_name}`: stopping further applies after unauthorized revision #{candidate['ticket']}")
+                            break
+                        continue
+
+                    apply_one(candidate, args.dry_run, target=target_name)
+                    latest_state = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
+                    if candidate["ticket"] in latest_state.failed_tickets:
+                        if cfg.apply_supersession == "sequential":
+                            log(f"target `{target_name}`: stopping further applies after failure of #{candidate['ticket']}")
+                            break
+            finally:
+                deploy.release_lock(b_fd)
+                deploy.release_lock(t_fd)
+
+        if not any_candidates_found:
             log("nothing to apply")
             return 0
-        for ticket in pending:
-            apply_one(ticket, args.dry_run)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         lock_fd.close()
