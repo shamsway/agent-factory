@@ -201,6 +201,9 @@ conventions; `factory init` creates the labels.
   In-flight tickets finish their current pass; nothing new is claimed.
 - **Tear down a ticket**: remove the worktree (`git worktree remove --force
   .factory/wt-<n>`), delete `agent/<n>`, and re-label the issue.
+- **Deployments & recovery**: for repositories using `factory apply`, see
+  [docs/deployment-lifecycle.md](docs/deployment-lifecycle.md) for multi-target
+  configuration, backend serialization, crash recovery, and operator reconciliation.
 
 ## Agent skill
 
