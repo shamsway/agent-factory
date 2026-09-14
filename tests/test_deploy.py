@@ -498,7 +498,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
             "head_commit": "rev_b_head_oid",
             "reviewDecision": "APPROVED",
             "latestReviews": [
-                {"state": "APPROVED", "commit": {"oid": "rev_a_old_oid"}}
+                {"state": "APPROVED", "author": {"login": "human"}, "authorAssociation": "MEMBER", "commit": {"oid": "rev_a_old_oid"}}
             ],
         }
         ok, reason = deploy.verify_revision_authorization(pr_stale)
@@ -513,7 +513,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
             "head_commit": "rev_b_head_oid",
             "reviewDecision": "APPROVED",
             "latestReviews": [
-                {"state": "APPROVED", "commit": {"oid": "rev_b_head_oid"}}
+                {"state": "APPROVED", "author": {"login": "human"}, "authorAssociation": "MEMBER", "commit": {"oid": "rev_b_head_oid"}}
             ],
         }
         ok, reason = deploy.verify_revision_authorization(pr_valid)
@@ -571,11 +571,11 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
             # Feed PR list in REVERSE order: B before A
             pr_b = {
                 "pr": 2, "ticket": 12, "commit": c_b, "head_commit": c_b, "reviewDecision": "APPROVED",
-                "latestReviews": [{"state": "APPROVED", "commit": {"oid": c_b}}],
+                "latestReviews": [{"state": "APPROVED", "author": {"login": "human"}, "authorAssociation": "MEMBER", "commit": {"oid": c_b}}],
             }
             pr_a = {
                 "pr": 1, "ticket": 11, "commit": c_a, "head_commit": c_a, "reviewDecision": "APPROVED",
-                "latestReviews": [{"state": "APPROVED", "commit": {"oid": c_a}}],
+                "latestReviews": [{"state": "APPROVED", "author": {"login": "human"}, "authorAssociation": "MEMBER", "commit": {"oid": c_a}}],
             }
             all_prs = [pr_b, pr_a]
 
@@ -996,7 +996,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
             "pr": 1, "ticket": 10, "head_commit": "sha_prefix_11111111",
             "reviewDecision": "APPROVED",
             "latestReviews": [
-                {"state": "APPROVED", "commit": {"oid": "sha_prefix_22222222"}}
+                {"state": "APPROVED", "author": {"login": "human"}, "authorAssociation": "MEMBER", "commit": {"oid": "sha_prefix_22222222"}}
             ],
         }
         ok, reason = deploy.verify_revision_authorization(pr_prefix_mismatch)
@@ -1008,7 +1008,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
             "pr": 1, "ticket": 10, "head_commit": "sha_exact_full_head_1234567890",
             "reviewDecision": "APPROVED",
             "latestReviews": [
-                {"state": "APPROVED", "authorAssociation": "MEMBER", "commit": {"oid": "sha_exact_full_head_1234567890"}}
+                {"state": "APPROVED", "author": {"login": "human"}, "authorAssociation": "MEMBER", "commit": {"oid": "sha_exact_full_head_1234567890"}}
             ],
         }
         ok, reason = deploy.verify_revision_authorization(pr_valid)
@@ -1323,6 +1323,250 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
                 self.assertIn("timed out after 1s", res.error)
                 self.assertIn("partial bytes stdout", res.output)
                 self.assertIn("partial bytes stderr", res.output)
+
+    def test_followup_1_affirmative_reviewer_identity_and_permission_required(self) -> None:
+        """[P1] Reviews without affirmative identity or without repository permission are rejected."""
+        # 1. Identity-free review (matching commit but no author or authorAssociation)
+        pr_identity_free = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_head_commit_1",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {"state": "APPROVED", "commit": {"oid": "sha_head_commit_1"}}
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_identity_free)
+        self.assertFalse(ok)
+        self.assertIn("no trusted human APPROVED reviews found", reason)
+
+        # 2. Reviewer with untrusted association (NONE)
+        pr_untrusted_assoc = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_head_commit_1",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {
+                    "state": "APPROVED",
+                    "author": {"login": "stranger"},
+                    "authorAssociation": "NONE",
+                    "commit": {"oid": "sha_head_commit_1"},
+                }
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_untrusted_assoc)
+        self.assertFalse(ok)
+        self.assertIn("no trusted human APPROVED reviews found", reason)
+
+        # 3. Reviewer with FIRST_TIME_CONTRIBUTOR association
+        pr_contributor = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_head_commit_1",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {
+                    "state": "APPROVED",
+                    "author": {"login": "first_timer"},
+                    "authorAssociation": "FIRST_TIME_CONTRIBUTOR",
+                    "commit": {"oid": "sha_head_commit_1"},
+                }
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_contributor)
+        self.assertFalse(ok)
+        self.assertIn("no trusted human APPROVED reviews found", reason)
+
+        # 4. Reviewer with MEMBER association passes
+        pr_member = {
+            "pr": 1, "ticket": 10, "head_commit": "sha_head_commit_1",
+            "reviewDecision": "APPROVED",
+            "latestReviews": [
+                {
+                    "state": "APPROVED",
+                    "author": {"login": "team_member"},
+                    "authorAssociation": "MEMBER",
+                    "commit": {"oid": "sha_head_commit_1"},
+                }
+            ],
+        }
+        ok, reason = deploy.verify_revision_authorization(pr_member)
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+        # 5. Reviewer in explicit allowlist passes even if association is CONTRIBUTOR
+        ok, reason = deploy.verify_revision_authorization(
+            pr_contributor, trusted_reviewers={"first_timer"}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_followup_2_reconciliation_verifies_execution_ownership_and_locks(self) -> None:
+        """[P1] Reconciliation cannot alter an actively executing run while locks are held."""
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[apply]\nenabled = true\n')
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+            events_file = cfg.factory / "events.jsonl"
+
+            # Create an active RUNNING run
+            running_run = deploy.DeployRun(
+                run_id="deploy-default-c1111111-1",
+                target="default",
+                commit="c1111111",
+                ticket=50,
+                attempt=1,
+                status=deploy.DeployStatus.RUNNING,
+                started_at="2026-09-14T00:00:00Z",
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(running_run, events_path=events_file)
+
+            # 1. When apply.lock is held by an active apply process:
+            a_ok, a_fd = deploy.acquire_apply_lock(cfg.factory)
+            self.assertTrue(a_ok)
+            try:
+                with mock.patch.object(config, "load", return_value=cfg):
+                    ret = apply.main([
+                        "--reconcile-run", "deploy-default-c1111111-1",
+                        "--reconcile-status", "succeeded",
+                    ])
+                    # Must fail with exit code 1 because apply.lock is held
+                    self.assertEqual(ret, 1)
+
+                # State must NOT have changed
+                tstate = deploy.get_target_state("default", events_path=events_file)
+                self.assertTrue(tstate.has_interrupted_run)
+                self.assertEqual(tstate.runs[-1].status, deploy.DeployStatus.RUNNING)
+            finally:
+                deploy.release_lock(a_fd)
+
+            # 2. When target lock is held:
+            t_ok, t_fd = deploy.acquire_target_lock(cfg.factory, "default")
+            self.assertTrue(t_ok)
+            try:
+                with mock.patch.object(config, "load", return_value=cfg):
+                    ret = apply.main([
+                        "--reconcile-run", "deploy-default-c1111111-1",
+                        "--reconcile-status", "succeeded",
+                    ])
+                    # Must fail with exit code 1 because target lock is held
+                    self.assertEqual(ret, 1)
+
+                tstate = deploy.get_target_state("default", events_path=events_file)
+                self.assertTrue(tstate.has_interrupted_run)
+                self.assertEqual(tstate.runs[-1].status, deploy.DeployStatus.RUNNING)
+            finally:
+                deploy.release_lock(t_fd)
+
+            # 3. When no locks are held: reconciliation succeeds
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main([
+                    "--reconcile-run", "deploy-default-c1111111-1",
+                    "--reconcile-status", "succeeded",
+                    "--reconcile-note", "operator reconciled",
+                ])
+                self.assertEqual(ret, 0)
+
+            tstate = deploy.get_target_state("default", events_path=events_file)
+            self.assertFalse(tstate.has_interrupted_run)
+            self.assertEqual(tstate.runs[-1].status, deploy.DeployStatus.SUCCEEDED)
+
+    def test_followup_3_recovery_commands_strictly_honor_dry_run(self) -> None:
+        """[P2] Recovery commands (--dry-run) perform zero mutations on events.jsonl."""
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[apply]\nenabled = true\n')
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+            events_file = cfg.factory / "events.jsonl"
+
+            # Create a RUNNING run
+            running_run = deploy.DeployRun(
+                run_id="deploy-default-c2222222-1",
+                target="default",
+                commit="c2222222",
+                ticket=51,
+                attempt=1,
+                status=deploy.DeployStatus.RUNNING,
+                started_at="2026-09-14T00:00:00Z",
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(running_run, events_path=events_file)
+            size_before = events_file.stat().st_size
+
+            # Dry-run reconciliation
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main([
+                    "--dry-run",
+                    "--reconcile-run", "deploy-default-c2222222-1",
+                    "--reconcile-status", "succeeded",
+                ])
+                self.assertEqual(ret, 0)
+                self.assertEqual(events_file.stat().st_size, size_before)
+
+            # Dry-run acknowledge failure
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main([
+                    "--dry-run",
+                    "--acknowledge-failure", "51",
+                ])
+                self.assertEqual(ret, 0)
+                self.assertEqual(events_file.stat().st_size, size_before)
+
+            # Dry-run with nonexistent run fails validation
+            with mock.patch.object(config, "load", return_value=cfg):
+                ret = apply.main([
+                    "--dry-run",
+                    "--reconcile-run", "nonexistent-run-id",
+                ])
+                self.assertEqual(ret, 1)
+                self.assertEqual(events_file.stat().st_size, size_before)
+
+    def test_followup_4_failed_execution_does_not_create_synthetic_duplicate_attempt(self) -> None:
+        """[P2] Failed adapter execution attaches escalation to the existing run without creating attempt N+1."""
+        from agent_factory import apply, dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[apply]\nenabled = true\n')
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+            events_file = cfg.factory / "events.jsonl"
+
+            fake_adapter = mock.Mock()
+            fake_adapter.prepare.return_value = (True, "")
+            fake_adapter.check.return_value = (True, "")
+            fake_adapter.execute.return_value = deploy.DeployExecutionResult(
+                ok=False,
+                error="execution failed in test",
+                output="error trace",
+            )
+            fake_adapter.cleanup = mock.Mock()
+
+            ticket = {"ticket": 60, "pr": 15, "commit": "c6060606"}
+
+            with mock.patch.object(apply, "fresh_checkout", return_value=Path(d)), \
+                 mock.patch.object(apply, "touches_apply_dir", return_value=True), \
+                 mock.patch.object(dispatch, "run"), \
+                 mock.patch.object(dispatch, "pr_comment"):
+                success = apply.apply_one(ticket, dry_run=False, adapter=fake_adapter)
+                self.assertFalse(success)
+
+            tstate = deploy.get_target_state("default", events_path=events_file)
+            # Must have EXACTLY 1 run recorded, not a duplicate attempt 2!
+            self.assertEqual(len(tstate.runs), 1)
+            self.assertEqual(tstate.runs[0].attempt, 1)
+            self.assertEqual(tstate.runs[0].status, deploy.DeployStatus.FAILED)
+            self.assertIn(60, tstate.unacknowledged_failed_tickets)
+
+            # Acknowledging the run unblocks the target completely
+            deploy.acknowledge_failure("default", tstate.runs[0].run_id, events_path=events_file)
+            tstate_ack = deploy.get_target_state("default", events_path=events_file)
+            self.assertEqual(len(tstate_ack.unacknowledged_failed_tickets), 0)
 
 
 if __name__ == "__main__":

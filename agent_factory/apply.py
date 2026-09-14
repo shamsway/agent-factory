@@ -253,7 +253,15 @@ def apply_env() -> dict:
     return env
 
 
-def apply_escalate(n: int, pr: int, reason: str, commit: str = "", target: str = "default", dry_run: bool = False) -> None:
+def apply_escalate(
+    n: int,
+    pr: int,
+    reason: str,
+    commit: str = "",
+    target: str = "default",
+    dry_run: bool = False,
+    existing_run_id: str | None = None,
+) -> None:
     """Post-merge escalation: the tracking issue is already closed, so this
     only comments + records an event rather than touching labels the way
     `dispatch.escalate` does for in-flight tickets."""
@@ -261,23 +269,28 @@ def apply_escalate(n: int, pr: int, reason: str, commit: str = "", target: str =
         log(f"#{n}: would escalate ({reason})")
         return
 
-    attempt = deploy.next_attempt(target, n, commit, events_path=dispatch.EVENTS)
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    run = deploy.DeployRun(
-        run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
-        target=target,
-        commit=commit,
-        ticket=n,
-        attempt=attempt,
-        status=deploy.DeployStatus.FAILED,
-        started_at=now,
-        completed_at=now,
-        pr=pr,
-        error=reason,
-        version=deploy.CONTRACT_VERSION,
-    )
-    deploy.record_deploy_run(run)
-    dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason, run_id=run.run_id, target=target)
+    if existing_run_id:
+        run_id = existing_run_id
+    else:
+        attempt = deploy.next_attempt(target, n, commit, events_path=dispatch.EVENTS)
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        run = deploy.DeployRun(
+            run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+            target=target,
+            commit=commit,
+            ticket=n,
+            attempt=attempt,
+            status=deploy.DeployStatus.FAILED,
+            started_at=now,
+            completed_at=now,
+            pr=pr,
+            error=reason,
+            version=deploy.CONTRACT_VERSION,
+        )
+        deploy.record_deploy_run(run)
+        run_id = run.run_id
+
+    dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason, run_id=run_id, target=target)
     body = f"`factory apply` did not proceed: {reason}."
     try:
         dispatch.run(
@@ -417,7 +430,11 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             log(f"#{n}: notification failed: {notify_err}")
 
         if not exec_res.ok:
-            apply_escalate(n, pr, exec_res.error or "deploy failed", commit=commit, target=target, dry_run=dry_run)
+            apply_escalate(
+                n, pr, exec_res.error or "deploy failed",
+                commit=commit, target=target, dry_run=dry_run,
+                existing_run_id=final_run.run_id,
+            )
             return False
         else:
             log(f"#{n}: applied (PR #{pr})")
@@ -443,48 +460,101 @@ def main(argv: list[str]) -> int:
 
     if args.acknowledge_failure:
         target_name = args.target or "default"
-        deploy.acknowledge_failure(
-            target=target_name,
-            ticket_or_run_id=args.acknowledge_failure,
-            note=args.reconcile_note,
-            events_path=dispatch.EVENTS,
-        )
-        log(f"acknowledged failure for `{args.acknowledge_failure}` on target `{target_name}`")
-        return 0
+        if args.dry_run:
+            log(f"would acknowledge failure for `{args.acknowledge_failure}` on target `{target_name}`")
+            return 0
+
+        a_ok, a_fd = deploy.acquire_apply_lock(cfg.factory)
+        if not a_ok:
+            log("cannot acknowledge failure while an active apply process holds apply.lock")
+            return 1
+
+        t_ok, t_fd = deploy.acquire_target_lock(cfg.factory, target_name)
+        if not t_ok:
+            log(f"target `{target_name}`: cannot acknowledge failure while an active deployment holds target lock")
+            deploy.release_lock(a_fd)
+            return 1
+
+        try:
+            deploy.acknowledge_failure(
+                target=target_name,
+                ticket_or_run_id=args.acknowledge_failure,
+                note=args.reconcile_note,
+                events_path=dispatch.EVENTS,
+            )
+            log(f"acknowledged failure for `{args.acknowledge_failure}` on target `{target_name}`")
+            return 0
+        finally:
+            deploy.release_lock(t_fd)
+            deploy.release_lock(a_fd)
 
     if args.reconcile_run:
         target_name = args.target or "default"
-        st_map = {
-            "succeeded": deploy.DeployStatus.SUCCEEDED,
-            "failed": deploy.DeployStatus.FAILED,
-            "acknowledged": deploy.DeployStatus.ACKNOWLEDGED,
-            "superseded": deploy.DeployStatus.SUPERSEDED,
-        }
-        st = st_map.get(args.reconcile_status, deploy.DeployStatus.FAILED)
-        rec = deploy.reconcile_interrupted_run(
-            target=target_name,
-            run_id=args.reconcile_run,
-            status=st,
-            note=args.reconcile_note,
-            events_path=dispatch.EVENTS,
-        )
-        if rec:
-            log(f"reconciled {args.reconcile_run} on target `{target_name}` as {args.reconcile_status}")
+        if args.dry_run:
+            tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
+            matching = [r for r in tstate.runs if r.run_id == args.reconcile_run]
+            if not matching:
+                log(f"error: run {args.reconcile_run} not found for target `{target_name}`")
+                return 1
+            if matching[-1].status != deploy.DeployStatus.RUNNING:
+                log(f"error: run {args.reconcile_run} on target `{target_name}` is not an interrupted run (status: {matching[-1].status.value})")
+                return 1
+            log(f"would reconcile {args.reconcile_run} on target `{target_name}` as {args.reconcile_status}")
             return 0
-        log(f"error: run {args.reconcile_run} not found for target `{target_name}`")
-        return 1
+
+        a_ok, a_fd = deploy.acquire_apply_lock(cfg.factory)
+        if not a_ok:
+            log("cannot reconcile while an active apply process holds apply.lock")
+            return 1
+
+        t_ok, t_fd = deploy.acquire_target_lock(cfg.factory, target_name)
+        if not t_ok:
+            log(f"target `{target_name}`: cannot reconcile while an active deployment holds target lock")
+            deploy.release_lock(a_fd)
+            return 1
+
+        target_obj = (cfg.targets.get(target_name) if cfg.targets else None) or config.DeployTarget(
+            name=target_name, dir=cfg.apply_dir, enabled=cfg.apply_enabled
+        )
+        b_ok, b_fd = deploy.acquire_backend_lock(cfg.factory, target_obj.backend_key)
+        if not b_ok:
+            log(f"target `{target_name}`: cannot reconcile while an active deployment holds backend lock for `{target_obj.backend_key}`")
+            deploy.release_lock(t_fd)
+            deploy.release_lock(a_fd)
+            return 1
+
+        try:
+            st_map = {
+                "succeeded": deploy.DeployStatus.SUCCEEDED,
+                "failed": deploy.DeployStatus.FAILED,
+                "acknowledged": deploy.DeployStatus.ACKNOWLEDGED,
+                "superseded": deploy.DeployStatus.SUPERSEDED,
+            }
+            st = st_map.get(args.reconcile_status, deploy.DeployStatus.FAILED)
+            rec = deploy.reconcile_interrupted_run(
+                target=target_name,
+                run_id=args.reconcile_run,
+                status=st,
+                note=args.reconcile_note,
+                events_path=dispatch.EVENTS,
+            )
+            if rec:
+                log(f"reconciled {args.reconcile_run} on target `{target_name}` as {args.reconcile_status}")
+                return 0
+            log(f"error: run {args.reconcile_run} not found for target `{target_name}`")
+            return 1
+        finally:
+            deploy.release_lock(b_fd)
+            deploy.release_lock(t_fd)
+            deploy.release_lock(a_fd)
 
     if not cfg.apply_enabled:
         log("apply not enabled for this repo ([apply].enabled = true to turn on)")
         return 0
 
-    (cfg.factory / "locks").mkdir(parents=True, exist_ok=True)
-    lock_fd = (cfg.factory / "locks" / "apply.lock").open("w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    a_ok, lock_fd = deploy.acquire_apply_lock(cfg.factory)
+    if not a_ok:
         log("skipped (another apply run holds the lock)")
-        lock_fd.close()
         return 0
     try:
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
@@ -595,8 +665,7 @@ def main(argv: list[str]) -> int:
             return 0
         return 1 if has_errors and not args.dry_run else 0
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
+        deploy.release_lock(lock_fd)
 
 
 if __name__ == "__main__":

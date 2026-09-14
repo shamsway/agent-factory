@@ -455,7 +455,11 @@ def sort_candidates_topologically(
     return sorted(candidates, key=key_fn)
 
 
-def verify_revision_authorization(pr_data: dict, commit: str = "") -> tuple[bool, str]:
+def verify_revision_authorization(
+    pr_data: dict,
+    commit: str = "",
+    trusted_reviewers: set[str] | list[str] | None = None,
+) -> tuple[bool, str]:
     """Verify that a candidate PR has explicit human review approval on the merged revision."""
     review_decision = pr_data.get("reviewDecision")
     if not review_decision:
@@ -485,17 +489,34 @@ def verify_revision_authorization(pr_data: dict, commit: str = "") -> tuple[bool
     approved_commits = []
     has_trusted_human_approval = False
 
+    trusted_associations = {"OWNER", "MEMBER", "COLLABORATOR"}
+    allowlist = set(trusted_reviewers) if trusted_reviewers else set()
+
     for r in reviews:
         if not isinstance(r, dict):
             continue
         if r.get("state") != "APPROVED":
             continue
 
-        # Verify author is a trusted human, not a bot
-        assoc = str(r.get("authorAssociation") or "")
-        author_dict = r.get("author") if isinstance(r.get("author"), dict) else {}
-        author_login = str(author_dict.get("login", "") if author_dict else r.get("author", ""))
-        if assoc == "BOT" or author_login.endswith("[bot]") or author_login.lower() == "github-actions":
+        # Require affirmative reviewer identity and repository permission or allowlist evidence
+        author_val = r.get("author")
+        if isinstance(author_val, dict):
+            author_login = str(author_val.get("login") or "").strip()
+        elif isinstance(author_val, str):
+            author_login = author_val.strip()
+        else:
+            author_login = ""
+
+        if not author_login:
+            # Identity-free review cannot establish trust
+            continue
+
+        if author_login.endswith("[bot]") or author_login.lower() == "github-actions":
+            continue
+
+        assoc = str(r.get("authorAssociation") or "").strip().upper()
+        if assoc not in trusted_associations and author_login not in allowlist:
+            # Missing permission evidence or untrusted association blocks trust
             continue
 
         has_trusted_human_approval = True
@@ -503,7 +524,7 @@ def verify_revision_authorization(pr_data: dict, commit: str = "") -> tuple[bool
             r.get("commit", {}).get("oid", "")
             if isinstance(r.get("commit"), dict)
             else str(r.get("commit", ""))
-        )
+        ).strip()
         if rev_commit:
             approved_commits.append(rev_commit)
             # Require exact full head SHA matching (no prefix match)
@@ -632,6 +653,20 @@ def acquire_backend_lock(factory_dir: Path, backend_key: str) -> tuple[bool, Any
     safe_key = re.sub(r"[^a-zA-Z0-9_.-]", "_", backend_key)
     locks_dir = get_shared_lock_dir()
     lock_file = locks_dir / f"backend-{safe_key}.lock"
+    lock_fd = lock_file.open("w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True, lock_fd
+    except OSError:
+        lock_fd.close()
+        return False, None
+
+
+def acquire_apply_lock(factory_dir: Path) -> tuple[bool, Any]:
+    """Acquire exclusive flock on apply.lock."""
+    locks_dir = factory_dir / "locks"
+    locks_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = locks_dir / "apply.lock"
     lock_fd = lock_file.open("w")
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1028,6 +1063,9 @@ def reconcile_interrupted_run(
         return None
 
     run = matching[-1]
+    if run.status != DeployStatus.RUNNING:
+        return None
+
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     reconciled_run = DeployRun(
         run_id=run.run_id,
