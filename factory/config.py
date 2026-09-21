@@ -245,16 +245,33 @@ def remote_slug(root: Path, remote: str) -> str:
 
 
 def host_config_path() -> Path:
+    """The one resolver host-config readers, writers, doctor and verification all
+    use. Prefers `factory/config.toml`; falls back to the pre-rename
+    `agent-factory/config.toml` only while the new path is genuinely absent --
+    a dangling preferred symlink is a configuration error, not a fallback, so
+    existence of the symlink itself (not its target) decides preference."""
     base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
-    return Path(base) / "factory" / "config.toml"
+    new_path = Path(base) / "factory" / "config.toml"
+    old_path = Path(base) / "agent-factory" / "config.toml"
+    if new_path.exists() or new_path.is_symlink():
+        return new_path
+    if old_path.exists() or old_path.is_symlink():
+        return old_path
+    return new_path
 
 
 def host_config() -> dict:
     path = host_config_path()
+    if path.is_symlink() and not path.exists():
+        raise ConfigError(f"{path}: dangling symlink")
     if not path.exists():
         return {}
     try:
-        return tomllib.loads(path.read_text())
+        text = path.read_text()
+    except OSError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+    try:
+        return tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
 
