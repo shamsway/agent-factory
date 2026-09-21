@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_factory import config
+from factory import config
 
 from tests.test_factory import make_repo
 
@@ -24,7 +24,7 @@ class TriageTest(unittest.TestCase):
         never for the (still-supported) no-auth local-model case."""
         from unittest import mock
 
-        from agent_factory import triage
+        from factory import triage
 
         class FakeResponse:
             def __enter__(self) -> "FakeResponse":

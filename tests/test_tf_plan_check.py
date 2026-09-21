@@ -27,7 +27,7 @@ class TfPlanCheckTest(unittest.TestCase):
         process by the dispatcher's systemd unit) must keep inheriting."""
         from unittest import mock
 
-        from agent_factory import tf_plan_check
+        from factory import tf_plan_check
 
         calls = []
 
@@ -59,13 +59,13 @@ class TfPlanCheckTest(unittest.TestCase):
     }
 
     def test_clean_plan_has_no_destructive_changes(self) -> None:
-        from agent_factory import tf_plan_check
+        from factory import tf_plan_check
 
         self.assertEqual(tf_plan_check.destructive_changes(self.CLEAN_PLAN), [])
         self.assertEqual(tf_plan_check.unexpected_changes(self.CLEAN_PLAN, ""), [])
 
     def test_destructive_plan_flags_delete_and_replace(self) -> None:
-        from agent_factory import tf_plan_check
+        from factory import tf_plan_check
 
         changes = tf_plan_check.destructive_changes(self.DESTRUCTIVE_PLAN)
         self.assertEqual(
@@ -73,14 +73,14 @@ class TfPlanCheckTest(unittest.TestCase):
         )
 
     def test_allowed_destroy_line_exempts_one_address(self) -> None:
-        from agent_factory import tf_plan_check
+        from factory import tf_plan_check
 
         ticket = "Upgrade the DB.\n\nAllowedDestroy: aws_db_instance.main\n"
         unexpected = tf_plan_check.unexpected_changes(self.DESTRUCTIVE_PLAN, ticket)
         self.assertEqual([addr for addr, _ in unexpected], ["aws_instance.bar"])
 
     def test_no_allow_list_flags_everything_destructive(self) -> None:
-        from agent_factory import tf_plan_check
+        from factory import tf_plan_check
 
         unexpected = tf_plan_check.unexpected_changes(self.DESTRUCTIVE_PLAN, "no allow lines here")
         self.assertEqual(
@@ -94,7 +94,7 @@ class TfPlanCheckTest(unittest.TestCase):
         itself happens to be invoked from (the worktree root)."""
         from unittest import mock
 
-        from agent_factory import tf_plan_check
+        from factory import tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d).resolve()

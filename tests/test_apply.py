@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_factory import config
+from factory import config
 
 from tests.test_factory import make_repo
 
@@ -34,7 +34,7 @@ class ApplyConfigTest(unittest.TestCase):
 
 class ApplyTest(unittest.TestCase):
     def test_applied_tickets_from_events(self) -> None:
-        from agent_factory import apply, dispatch
+        from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
@@ -48,7 +48,7 @@ class ApplyTest(unittest.TestCase):
     def test_merged_tickets_parses_agent_branch_prs_only(self) -> None:
         from unittest import mock
 
-        from agent_factory import apply, dispatch
+        from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
@@ -76,7 +76,7 @@ class ApplyTest(unittest.TestCase):
         ever run -- not only inside fresh_checkout(), which runs after."""
         from unittest import mock
 
-        from agent_factory import apply, dispatch
+        from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
             toml = "[apply]\nenabled = true\n"
@@ -108,7 +108,7 @@ class ApplyTest(unittest.TestCase):
     def test_merge_stage_waits_for_human_review_when_apply_enabled(self) -> None:
         from unittest import mock
 
-        from agent_factory import dispatch
+        from factory import dispatch
 
         toml = "[apply]\nenabled = true\n"
         with tempfile.TemporaryDirectory() as d:
@@ -134,7 +134,7 @@ class ApplyTest(unittest.TestCase):
     def test_merge_stage_proceeds_when_apply_disabled_and_only_llm_approved(self) -> None:
         from unittest import mock
 
-        from agent_factory import dispatch
+        from factory import dispatch
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
@@ -145,12 +145,15 @@ class ApplyTest(unittest.TestCase):
                 {
                     "number": 3,
                     "headRefName": "agent/9",
+                    "baseRefName": cfg.main,
+                    "headRefOid": "c0ffee",
                     "isDraft": False,
                     "labels": [{"name": config.LABEL_APPROVED}],
                     "reviewDecision": "REVIEW_REQUIRED",
                 }
             ]
             with mock.patch.object(dispatch, "gh_json", return_value=prs), \
+                 mock.patch.object(dispatch, "initiative_kind", return_value=False), \
                  mock.patch.object(dispatch, "pr_checks", return_value=[]) as checks:
                 dispatch.merge_pass_locked(dry_run=True)
             # apply.enabled is unset for this (software) repo, so the LLM's
@@ -161,7 +164,7 @@ class ApplyTest(unittest.TestCase):
     def test_apply_one_posts_to_issue_and_pr_on_success(self) -> None:
         from unittest import mock
 
-        from agent_factory import apply, dispatch, tf_plan_check
+        from factory import apply, dispatch, tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), "[apply]\nenabled = true\n")
@@ -219,7 +222,7 @@ class ApplyTest(unittest.TestCase):
     def test_apply_one_posts_to_issue_and_pr_on_failure(self) -> None:
         from unittest import mock
 
-        from agent_factory import apply, dispatch, tf_plan_check
+        from factory import apply, dispatch, tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), "[apply]\nenabled = true\n")
@@ -283,7 +286,7 @@ class ApplyTest(unittest.TestCase):
     def test_apply_escalate_posts_to_issue_and_pr_when_called_directly(self) -> None:
         from unittest import mock
 
-        from agent_factory import apply, dispatch
+        from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), "[apply]\nenabled = true\n")
@@ -320,7 +323,7 @@ class ApplyTest(unittest.TestCase):
     def test_apply_one_posts_to_issue_and_pr_on_fresh_plan_failure(self) -> None:
         from unittest import mock
 
-        from agent_factory import apply, dispatch, tf_plan_check
+        from factory import apply, dispatch, tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), "[apply]\nenabled = true\n")
@@ -365,7 +368,7 @@ class ApplyTest(unittest.TestCase):
     def test_apply_one_posts_to_issue_and_pr_on_unexpected_destroy(self) -> None:
         from unittest import mock
 
-        from agent_factory import apply, dispatch, tf_plan_check
+        from factory import apply, dispatch, tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), "[apply]\nenabled = true\n")
