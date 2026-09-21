@@ -31,7 +31,7 @@ factory = "factory.cli:main"
 path = "factory/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["factory"]
+packages = ["factory", "agent_factory"]
 
 [tool.ruff]
 line-length = 100
