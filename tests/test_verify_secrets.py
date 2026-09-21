@@ -73,6 +73,79 @@ class VerifySecretsTest(unittest.TestCase):
                 rc = verify_secrets.main([])
             self.assertEqual(rc, 1)
 
+    def test_main_exits_nonzero_when_dispatcher_unit_is_missing(self) -> None:
+        """A dispatcher unit that `systemctl` can't find is a real failure, not a benign
+        'not installed' row -- there is nothing running the factory at all."""
+        from unittest import mock
+
+        from factory import verify_secrets
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml='[install]\nenv = { GH_TOKEN = "tok" }\n')
+            original_cwd = Path.cwd()
+            os.chdir(repo)
+            self.addCleanup(os.chdir, original_cwd)
+
+            with mock.patch.object(verify_secrets, "unit_env", return_value=None):
+                rc = verify_secrets.main([])
+            self.assertEqual(rc, 1)
+
+    def test_main_tolerates_missing_dashboard_unit_when_dashboard_disabled(self) -> None:
+        """The dashboard unit is optional: its absence alone must not fail the check
+        when `[install].dashboard` was never turned on."""
+        from unittest import mock
+
+        from factory import verify_secrets
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml='[install]\nenv = { GH_TOKEN = "tok" }\n')
+            cfg = config.load(repo)
+            original_cwd = Path.cwd()
+            os.chdir(repo)
+            self.addCleanup(os.chdir, original_cwd)
+
+            def fake_unit_env(unit: str) -> dict[str, str] | None:
+                if unit == f"{cfg.unit}.service":
+                    return {"GH_TOKEN": "tok"}
+                return None  # dashboard unit not installed
+
+            with mock.patch.object(verify_secrets, "unit_env", side_effect=fake_unit_env):
+                rc = verify_secrets.main([])
+            self.assertEqual(rc, 0)
+
+    def test_main_exits_nonzero_on_live_auth_failure(self) -> None:
+        """`--live` must turn a real credential failure into a nonzero exit, not just print it."""
+        from unittest import mock
+
+        from factory import verify_secrets
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml='[install]\nenv = { GH_TOKEN = "tok" }\n')
+            original_cwd = Path.cwd()
+            os.chdir(repo)
+            self.addCleanup(os.chdir, original_cwd)
+
+            with mock.patch.object(verify_secrets, "unit_env", return_value={"GH_TOKEN": "tok"}), \
+                 mock.patch.dict(verify_secrets.LIVE_CHECKS, {"GH_TOKEN": lambda token: "auth FAILED"}):
+                rc = verify_secrets.main(["--live"])
+            self.assertEqual(rc, 1)
+
+    def test_main_stays_zero_on_live_auth_success(self) -> None:
+        from unittest import mock
+
+        from factory import verify_secrets
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml='[install]\nenv = { GH_TOKEN = "tok" }\n')
+            original_cwd = Path.cwd()
+            os.chdir(repo)
+            self.addCleanup(os.chdir, original_cwd)
+
+            with mock.patch.object(verify_secrets, "unit_env", return_value={"GH_TOKEN": "tok"}), \
+                 mock.patch.dict(verify_secrets.LIVE_CHECKS, {"GH_TOKEN": lambda token: "OK, scopes: repo"}):
+                rc = verify_secrets.main(["--live"])
+            self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

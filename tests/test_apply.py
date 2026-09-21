@@ -106,6 +106,10 @@ class ApplyTest(unittest.TestCase):
             self.assertLess(fetch_idx, prlist_idx)
 
     def test_merge_stage_waits_for_human_review_when_apply_enabled(self) -> None:
+        """A PR that otherwise clears every other candidate filter (correct base,
+        not draft, factory-approved label, no changes-requested) must still be
+        held back by the apply-enabled human-review gate specifically -- not by
+        an unrelated filter such as a missing/mismatched baseRefName."""
         from unittest import mock
 
         from factory import dispatch
@@ -119,17 +123,51 @@ class ApplyTest(unittest.TestCase):
                 {
                     "number": 3,
                     "headRefName": "agent/9",
+                    "headRefOid": "c0ffee",
+                    "baseRefName": cfg.main,
                     "isDraft": False,
                     "labels": [{"name": config.LABEL_APPROVED}],
                     "reviewDecision": "REVIEW_REQUIRED",
                 }
             ]
             with mock.patch.object(dispatch, "gh_json", return_value=prs), \
-                 mock.patch.object(dispatch, "pr_checks") as checks:
+                 mock.patch.object(dispatch, "pr_checks") as checks, \
+                 mock.patch.object(dispatch, "log") as log_mock:
                 dispatch.merge_pass_locked(dry_run=True)
             # No candidates survive the human-review gate, so the CI-check
             # stage (and anything past it) is never reached.
             checks.assert_not_called()
+            message = " ".join(str(c) for c in log_mock.call_args_list)
+            self.assertIn("apply-eligible repo needs a human-approved review; waiting", message)
+
+    def test_merge_stage_proceeds_past_human_review_gate_when_approved(self) -> None:
+        """The positive counterpart: an identical PR with a real GitHub `APPROVED`
+        review clears the human-review gate and reaches the CI-check stage."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        toml = "[apply]\nenabled = true\n"
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            dispatch.configure(cfg)
+            prs = [
+                {
+                    "number": 3,
+                    "headRefName": "agent/9",
+                    "headRefOid": "c0ffee",
+                    "baseRefName": cfg.main,
+                    "isDraft": False,
+                    "labels": [{"name": config.LABEL_APPROVED}],
+                    "reviewDecision": "APPROVED",
+                }
+            ]
+            with mock.patch.object(dispatch, "gh_json", return_value=prs), \
+                 mock.patch.object(dispatch, "initiative_kind", return_value=False), \
+                 mock.patch.object(dispatch, "pr_checks") as checks:
+                dispatch.merge_pass_locked(dry_run=True)
+            checks.assert_called_once_with(3)
 
     def test_merge_stage_proceeds_when_apply_disabled_and_only_llm_approved(self) -> None:
         from unittest import mock

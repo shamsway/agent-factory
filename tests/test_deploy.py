@@ -1667,6 +1667,53 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
             tstate_ack = deploy.get_target_state("default", events_path=events_file)
             self.assertEqual(len(tstate_ack.unacknowledged_failed_tickets), 0)
 
+    def test_followup_6_interrupted_tail_does_not_swallow_the_next_deploy_write(self) -> None:
+        """[P1] An events.jsonl left with an unterminated (interrupted-append) trailing
+        line must not corrupt the *next* write. deploy.py's writers must go through
+        `lifecycle.append`, which detects the missing newline and isolates the broken
+        tail with a null-byte sentinel before writing the new row on its own line --
+        a raw `open('a').write(...)` instead concatenates onto the broken bytes and
+        makes both the old partial line and the new row unparseable."""
+        from factory import lifecycle
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[apply]\nenabled = true\n')
+            cfg = config.load(repo)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+            events_file = cfg.factory / "events.jsonl"
+            # Simulate a process killed mid-write: a syntactically complete JSON
+            # object with no trailing newline.
+            events_file.write_text('{"event": "claimed", "ticket": 70, "at": "2026-09-20T00:00:00Z"}')
+
+            run = deploy.DeployRun(
+                run_id="deploy-default-c7070707-1",
+                target="default",
+                commit="c7070707",
+                ticket=70,
+                attempt=1,
+                status=deploy.DeployStatus.FAILED,
+                started_at="2026-09-20T00:01:00Z",
+                completed_at="2026-09-20T00:02:00Z",
+                version=deploy.CONTRACT_VERSION,
+            )
+            deploy.record_deploy_run(run, events_path=events_file)
+
+            rows = lifecycle.read_events(events_file)
+            self.assertEqual(len(rows), 1, rows)
+            self.assertEqual(rows[0]["event"], "deploy_run")
+            self.assertEqual(rows[0]["run_id"], "deploy-default-c7070707-1")
+
+            tstate = deploy.get_target_state("default", events_path=events_file)
+            self.assertEqual(len(tstate.runs), 1)
+            self.assertIn(70, tstate.unacknowledged_failed_tickets)
+
+            # A second interrupted-tail scenario against acknowledge_failure's writer.
+            events_file.write_bytes(events_file.read_bytes() + b'{"broken tail, no newline')
+            deploy.acknowledge_failure("default", run.run_id, events_path=events_file)
+            tstate2 = deploy.get_target_state("default", events_path=events_file)
+            self.assertIn(run.run_id, tstate2.acknowledged_failures)
+            self.assertNotIn(70, tstate2.unacknowledged_failed_tickets)
+
 
 if __name__ == "__main__":
     unittest.main()

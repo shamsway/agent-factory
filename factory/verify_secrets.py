@@ -41,6 +41,19 @@ def units_for(cfg: config.Config) -> list[str]:
     return [f"{cfg.unit}.service", f"{cfg.unit}-dashboard.service"]
 
 
+def required_units(cfg: config.Config) -> set[str]:
+    """Units whose absence is itself a failure, not a benign "not installed" row.
+
+    The dispatcher unit is always required. The dashboard unit is required only
+    when `[install].dashboard` is enabled -- a disabled dashboard is expected to
+    be absent, same as `onboard.install()` treats it.
+    """
+    units = {f"{cfg.unit}.service"}
+    if cfg.install.get("dashboard"):
+        units.add(f"{cfg.unit}-dashboard.service")
+    return units
+
+
 def sync_rows(cfg: config.Config, unit_env_fn=None) -> list[tuple[str, str, str]]:
     """(unit, key, status) for every [install].env key, one row per unit that's actually installed."""
     unit_env_fn = unit_env_fn or unit_env  # looked up at call time so tests can mock the module-level default
@@ -115,14 +128,26 @@ def main(argv: list[str]) -> int:
     for unit, key, status in rows:
         print(f"  {unit}: {key}: {status}")
 
+    required = required_units(cfg)
+    stale = any(status not in ("in sync", "not installed") for _, _, status in rows)
+    missing = sorted(
+        {unit for unit, _, status in rows if status == "not installed" and unit in required}
+    )
+    if missing:
+        print(f"  MISSING required unit(s): {', '.join(missing)}")
+    missing_required = bool(missing)
+
+    live_failed = False
     if args.live:
         print()
         for key, checker in LIVE_CHECKS.items():
             if key in cfg.install["env"]:
-                print(f"  live check {key}: {checker(cfg.install['env'][key])}")
+                result = checker(cfg.install["env"][key])
+                print(f"  live check {key}: {result}")
+                if "FAILED" in result:
+                    live_failed = True
 
-    stale = any(status not in ("in sync", "not installed") for _, _, status in rows)
-    return 1 if stale else 0
+    return 1 if (stale or missing_required or live_failed) else 0
 
 
 if __name__ == "__main__":

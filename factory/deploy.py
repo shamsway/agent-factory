@@ -20,6 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from factory import lifecycle
+
 CONTRACT_VERSION = 1
 
 
@@ -374,8 +376,7 @@ def record_deploy_run(run: DeployRun, events_path: Path | None = None) -> None:
             "event": "deploy_run",
             **run.to_dict(),
         }
-        with events_path.open("a") as f:
-            f.write(json.dumps(row) + "\n")
+        lifecycle.append(events_path, row)
     else:
         from factory import dispatch
         dispatch.record("deploy_run", **run.to_dict())
@@ -394,8 +395,7 @@ def record_unauthorized_event(
     }
     if events_path is not None:
         events_path.parent.mkdir(parents=True, exist_ok=True)
-        with events_path.open("a") as f:
-            f.write(json.dumps(row) + "\n")
+        lifecycle.append(events_path, row)
     else:
         from factory import dispatch
         dispatch.record("deploy_unauthorized", commit=commit, target=target, reason=reason)
@@ -1111,8 +1111,7 @@ def reconcile_interrupted_run(
             "status": status.value,
             "note": note,
         }
-        with events_path.open("a") as f:
-            f.write(json.dumps(rec_entry) + "\n")
+        lifecycle.append(events_path, rec_entry)
         if status in (DeployStatus.ACKNOWLEDGED, DeployStatus.SUPERSEDED):
             ack_entry = {
                 "event": "deploy_acknowledged",
@@ -1122,8 +1121,7 @@ def reconcile_interrupted_run(
                 "ticket": run.ticket,
                 "note": note,
             }
-            with events_path.open("a") as f:
-                f.write(json.dumps(ack_entry) + "\n")
+            lifecycle.append(events_path, ack_entry)
     return reconciled_run
 
 
@@ -1182,8 +1180,7 @@ def acknowledge_failure(
         from factory import dispatch
         events_path = dispatch.EVENTS
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    with events_path.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    lifecycle.append(events_path, entry)
     return failed_run
 
 
