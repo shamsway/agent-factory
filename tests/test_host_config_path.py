@@ -1,6 +1,7 @@
-"""The single host-config-path resolver (docs/upstream-migration-plan.md,
-Section 4): old-only, new-only, both/distinct, neither, malformed preferred
-config, dangling links, custom XDG_CONFIG_HOME, and writer behavior.
+"""The single host-config-path resolver, reading `$XDG_CONFIG_HOME/factory/config.toml`
+with a fallback to the legacy `agent-factory` path: old-only, new-only, both/distinct,
+neither, malformed preferred config, dangling links, custom XDG_CONFIG_HOME, and writer
+behavior.
 """
 
 from __future__ import annotations

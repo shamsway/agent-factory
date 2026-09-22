@@ -1,5 +1,5 @@
 """`ready-for-investigation` lane: report-only scheduling, human handoff, and
-dedup against `ready-for-agent` (docs/upstream-migration-plan.md, Scheduling row).
+dedup against `ready-for-agent`.
 """
 
 from __future__ import annotations

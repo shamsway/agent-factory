@@ -1,6 +1,6 @@
-"""`factory install --no-start`: the installation-without-activation contract
-(docs/upstream-migration-plan.md, Section 2). Asserts the actual systemctl
-call set, not merely the CLI return code, per the plan's explicit requirement.
+"""`factory install --no-start`: the installation-without-activation contract.
+Asserts the actual systemctl call set, not merely the CLI return code -- the
+whole point of `--no-start` is that no enable/start/restart/stop call happens.
 """
 
 from __future__ import annotations

@@ -1,6 +1,5 @@
-"""Legacy `agent_factory` import-path compatibility (docs/upstream-migration-plan.md,
-Section 3 compatibility contract): module identity, shared state, and the old
-`python -m agent_factory.tf_plan_check` entrypoint.
+"""Legacy `agent_factory` import-path compatibility: module identity, shared state,
+and the old `python -m agent_factory.tf_plan_check` entrypoint.
 
 Run: python -m unittest discover -s tests
 """
