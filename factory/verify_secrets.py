@@ -133,14 +133,20 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
         if scope not in ("all", name):
             continue
         for key, value in sorted(env.items()):
-            status = "configured" if value else "empty"
+            # An empty value fails only for a known credential; an empty
+            # selector (TF_VAR_onepassword_account) is intentional. The verdict
+            # must not depend on --live.
+            if not value:
+                status = "empty" if key in LIVE_CHECKS else "empty_allowed"
+            else:
+                status = "configured"
             if live and key in LIVE_CHECKS and value:
                 try:
                     result = LIVE_CHECKS[key](str(value))
                     status = "valid" if result.startswith("OK") else "invalid"
                 except (OSError, subprocess.SubprocessError, ValueError):
                     status = "unavailable"
-            elif live and key not in LIVE_CHECKS:
+            elif live and key not in LIVE_CHECKS and value:
                 status = "not_checked"
             rows.append({"scope": name, "key": key, "status": status})
     return rows

@@ -144,10 +144,21 @@ def process_snapshot(pid: int, cfg: config.Config, expected_python: str) -> dict
         return {"status": "unavailable", "pid": pid}
 
 
+def unit_properties(text: str) -> dict[str, str]:
+    """systemctl show repeats a property once per entry (ExecStart per command,
+    EnvironmentFiles per file); keep every entry instead of the last."""
+    props: dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            props[key] = f"{props[key]}\n{value}" if props.get(key) else value
+    return props
+
+
 def unit_snapshot(cfg: config.Config, unit: str, manager_env: dict | None, worker_cwd: Path | None = None) -> dict:
     try:
         text = command(["systemctl", "--user", "show", f"--property={PROPERTIES}", "--", unit])
-        props = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        props = unit_properties(text)
         if props.get("LoadState") != "loaded":
             return {"unit": unit, "status": "not_loaded"}
         output = {"unit": unit, "status": "observed", "load_state": props["LoadState"],

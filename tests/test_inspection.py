@@ -75,6 +75,29 @@ class InspectionTest(unittest.TestCase):
         rows = inspection.boundary(self.cfg, {"TF_VAR_onepassword_account": "unexpected"})
         self.assertEqual([r["status"] for r in rows if r["scope"] == "apply"], ["leaked"])
 
+    def test_empty_selector_verdict_does_not_depend_on_live(self):
+        self.cfg.install["env"]["TF_VAR_onepassword_account"] = ""
+        self.cfg.apply_env = {"OP_SERVICE_ACCOUNT_TOKEN": SECRET, "TF_VAR_onepassword_account": ""}
+        checks = {"GH_TOKEN": lambda _: "OK", "OP_SERVICE_ACCOUNT_TOKEN": lambda _: "OK"}
+        for live in ([], ["--live"]):
+            with self.subTest(live=bool(live)), patch.object(config, "load", return_value=self.cfg), \
+                 patch.object(verify_secrets, "sync_rows", return_value=[]), \
+                 patch.dict(verify_secrets.LIVE_CHECKS, checks, clear=True), redirect_stdout(io.StringIO()) as out:
+                code = verify_secrets.main(["--scope", "all", "--json", *live])
+                report = json.loads(out.getvalue())
+                self.assertEqual(code, 0)
+                self.assertTrue(report["ok"])
+                self.assertEqual({r["status"] for r in report["credentials"] if r["key"] == "TF_VAR_onepassword_account"},
+                                 {"empty_allowed"})
+
+    def test_empty_known_credential_fails_with_and_without_live(self):
+        self.cfg.install["env"]["GH_TOKEN"] = ""
+        with patch.dict(verify_secrets.LIVE_CHECKS, {"GH_TOKEN": lambda _: "OK", "OP_SERVICE_ACCOUNT_TOKEN": lambda _: "OK"}, clear=True):
+            for live in (False, True):
+                with self.subTest(live=live):
+                    rows = verify_secrets.credential_rows(self.cfg, "install", live)
+                    self.assertEqual([r["status"] for r in rows if r["key"] == "GH_TOKEN"], ["empty"])
+
     def test_required_dashboard_missing_fails(self):
         self.cfg.install["dashboard"] = True
         rows = [(self.cfg.unit + '.service', 'GH_TOKEN', 'in sync'),
@@ -224,6 +247,26 @@ class InspectionTest(unittest.TestCase):
             result = inspection.unit_snapshot(self.cfg, self.cfg.unit+'.service', {}, self.root)
         self.assertFalse(result['gate_matches_service'])
         self.assertEqual(result['gate_cwd'], str(self.root))
+
+    def test_every_repeated_execstart_stage_is_inspected(self):
+        # Unified unit: `ExecStart=-<python> -m factory triage` then dispatch;
+        # systemctl show prints one ExecStart= line per command.
+        def unit(triage_python):
+            return '\n'.join(['LoadState=loaded', 'ActiveState=inactive', 'MainPID=0',
+                              'Environment=GH_TOKEN=read-token PATH=/usr/bin',
+                              f'ExecStart={{ path={triage_python} ; argv[]={triage_python} -m factory triage ; ignore_errors=yes ; }}',
+                              f'ExecStart={{ path={sys.executable} ; argv[]={sys.executable} -m factory dispatch ; ignore_errors=no ; }}'])
+        self.cfg.install["python"] = sys.executable
+        with patch.object(inspection, 'command', return_value=unit('/old/python')), \
+             patch.object(inspection, 'runtime_probe', return_value={'status': 'observed'}):
+            stale = inspection.unit_snapshot(self.cfg, self.cfg.unit+'.service', {}, self.root)
+        self.assertEqual(stale['configured_executables'], ['/old/python', sys.executable])
+        self.assertFalse(stale['configured_interpreter_matches'])
+        with patch.object(inspection, 'command', return_value=unit(sys.executable)), \
+             patch.object(inspection, 'runtime_probe', return_value={'status': 'observed'}):
+            current = inspection.unit_snapshot(self.cfg, self.cfg.unit+'.service', {}, self.root)
+        self.assertEqual(current['configured_executables'], [sys.executable, sys.executable])
+        self.assertTrue(current['configured_interpreter_matches'])
 
     def test_kernel_lock_on_journal_returns_unknown_instead_of_waiting(self):
         path = self.cfg.factory / 'events.jsonl'
