@@ -70,7 +70,9 @@ def boundary(cfg: config.Config, env: dict) -> list[dict]:
                      "status": "match" if env.get(key) == str(value) else "missing_or_stale"})
     for key, value in sorted(cfg.apply_env.items()):
         # A scoped GH_TOKEN may exist in both roles, but must not be the apply value.
-        leak = key in env and (key not in cfg.install["env"] or env[key] == str(value))
+        # An empty selector (for example TF_VAR_onepassword_account) is not
+        # a credential. A nonempty unexpected value still violates isolation.
+        leak = bool(env.get(key)) and (key not in cfg.install["env"] or env[key] == str(value))
         rows.append({"scope": "apply", "key": key, "status": "leaked" if leak else "isolated"})
     return rows
 

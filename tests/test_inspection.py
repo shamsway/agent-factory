@@ -66,6 +66,15 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(sum(r["status"] == "leaked" for r in bad), 2)
         self.assertNotIn(SECRET, json.dumps(bad))
 
+    def test_empty_apply_selector_is_not_a_leaked_credential(self):
+        self.cfg.apply_env = {"TF_VAR_onepassword_account": ""}
+        self.cfg.install["env"]["TF_VAR_onepassword_account"] = ""
+        rows = inspection.boundary(self.cfg, self.cfg.install["env"])
+        self.assertEqual([r["status"] for r in rows if r["scope"] == "apply"], ["isolated"])
+        del self.cfg.install["env"]["TF_VAR_onepassword_account"]
+        rows = inspection.boundary(self.cfg, {"TF_VAR_onepassword_account": "unexpected"})
+        self.assertEqual([r["status"] for r in rows if r["scope"] == "apply"], ["leaked"])
+
     def test_required_dashboard_missing_fails(self):
         self.cfg.install["dashboard"] = True
         rows = [(self.cfg.unit + '.service', 'GH_TOKEN', 'in sync'),
