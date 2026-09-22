@@ -1,5 +1,5 @@
 """Legacy import path: `agent_factory` is the retired pre-migration name for the
-`factory` distribution (see docs/upstream-migration-plan.md).
+`factory` distribution (see docs/legacy-compat-retirement.md).
 
 Every stateful submodule here (config, dispatch, apply, deploy, verify_secrets) is
 installed as a true alias of its `factory.<name>` counterpart via `sys.modules`
@@ -10,7 +10,8 @@ thin CLI-forwarding shim instead, matching the shape the old gate check invoked 
 in (`python -m agent_factory.tf_plan_check ...`).
 
 Kept only for callers still on the old path (an existing `.factory.toml` gate check,
-a script's `import agent_factory`); add no new callers. Retire once nothing does.
+a script's `import agent_factory`); add no new callers. Retirement preconditions and
+order: docs/legacy-compat-retirement.md.
 """
 
 from factory import __version__
