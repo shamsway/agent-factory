@@ -10,6 +10,7 @@ COMMANDS = {
     "doctor": ("onboard", "doctor", "check tools, auth, remotes, and the triage model"),
     "install": ("onboard", "install", "install the systemd user timer (and dashboard)"),
     "verify-secrets": ("verify_secrets", "main", "check [install].env credentials are live and match installed units"),
+    "inspect": ("inspection", "main", "read runtime, unit, credential-boundary, deployment and lock metadata"),
     "triage": ("triage", "main", "label needs-triage issues with the local model"),
     "dispatch": ("dispatch", "main", "one pass: sync, merge stage, claim and work tickets"),
     "apply": ("apply", "main", "terraform apply for merged, apply-eligible tickets"),

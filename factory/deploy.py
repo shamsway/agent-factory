@@ -256,20 +256,22 @@ def replay_events(events_path: Path) -> dict[str, TargetState]:
     if not events_path.exists():
         return {}
 
-    states: dict[str, TargetState] = {}
-    runs_by_id: dict[str, DeployRun] = {}
-
+    rows = []
     for line in events_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
         try:
             row = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(row, dict):
-            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return replay_rows(rows)
 
+
+def replay_rows(rows: list[dict]) -> dict[str, TargetState]:
+    """Project a captured journal snapshot without another read or any writes."""
+    states: dict[str, TargetState] = {}
+    runs_by_id: dict[str, DeployRun] = {}
+    for row in rows:
         event = row.get("event")
         if event in ("deploy_acknowledged", "deploy_superseded"):
             tgt = str(row.get("target") or "default")
@@ -628,17 +630,24 @@ def find_unauthorized_direct_merges(
     return unauthorized
 
 
-def get_shared_lock_dir() -> Path:
-    """Return a host-shared lock directory across repositories and checkouts."""
-    env_dir = os.environ.get("AGENT_FACTORY_LOCK_DIR")
+def preferred_lock_dir(env: dict | None = None) -> Path:
+    """Resolve the preferred backend lock location without creating directories."""
+    env = os.environ if env is None else env
+    env_dir = env.get("AGENT_FACTORY_LOCK_DIR")
     if env_dir:
         d = Path(env_dir)
     else:
-        xdg_state = os.environ.get("XDG_STATE_HOME")
+        xdg_state = env.get("XDG_STATE_HOME")
         if xdg_state:
             d = Path(xdg_state) / "agent-factory" / "locks"
         else:
-            d = Path.home() / ".local" / "state" / "agent-factory" / "locks"
+            d = Path(env.get("HOME") or Path.home()) / ".local" / "state" / "agent-factory" / "locks"
+    return d
+
+
+def get_shared_lock_dir() -> Path:
+    """Return/create the shared backend lock directory, retaining legacy fallback."""
+    d = preferred_lock_dir()
     try:
         d.mkdir(parents=True, exist_ok=True)
         return d

@@ -146,6 +146,41 @@ class VerifySecretsTest(unittest.TestCase):
                 rc = verify_secrets.main(["--live"])
             self.assertEqual(rc, 0)
 
+    def test_apply_isolation_uses_config_not_callers_environment(self) -> None:
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        from factory import verify_secrets
+
+        apply_token = "SECRET-apply-sentinel"
+        install_token = "SECRET-install-sentinel"
+        cases = (
+            ({}, 0, []),
+            ({"GH_TOKEN": apply_token}, 1, [{"key": "GH_TOKEN", "status": "leaked"}]),
+            ({"GH_TOKEN": install_token}, 0, []),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            cfg = config.load(repo)
+            for install_env, expected_rc, expected_isolation in cases:
+                for scope in ("apply", "all"):
+                    with self.subTest(install_env_keys=list(install_env), rc=expected_rc, scope=scope):
+                        cfg.install["env"] = install_env
+                        with mock.patch.object(cfg, "apply_env", {"GH_TOKEN": apply_token}), \
+                             mock.patch.object(verify_secrets.config, "load", return_value=cfg), \
+                             mock.patch.object(verify_secrets, "unit_env", return_value=install_env), \
+                             mock.patch.dict(os.environ, {"GH_TOKEN": apply_token}):
+                            output = io.StringIO()
+                            with redirect_stdout(output):
+                                rc = verify_secrets.main(["--scope", scope, "--json"])
+                        self.assertEqual(rc, expected_rc)
+                        self.assertNotIn("SECRET", output.getvalue())
+                        report = json.loads(output.getvalue())
+                        self.assertEqual(report["ok"], expected_rc == 0)
+                        self.assertEqual(report["apply_isolation"], expected_isolation)
+
 
 if __name__ == "__main__":
     unittest.main()

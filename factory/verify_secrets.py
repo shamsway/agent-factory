@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -30,9 +31,25 @@ def parse_environment_lines(unit_text: str) -> dict[str, str]:
 
 
 def unit_env(unit: str) -> dict[str, str] | None:
-    """Env baked into an installed systemd user unit; None if the unit isn't installed."""
-    r = subprocess.run(["systemctl", "--user", "cat", unit], capture_output=True, text=True)
-    return None if r.returncode != 0 else parse_environment_lines(r.stdout)
+    """Loaded unit environment (including drop-ins), never print property values."""
+    r = subprocess.run(
+        ["systemctl", "--user", "show", "--property=LoadState,Environment,EnvironmentFiles,UnsetEnvironment", "--", unit],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode:
+        raise OSError("unit inspection unavailable")
+    props = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+    if props.get("LoadState") == "not-found":
+        return None
+    if props.get("LoadState") != "loaded" or props.get("EnvironmentFiles") or props.get("UnsetEnvironment"):
+        raise OSError("unit environment unavailable")
+    try:
+        pairs = [item.partition("=") for item in shlex.split(props.get("Environment", ""))]
+        if any(not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) for key, sep, _ in pairs):
+            raise ValueError
+        return {key: value for key, _, value in pairs}
+    except ValueError:
+        raise OSError("unit environment unavailable") from None
 
 
 def units_for(cfg: config.Config) -> list[str]:
@@ -79,7 +96,7 @@ def check_gh_token(token: str) -> str:
     r = subprocess.run(
         ["gh", "api", "-i", "user"],
         env={"GH_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:
         return "auth FAILED"
@@ -91,15 +108,14 @@ def check_op_token(token: str) -> str:
     r = subprocess.run(
         ["op", "vault", "list", "--format=json"],
         env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=10,
     )
     if r.returncode != 0:
-        last_line = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "unknown error"
-        return f"FAILED: {last_line}"
+        return "FAILED: authentication check rejected"
     try:
         return f"OK, {len(json.loads(r.stdout))} vault(s) visible"
     except json.JSONDecodeError:
-        return "OK (unexpected output shape)"
+        return "FAILED: invalid response"
 
 
 # Keyed by exact env-var name; add more as new credential types earn a real incident.
@@ -109,45 +125,77 @@ LIVE_CHECKS = {
 }
 
 
+def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
+    """Only names/statuses escape this boundary; values and provider diagnostics never do."""
+    scopes = {"install": cfg.install["env"], "apply": cfg.apply_env}
+    rows = []
+    for name, env in scopes.items():
+        if scope not in ("all", name):
+            continue
+        for key, value in sorted(env.items()):
+            status = "configured" if value else "empty"
+            if live and key in LIVE_CHECKS and value:
+                try:
+                    result = LIVE_CHECKS[key](str(value))
+                    status = "valid" if result.startswith("OK") else "invalid"
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    status = "unavailable"
+            elif live and key not in LIVE_CHECKS:
+                status = "not_checked"
+            rows.append({"scope": name, "key": key, "status": status})
+    return rows
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory verify-secrets",
-        description="Check [install].env credentials match what's baked into this repo's "
-        "systemd units, and optionally spot-check well-known credential types live.",
+        description="Compare installed unit credentials and optionally validate scoped credentials; values are never printed.",
     )
-    parser.add_argument(
-        "--live", action="store_true",
-        help="also validate known credential types (GH_TOKEN, OP_SERVICE_ACCOUNT_TOKEN) against the real service",
-    )
+    parser.add_argument("--live", action="store_true", help="validate configured GH/1Password credentials in isolated subprocesses")
+    parser.add_argument("--scope", choices=("install", "apply", "all"), default="install")
+    parser.add_argument("--json", action="store_true", help="emit names/statuses as JSON")
     args = parser.parse_args(argv)
-
-    cfg = config.load()
-    print(f"factory verify-secrets: {cfg.repo}")
-
-    rows = sync_rows(cfg)
-    for unit, key, status in rows:
-        print(f"  {unit}: {key}: {status}")
-
+    try:
+        cfg = config.load()
+    except (config.ConfigError, OSError, ValueError):
+        print(json.dumps({"ok": False, "error": "configuration_unavailable"}))
+        return 1
+    try:
+        rows = sync_rows(cfg) if args.scope != "apply" else []
+        sync_error = None
+    except (OSError, subprocess.SubprocessError):
+        rows, sync_error = [], "unit_inspection_unavailable"
     required = required_units(cfg)
-    stale = any(status not in ("in sync", "not installed") for _, _, status in rows)
-    missing = sorted(
-        {unit for unit, _, status in rows if status == "not installed" and unit in required}
+    bad = bool(sync_error) or any(
+        status not in ("in sync", "not installed") or (status == "not installed" and unit in required)
+        for unit, _, status in rows
     )
-    if missing:
-        print(f"  MISSING required unit(s): {', '.join(missing)}")
-    missing_required = bool(missing)
-
-    live_failed = False
-    if args.live:
-        print()
-        for key, checker in LIVE_CHECKS.items():
-            if key in cfg.install["env"]:
-                result = checker(cfg.install["env"][key])
-                print(f"  live check {key}: {result}")
-                if "FAILED" in result:
-                    live_failed = True
-
-    return 1 if (stale or missing_required or live_failed) else 0
+    credentials = credential_rows(cfg, args.scope, args.live)
+    bad |= any(row["status"] in ("empty", "invalid", "unavailable") for row in credentials)
+    # Compare configured roles only: the caller shell is not the dispatcher.
+    # Actual unit/process boundaries are checked by `factory inspect`.
+    # Shared variable names are legitimate when credentials differ.
+    isolation = [{"key": key, "status": "leaked"}
+                 for key, value in cfg.apply_env.items()
+                 if value and cfg.install["env"].get(key) == value]
+    if args.scope != "install":
+        bad |= bool(isolation)
+    report = {"ok": not bad, "repo": cfg.repo, "scope": args.scope,
+              "units": [{"unit": u, "key": k, "status": v} for u, k, v in rows],
+              "credentials": credentials, "apply_isolation": isolation, "error": sync_error}
+    if args.json:
+        print(json.dumps(report))
+    else:
+        print(f"factory verify-secrets: {cfg.repo} ({args.scope})")
+        for row in report["units"]:
+            print(f"  {row['unit']}: {row['key']}: {row['status']}")
+        for row in credentials:
+            print(f"  {row['scope']}: {row['key']}: {row['status']}")
+        for row in isolation:
+            print(f"  apply isolation: {row['key']}: {row['status']}")
+        if sync_error:
+            print(f"  {sync_error}")
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
