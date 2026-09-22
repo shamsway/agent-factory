@@ -1,0 +1,111 @@
+# Weekly drift report: commits on upstream mikeroySoft/factory main that are
+# not yet in this fork's sre-agent. Reports only; never merges or deploys.
+# Scheduled workflows run from the default branch (main), but the comparison
+# always uses sre-agent explicitly.
+name: check-upstream
+on:
+  schedule:
+    - cron: "17 13 * * 1"   # Mondays 13:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: check-upstream
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    if: github.repository == 'shamsway/agent-factory'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      UPSTREAM_URL: https://github.com/mikeroySoft/factory.git
+      LABEL: upstream-drift
+      MARKER: "<!-- upstream-drift-tracker -->"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: sre-agent
+          fetch-depth: 0
+
+      - name: Compare origin/sre-agent with upstream/main
+        id: compare
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags origin +refs/heads/sre-agent:refs/remotes/origin/sre-agent
+          git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
+          fork=$(git rev-parse origin/sre-agent)
+          up=$(git rev-parse upstream/main)
+          count=$(git rev-list --count origin/sre-agent..upstream/main)
+          echo "fork=$fork" >> "$GITHUB_OUTPUT"
+          echo "up=$up" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          {
+            echo "$MARKER"
+            echo "<!-- upstream-drift-state: $up $count -->"
+            echo
+            if [ "$count" -gt 0 ]; then
+              echo "\`upstream/main\` has **$count** commit(s) not in \`sre-agent\`."
+            else
+              echo "\`sre-agent\` contains every commit on \`upstream/main\`."
+            fi
+            echo
+            echo "- upstream/main (mikeroySoft/factory): \`$up\`"
+            echo "- origin/sre-agent: \`$fork\`"
+            echo "- checked: $(date -u +%Y-%m-%dT%H:%MZ) by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            if [ "$count" -gt 0 ]; then
+              echo
+              echo "Newest first (up to 50, merges omitted):"
+              echo
+              git log --no-merges --format='- `%h` %s' -n 50 origin/sre-agent..upstream/main
+              echo
+              echo "Integrate by pinning a full upstream SHA and following the pinned-merge procedure (isolated \`codex/upstream-<revision>\` branch, acceptance gate). This workflow never merges or deploys."
+            fi
+          } > body.md
+          echo "Drift: $count commit(s); upstream $up; fork $fork"
+
+      - name: Update the tracking issue
+        env:
+          UP: ${{ steps.compare.outputs.up }}
+          COUNT: ${{ steps.compare.outputs.count }}
+        run: |
+          set -euo pipefail
+          gh label create "$LABEL" --color D93F0B \
+            --description "Tracking issue for upstream mikeroySoft/factory drift" 2>/dev/null || true
+          issue=$(gh issue list --label "$LABEL" --state all --limit 100 --json number,state,body \
+            --jq "[.[] | select(.body | contains(env.MARKER))] | sort_by(.number) | first // empty")
+          state="$UP $COUNT"
+          if [ -z "$issue" ]; then
+            if [ "$COUNT" -gt 0 ]; then
+              gh issue create --title "Upstream drift: mikeroySoft/factory main is ahead of sre-agent" \
+                --label "$LABEL" --body-file body.md
+            else
+              echo "No drift and no tracking issue; nothing to do."
+            fi
+            exit 0
+          fi
+          number=$(jq -r .number <<<"$issue")
+          open=$(jq -r .state <<<"$issue")
+          previous=$(jq -r .body <<<"$issue" | sed -n 's/^<!-- upstream-drift-state: \(.*\) -->$/\1/p' | head -1)
+          if [ "$COUNT" -gt 0 ]; then
+            if [ "$previous" = "$state" ] && [ "$open" = "OPEN" ]; then
+              echo "Issue #$number already reports $state; unchanged."
+              exit 0
+            fi
+            gh issue edit "$number" --body-file body.md
+            [ "$open" = "OPEN" ] || gh issue reopen "$number"
+            printf 'Upstream drift changed: %s commit(s), upstream/main `%s`.\n' "$COUNT" "$UP" > comment.md
+            gh issue comment "$number" --body-file comment.md
+          elif [ "$open" = "OPEN" ]; then
+            gh issue edit "$number" --body-file body.md
+            printf 'Caught up: `sre-agent` contains upstream/main `%s`.\n' "$UP" > comment.md
+            gh issue comment "$number" --body-file comment.md
+            gh issue close "$number"
+          else
+            echo "No drift; tracking issue #$number already closed."
+          fi
