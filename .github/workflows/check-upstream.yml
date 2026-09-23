@@ -1,0 +1,112 @@
+# Weekly drift report: commits on upstream mikeroySoft/factory main that are
+# not yet under this fork's upstream-series (the portable commits proposed
+# upstream; sre-agent is upstream-series plus a thin fork-only layer).
+# Reports only; never rebases, merges or deploys. Scheduled workflows run from
+# the default branch (main), but the comparison always uses upstream-series.
+name: check-upstream
+on:
+  schedule:
+    - cron: "17 13 * * 1"   # Mondays 13:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: check-upstream
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    if: github.repository == 'shamsway/agent-factory'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      UPSTREAM_URL: https://github.com/mikeroySoft/factory.git
+      LABEL: upstream-drift
+      MARKER: "<!-- upstream-drift-tracker -->"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: upstream-series
+          fetch-depth: 0
+
+      - name: Compare origin/upstream-series with upstream/main
+        id: compare
+        run: |
+          set -euo pipefail
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags origin +refs/heads/upstream-series:refs/remotes/origin/upstream-series
+          git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
+          fork=$(git rev-parse origin/upstream-series)
+          up=$(git rev-parse upstream/main)
+          count=$(git rev-list --count origin/upstream-series..upstream/main)
+          echo "fork=$fork" >> "$GITHUB_OUTPUT"
+          echo "up=$up" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          {
+            echo "$MARKER"
+            echo "<!-- upstream-drift-state: $up $count -->"
+            echo
+            if [ "$count" -gt 0 ]; then
+              echo "\`upstream/main\` has **$count** commit(s) not in \`upstream-series\`."
+            else
+              echo "\`upstream-series\` contains every commit on \`upstream/main\`."
+            fi
+            echo
+            echo "- upstream/main (mikeroySoft/factory): \`$up\`"
+            echo "- origin/upstream-series: \`$fork\`"
+            echo "- checked: $(date -u +%Y-%m-%dT%H:%MZ) by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            if [ "$count" -gt 0 ]; then
+              echo
+              echo "Newest first (up to 50, merges omitted):"
+              echo
+              git log --no-merges --format='- `%h` %s' -n 50 origin/upstream-series..upstream/main
+              echo
+              echo "Integrate by pinning a full upstream SHA: rebase \`upstream-series\` onto it, then rebase the fork-only layer of \`sre-agent\` onto the new series, and run the acceptance gate before any deployment. This workflow never rebases, merges or deploys."
+            fi
+          } > body.md
+          echo "Drift: $count commit(s); upstream $up; fork $fork"
+
+      - name: Update the tracking issue
+        env:
+          UP: ${{ steps.compare.outputs.up }}
+          COUNT: ${{ steps.compare.outputs.count }}
+        run: |
+          set -euo pipefail
+          gh label create "$LABEL" --color D93F0B \
+            --description "Tracking issue for upstream mikeroySoft/factory drift" 2>/dev/null || true
+          issue=$(gh issue list --label "$LABEL" --state all --limit 100 --json number,state,body \
+            --jq "[.[] | select(.body | contains(env.MARKER))] | sort_by(.number) | first // empty")
+          state="$UP $COUNT"
+          if [ -z "$issue" ]; then
+            if [ "$COUNT" -gt 0 ]; then
+              gh issue create --title "Upstream drift: mikeroySoft/factory main is ahead of upstream-series" \
+                --label "$LABEL" --body-file body.md
+            else
+              echo "No drift and no tracking issue; nothing to do."
+            fi
+            exit 0
+          fi
+          number=$(jq -r .number <<<"$issue")
+          open=$(jq -r .state <<<"$issue")
+          previous=$(jq -r .body <<<"$issue" | sed -n 's/^<!-- upstream-drift-state: \(.*\) -->$/\1/p' | head -1)
+          if [ "$COUNT" -gt 0 ]; then
+            if [ "$previous" = "$state" ] && [ "$open" = "OPEN" ]; then
+              echo "Issue #$number already reports $state; unchanged."
+              exit 0
+            fi
+            gh issue edit "$number" --body-file body.md
+            [ "$open" = "OPEN" ] || gh issue reopen "$number"
+            printf 'Upstream drift changed: %s commit(s), upstream/main `%s`.\n' "$COUNT" "$UP" > comment.md
+            gh issue comment "$number" --body-file comment.md
+          elif [ "$open" = "OPEN" ]; then
+            gh issue edit "$number" --body-file body.md
+            printf 'Caught up: `upstream-series` contains upstream/main `%s`.\n' "$UP" > comment.md
+            gh issue comment "$number" --body-file comment.md
+            gh issue close "$number"
+          else
+            echo "No drift; tracking issue #$number already closed."
+          fi
