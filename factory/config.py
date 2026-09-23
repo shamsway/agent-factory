@@ -77,7 +77,11 @@ DASHBOARD_ALLOW_REMOTE_VAR = "FACTORY_DASHBOARD_ALLOW_REMOTE"
 # must run the same gate, so gate checks, leak scan and upstream never come
 # from here. Everything else in the host file is left for other tools (District).
 HOST_TABLES = frozenset({"triage", "workers", "review", "manager", "install"})
-HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",)}
+# `apply.env` is credential-shaped like `install.env` -- host-owned so it
+# never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
+# are policy about this repo (does merging it trigger terraform apply, and
+# where) and stay repo-owned, same split already used for `dashboard`.
+HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",), "apply": ("env",)}
 
 # Every key the loader reads, by table; `factory doctor` reports anything else.
 # `workers` is label-keyed, `gate.check` is a list of {name, run, exclusive}.
@@ -92,6 +96,7 @@ KNOWN_KEYS = {
     "triage": ("url", "model", "key"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),
+    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter"),
     "collaboration": ("fallback", "reasons", "components"),
 }
 CHECK_KEYS = ("name", "run", "exclusive", "timeout")
@@ -103,6 +108,17 @@ OWNER = re.compile(r"@?(?P<login>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)|
 class ConfigError(SystemExit):
     def __init__(self, msg: str) -> None:
         super().__init__(f"factory: {msg}")
+
+
+@dataclass
+class DeployTarget:
+    """One deployment target (e.g. Terraform root, Nomad cluster, etc.)."""
+
+    name: str
+    dir: str
+    enabled: bool = True
+    backend_key: str = ""
+    adapter: str = "terraform"
 
 
 @dataclass
@@ -159,6 +175,12 @@ class Config:
     install: dict = field(default_factory=lambda: dict(DEFAULT_INSTALL))  # `factory install` defaults
     # `[collaboration]`: human decision owners for `factory plan route`; None = section absent (legacy behaviour).
     collaboration: dict | None = None
+    apply_enabled: bool = False  # this repo's merges require a human review approval and are apply-eligible
+    apply_dir: str = "."  # terraform root, relative to repo root, that `factory apply` plans/applies
+    apply_env: dict = field(default_factory=dict)  # env for `factory apply` only; never the dispatcher's
+    targets: dict[str, DeployTarget] = field(default_factory=dict)  # deployment targets, keyed by name
+    apply_baseline: str | None = None  # commit SHA or PR number prior to which deployments are ignored
+    apply_supersession: str = "sequential"  # "sequential" (strict commit order) or "none"
     raw_repo: dict = field(default_factory=dict)  # the committed file alone, before host layering
 
     @property
@@ -433,4 +455,43 @@ def load(start: Path | None = None) -> Config:
         raise ConfigError("[install].python must be a non-empty path")
     cfg.install["dashboard"] = bool(cfg.install["dashboard"])
     cfg.install["env"] = {k: str(v) for k, v in cfg.install["env"].items()}
+    apply_t = raw.get("apply", {})
+    cfg.apply_enabled = bool(apply_t.get("enabled", cfg.apply_enabled))
+    cfg.apply_dir = apply_t.get("dir", cfg.apply_dir)
+    cfg.apply_env = {k: str(v) for k, v in apply_t.get("env", {}).items()}
+    cfg.apply_baseline = str(apply_t["baseline"]) if "baseline" in apply_t else None
+    cfg.apply_supersession = str(apply_t.get("supersession", cfg.apply_supersession))
+
+    raw_targets = apply_t.get("targets")
+    default_adapter = str(apply_t.get("adapter", "terraform"))
+    targets: dict[str, DeployTarget] = {}
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if isinstance(item, dict) and "name" in item:
+                name = str(item["name"])
+                targets[name] = DeployTarget(
+                    name=name,
+                    dir=str(item.get("dir", cfg.apply_dir)),
+                    enabled=bool(item.get("enabled", True)),
+                    backend_key=str(item.get("backend_key", "")),
+                    adapter=str(item.get("adapter", default_adapter)),
+                )
+    elif isinstance(raw_targets, dict):
+        for name, item in raw_targets.items():
+            if isinstance(item, dict):
+                targets[name] = DeployTarget(
+                    name=name,
+                    dir=str(item.get("dir", cfg.apply_dir)),
+                    enabled=bool(item.get("enabled", True)),
+                    backend_key=str(item.get("backend_key", "")),
+                    adapter=str(item.get("adapter", default_adapter)),
+                )
+    if not targets:
+        targets["default"] = DeployTarget(
+            name="default",
+            dir=cfg.apply_dir,
+            enabled=cfg.apply_enabled,
+            adapter=default_adapter,
+        )
+    cfg.targets = targets
     return cfg

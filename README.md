@@ -241,6 +241,7 @@ merge stage.
 |---|---|
 | `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or a `wontfix` proposal comment. `--dry-run`, `--issue N`, `--replay a,b,c`. |
 | `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. `ready-for-investigation` tickets take a shorter path instead: one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan. |
+| `factory apply` | No-op unless `[apply].enabled = true`. One stateless pass: finds merged, not-yet-applied tickets, checks out the merge commit fresh, re-runs the tf-plan-safety check against a fresh `terraform plan`, and applies using `[apply].env` credentials — never the dispatcher's. `--dry-run`. |
 | `factory manage` | First recommends directions for `needs-review` PRs, then `needs-viability` issues; then resolves untouched `ready-for-human` escalation packets within `[manager].rounds`; finally publishes one routed human handoff request per escalation whose automatic recovery is terminal (also without a manager). `--dry-run` lists eligible requests without inference or writes. |
 | `factory gate` | Runs the deterministic gate in the current worktree and writes a Markdown report. Workers run it themselves; the dispatcher re-runs it as the evidence of record. |
 | `factory stats` | Ticket table: attempts, review rounds, hours to merge, escalation count, resolver attribution, minutes in `ready-for-human`, and re-queues. Reads GitHub plus existing `events.jsonl`. `--by-worker` reads only events and shows every configured worker label: first-attempt gate pass rate, all attempts (including review bounces), and known cost. Attribution uses claim labels with current worker precedence; unclaimed attempts are excluded, missing rates/cost are `n/a`. The dashboard Ops view shows the same worker metrics. `--json`. |
@@ -508,7 +509,10 @@ ticket's `human_touch` details. The dashboard retains its existing 100-issue,
    untouched for operator review. Missing target evidence also fails closed.
    `--match-head-commit` atomically guards the head, not the target branch or a
    late human veto. Protect release branches on GitHub; the final reads alone
-   cannot prevent a retarget after the last check.
+   cannot prevent a retarget after the last check. With `[apply].enabled = true`,
+   merging additionally requires a genuine human GitHub review approval bound to
+   the exact head SHA — the `factory-approved` label alone is not enough, and the
+   merge itself is then the trigger `factory apply` waits for (below).
 7. **Escalation.** Budget exceeded, gate failed thrice, second `REVISE`,
    nothing to PR, rebase conflict, red CI: the issue gets `ready-for-human`,
    loses the assignee and `ready-for-agent`, and receives a comment with the
@@ -709,6 +713,9 @@ branches, or merge state.
 - **Tear down a ticket**: verify any accepted handoff is retained before manually
   removing `.factory/wt-<n>` with `git worktree remove --force`, deleting `agent/<n>`,
   and re-labelling the issue. Manual removal bypasses the dispatcher's retention guard.
+- **Deployments & recovery**: for repositories using `factory apply`, see
+  [docs/deployment-lifecycle.md](docs/deployment-lifecycle.md) for multi-target
+  configuration, backend serialization, crash recovery, and operator reconciliation.
 
 ## Accepted handoff retention
 

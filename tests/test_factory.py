@@ -759,6 +759,21 @@ class HostConfigTest(unittest.TestCase):
             rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
             self.assertEqual(rows["dashboard bind"]["status"], "WARN")
 
+    def test_doctor_flags_leaked_apply_credential(self) -> None:
+        from unittest import mock
+
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        toml = '[apply]\nenabled = true\n[apply.env]\nFAKE_CRED = "x"\n'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            with mock.patch.dict(os.environ, {"FAKE_CRED": "leaked"}):
+                proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
+            out = json.loads(proc.stdout)
+            rows = {r["label"]: r for r in out["rows"]}
+            self.assertIn("terraform on PATH (required: [apply].enabled)", rows)  # checked only when apply.enabled
+            leak_row = rows["apply credentials isolated from this shell"]
+            self.assertEqual(leak_row["status"], "FAIL")
+            self.assertIn("FAKE_CRED", leak_row["detail"])
     def test_doctor_template_fix_applies(self) -> None:
         host_file('[defaults.triage]\nurl = "http://127.0.0.1:1/v1/chat/completions"\n')
         for original in (None, "", "custom\n", "custom"):

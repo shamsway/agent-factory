@@ -11,6 +11,7 @@ COMMANDS = {
     "install": ("onboard", "install", "install the systemd user timer (and dashboard)"),
     "triage": ("triage", "main", "label needs-triage issues with the local model"),
     "dispatch": ("dispatch", "main", "one pass: sync, merge stage, claim and work tickets"),
+    "apply": ("apply", "main", "terraform apply for merged, apply-eligible tickets"),
     "manage": ("manage", "main", "recommend PR/issue viability, resolve untouched escalations, publish terminal human handoffs"),
     "gate": ("gate", "main", "run the deterministic quality gate in this worktree"),
     "stats": ("stats", "main", "ticket metrics from GitHub"),
