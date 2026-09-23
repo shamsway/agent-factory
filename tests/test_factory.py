@@ -218,7 +218,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_defaults_from_origin(self) -> None:
         with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d))
+            repo = make_repo(Path(d).resolve())
             cfg = config.load(repo)
             self.assertEqual(cfg.repo, "acme/widgets")
             self.assertEqual(cfg.name, "widgets")
@@ -369,10 +369,15 @@ class HostConfigTest(unittest.TestCase):
             self.assertIn(f"ExecStart=-{sys.executable} -P -m factory triage", proc.stdout)
             self.assertIn("Environment=UV_EXCLUDE_NEWER=2026-01-01T00:00:00Z", proc.stdout)
             self.assertIn("# factory-widgets-dashboard.service", proc.stdout)
+            self.assertIn("ExecStart=", proc.stdout)
+            self.assertIn(" triage\n", proc.stdout)  # unified service's `-` prefixed ExecStart invokes `factory triage`
             self.assertIn("--host 127.0.0.1", proc.stdout)
             (Path(d) / "b").mkdir()
             proc = factory(make_repo(Path(d) / "b"), "install", "--print", "--no-dashboard")
             self.assertNotIn("dashboard.service", proc.stdout)
+            # triage isn't gated by --dashboard: it's the `-` prefixed ExecStart in the
+            # unified factory-widgets.service, not a separate service/timer.
+            self.assertIn("ExecStart=-", proc.stdout)
 
     def test_selected_interpreter_launchers_and_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -701,7 +706,7 @@ class HostConfigTest(unittest.TestCase):
         gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
         toml = '[triage]\nmodel = "m"\n[dashboard]\ntheme = "t.css"\n[gate]\nlock = "/tmp/l"\ntimeout = 5\n[dispatch]\nmax_atempts = 2\n[manager]\nunknown = true\n'
         with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d), toml)
+            repo = make_repo(Path(d).resolve(), toml)
             (repo / ".github/ISSUE_TEMPLATE").mkdir(parents=True)
             (repo / ".github/ISSUE_TEMPLATE/agent_task.md").write_text("custom\n")
             proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))

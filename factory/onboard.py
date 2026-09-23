@@ -691,6 +691,11 @@ def install(argv: list[str]) -> int:
         help="dashboard bind address; 0.0.0.0 exposes /api/act (mutates GitHub with your gh credentials) to the LAN",
     )
     parser.add_argument("--print", action="store_true", help="print the units instead of installing them")
+    parser.add_argument(
+        "--no-start", action="store_true",
+        help="validate, write units and reload systemd; never enable, start, restart, stop, "
+        "or change enablement links -- convergence without activation",
+    )
     cfg = config.load()
     parser.set_defaults(**{k: cfg.install[k] for k in ("every", "dashboard", "host")})
     args = parser.parse_args(argv)
@@ -710,7 +715,8 @@ def install(argv: list[str]) -> int:
         print(f"validated service interpreter: {detail}")
     if shutil.which("systemctl") is None:
         raise ConfigError("systemctl not found; run `factory dispatch` from cron or by hand instead")
-    if args.dashboard:
+    if args.dashboard and not args.no_start:
+        # Nothing is about to bind under --no-start; this only gates an imminent enable --now.
         port_ok, port_detail = _dashboard_port_check(cfg, args.host, cfg.dashboard_port)
         if not port_ok:
             print(port_detail, file=sys.stderr)
@@ -728,10 +734,26 @@ def install(argv: list[str]) -> int:
         path.write_text(body)
         print(f"wrote {path}")
     if not args.dashboard and (udir / dash_unit).exists():
-        systemctl("disable", "--now", dash_unit)
-        (udir / dash_unit).unlink()
-        print(f"removed {udir / dash_unit}")
+        if args.no_start:
+            active = sh(["systemctl", "--user", "is-active", dash_unit]).stdout.strip()
+            if active not in ("inactive", "failed", ""):
+                raise ConfigError(
+                    f"{dash_unit} is active but no longer wanted; drain and stop it first "
+                    f"(`systemctl --user disable --now {dash_unit}`), then rerun `factory install --no-start`"
+                )
+            # Already inactive: removing the unit file changes nothing running or
+            # enabled. Leave enablement links alone -- --no-start never edits those.
+            (udir / dash_unit).unlink()
+            print(f"removed {udir / dash_unit}")
+        else:
+            systemctl("disable", "--now", dash_unit)
+            (udir / dash_unit).unlink()
+            print(f"removed {udir / dash_unit}")
     systemctl("daemon-reload")
+    if args.no_start:
+        print(f"factory install --no-start: units written to {udir}; systemd reloaded; nothing enabled or started")
+        print(f"activate explicitly with: systemctl --user enable --now {cfg.unit}.timer{f' {dash_unit}' if args.dashboard else ''}")
+        return 0
     timer = f"{cfg.unit}.timer"
     systemctl("enable", "--now", timer)
     if timer in changed:
