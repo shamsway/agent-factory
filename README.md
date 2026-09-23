@@ -240,7 +240,7 @@ merge stage.
 | Command | What one invocation does |
 |---|---|
 | `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or a `wontfix` proposal comment. `--dry-run`, `--issue N`, `--replay a,b,c`. |
-| `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. `--ticket N` forces one issue; `--dry-run` prints the plan. |
+| `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. `ready-for-investigation` tickets take a shorter path instead: one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan. |
 | `factory manage` | First recommends directions for `needs-review` PRs, then `needs-viability` issues; then resolves untouched `ready-for-human` escalation packets within `[manager].rounds`; finally publishes one routed human handoff request per escalation whose automatic recovery is terminal (also without a manager). `--dry-run` lists eligible requests without inference or writes. |
 | `factory gate` | Runs the deterministic gate in the current worktree and writes a Markdown report. Workers run it themselves; the dispatcher re-runs it as the evidence of record. |
 | `factory stats` | Ticket table: attempts, review rounds, hours to merge, escalation count, resolver attribution, minutes in `ready-for-human`, and re-queues. Reads GitHub plus existing `events.jsonl`. `--by-worker` reads only events and shows every configured worker label: first-attempt gate pass rate, all attempts (including review bounces), and known cost. Attribution uses claim labels with current worker precedence; unclaimed attempts are excluded, missing rates/cost are `n/a`. The dashboard Ops view shows the same worker metrics. `--json`. |
@@ -447,8 +447,14 @@ ticket's `human_touch` details. The dashboard retains its existing 100-issue,
 ## How a ticket moves
 
 1. **Triage.** A deterministic lint rejects bodies under 80 characters or
-   without acceptance criteria (`needs-info` with a specific question). The
-   model then decides between the four labels; `wontfix` is only ever proposed.
+   without acceptance criteria (`needs-info` with a specific question) —
+   unless the issue carries `kind/ops`, which exempts it from the
+   acceptance-criteria check (an incident report has no done-condition
+   yet). The model then decides between the five labels; `wontfix` is only
+   ever proposed. `ready-for-investigation` tickets skip straight to a
+   shorter path: one worker pass gathers evidence and posts a findings
+   report as a comment — no gate, no PR, no review — then the ticket routes
+   to `ready-for-human` for a person to decide what happens next.
 2. **Claim.** The dispatcher re-reads the issue (search-backed listings lag),
    assigns itself, takes a per-ticket `flock`, and creates the worktree
    `.factory/wt-<n>` on branch `agent/<n>`.

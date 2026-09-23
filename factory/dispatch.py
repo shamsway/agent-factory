@@ -28,6 +28,7 @@ from factory.config import (
     LABEL_APPROVED,
     LABEL_CHORE,
     LABEL_HUMAN,
+    LABEL_INVESTIGATE,
     LABEL_REVIEW,
     LESSONS_NAME,
     Config,
@@ -79,6 +80,24 @@ STANDING_INSTRUCTIONS = """
 - Last, write `.factory/handoff-{n}.md` (gitignored): what you changed, what is
   still unverified, and what you would do next. The next attempt and the human
   who inherits this ticket read it.
+"""
+
+INVESTIGATION_INSTRUCTIONS = """
+## Instructions
+
+- This is an investigation, not an implementation. Do NOT modify tracked
+  files, commit, or open a PR — the worktree is discarded once this ticket
+  finishes; nothing you change here is kept.
+- Gather evidence: read logs, run read-only diagnostic commands, inspect
+  configuration and infrastructure state relevant to the ticket. Prefer
+  read-only commands; if you must run something with side effects to
+  reproduce the problem, say so explicitly in the report rather than doing
+  it silently.
+- Do not attempt to fix anything.
+- Last, write `.factory/handoff-{n}.md` (gitignored): what you found, the
+  likely cause (or the causes still open), and what you would do next. This
+  is posted verbatim as a comment on the issue; a human decides what happens
+  next, including whether to file a follow-up implementation ticket.
 """
 
 
@@ -176,7 +195,7 @@ def open_blockers(number: int, body: str) -> list[int]:
     return sorted(blockers)
 
 
-def frontier() -> list[dict]:
+def frontier(label: str = LABEL_AGENT) -> list[dict]:
     issues = gh_json(
         [
             "issue",
@@ -186,7 +205,7 @@ def frontier() -> list[dict]:
             "--state",
             "open",
             "--label",
-            LABEL_AGENT,
+            label,
             "--json",
             "number,title,body,labels,assignees",
         ]
@@ -454,7 +473,7 @@ def resume_context(n: int, baseline: dict | None) -> str | None:
     return "\n".join(parts)
 
 
-def build_prompt(n: int, wt: Path, extra: str = "") -> str:
+def build_prompt(n: int, wt: Path, extra: str = "", investigation: bool = False) -> str:
     from factory import binding
 
     accepted = binding.accepted(cfg, n)
@@ -473,12 +492,15 @@ def build_prompt(n: int, wt: Path, extra: str = "") -> str:
     for c in issue.get("comments") or []:
         author = (c.get("author") or {}).get("login", "unknown")
         parts += ["", f"## Comment by {author}", "", c.get("body", "")]
-    commit_flag = " -s" if cfg.signoff else ""
-    parts.append(
-        STANDING_INSTRUCTIONS.format(
-            n=n, commit_flag=commit_flag, main=cfg.main, python=sys.executable
+    if investigation:
+        parts.append(INVESTIGATION_INSTRUCTIONS.format(n=n))
+    else:
+        commit_flag = " -s" if cfg.signoff else ""
+        parts.append(
+            STANDING_INSTRUCTIONS.format(
+                n=n, commit_flag=commit_flag, main=cfg.main, python=sys.executable
+            )
         )
-    )
     if baseline is not None:
         parts += ["", "## Admitted execution contract", "",
                   "The pinned ticket scope and exit gate define this execution. The initiative baseline "
@@ -705,13 +727,27 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "") -> Non
 
 
 def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str, str]:
-    """Run the two-axis diff review against the exact head that passed the gate."""
+    """Run the two-axis diff review against the exact head that passed the gate.
+
+    The issue's own title/body is fetched here and inlined into the prompt --
+    the review command runs sandboxed (no `--dangerously-skip-permissions`,
+    unlike the worker), so it has no reliable way to fetch #n itself. Without
+    this, "check the diff against issue #n" is an instruction the reviewer
+    cannot act on: it either stalls asking for `gh` approval it can never get
+    non-interactively, or (worse) guesses from whatever's lying around the
+    worktree (a stale handoff file, say) -- confirmed live on ticket #45,
+    which escalated after both review rounds got stuck on exactly this.
+    """
+    issue = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "title,body"])
+    issue_text = f"# {issue['title']}\n\n{issue.get('body') or '(no body)'}"
     prompt = (
         f"Review `git diff origin/{cfg.main}..HEAD` in this repository on two axes:\n"
         f"1. Standards: does the code follow this repo's documented conventions "
         f"(AGENTS.md, CONTRIBUTING.md, docs/)?\n"
         f"2. Spec: does the diff satisfy the text and acceptance criteria of "
-        f"GitHub issue #{n} in {REPO}?\n"
+        f"GitHub issue #{n} in {REPO}, reproduced below -- do not try to fetch "
+        f"it yourself, this is the full text:\n\n"
+        f"```\n{issue_text}\n```\n\n"
         f"Read the issue comments for the agent brief and approved scope changes.\n"
         f"Review the DIFF only. Do NOT execute builds or tests: your sandbox "
         f"differs from the target host, so your results are not evidence. The "
@@ -852,6 +888,36 @@ def pr_comment(n: int, text: str) -> None:
         ],
         check=False,
     )
+
+
+def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
+    """Terminal state for a ready-for-investigation ticket: no diff, no PR --
+    post the findings and route to a human to decide what happens next."""
+    handoff = wt / ".factory" / f"handoff-{n}.md"
+    if not handoff.exists() or not handoff.read_text().strip():
+        escalate(n, "investigation produced no findings report", logfile)
+        return
+    body = f"Investigation findings:\n\n{handoff.read_text().strip()}"
+    run(["gh", "issue", "comment", str(n), "--repo", REPO, "--body", body], check=False)
+    run(
+        [
+            "gh",
+            "issue",
+            "edit",
+            str(n),
+            "--repo",
+            REPO,
+            "--remove-assignee",
+            "@me",
+            "--remove-label",
+            LABEL_INVESTIGATE,
+            "--add-label",
+            LABEL_HUMAN,
+        ],
+        check=False,
+    )
+    record("investigated", ticket=n, log=str(logfile) if logfile else None)
+    log(f"#{n}: investigation complete; findings posted, routed to human")
 
 
 # ---------------------------------------------------------------------------
@@ -1575,6 +1641,8 @@ def process_ticket(
 ) -> None:
     n, title = issue["number"], issue["title"]
     labels = {label["name"] for label in issue.get("labels", [])}
+    investigation = LABEL_INVESTIGATE in labels
+    lane_label = LABEL_INVESTIGATE if investigation else LABEL_AGENT
     wt = FACTORY / f"wt-{n}"
     worker = cfg.worker(labels, wt / ".factory-prompt.md", wt)[0]
 
@@ -1589,6 +1657,12 @@ def process_ticket(
     if dry_run:
         if initiative_kind(n):
             log(f"#{n}: refused (initiative records are never executed)")
+            return
+        if investigation:
+            log(
+                f"#{n}: would claim (assign @me), create worktree {wt} on branch agent/{n}, "
+                f"run investigation worker, post findings, route to human"
+            )
             return
         from factory import binding
 
@@ -1642,12 +1716,33 @@ def process_ticket(
             if not forced and (
                 fresh["state"].upper() != "OPEN"
                 or fresh["assignees"]
-                or LABEL_AGENT not in {label["name"] for label in fresh["labels"]}
+                or lane_label not in {label["name"] for label in fresh["labels"]}
             ):
                 log(f"#{n}: skipped (state changed since frontier query)")
                 execution.outcome = "not_admitted"
                 execution.reason = "state_changed"
                 return
+
+            if investigation:
+                run(["gh", "issue", "edit", str(n), "--repo", REPO, "--add-assignee", "@me"])
+                record("claimed", ticket=n, title=title, labels=sorted(labels))
+                wt = ensure_worktree(n)
+                LOGS.mkdir(parents=True, exist_ok=True)
+                promptfile = wt / ".factory-prompt.md"
+                promptfile.write_text(build_prompt(n, wt, investigation=True))
+                logfile = LOGS / f"{n}-attempt-1.log"
+                started = time.monotonic()
+                code = run_worker(cfg.worker(labels, promptfile, wt), wt, logfile)
+                record(
+                    "attempt", ticket=n, attempt=1, worker_exit=code, gate=None,
+                    seconds=int(time.monotonic() - started), cost=log_cost(logfile), log=str(logfile),
+                )
+                finish_investigation(n, wt, logfile)
+                if wt.is_dir():
+                    run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT, check=False)
+                run(["git", "branch", "-D", f"agent/{n}"], cwd=ROOT, check=False)
+                return
+
             from factory import binding
 
             try:
@@ -1793,7 +1888,11 @@ def main(argv: list[str]) -> int:
                 if execution:
                     execution.wait("capacity_reached", mode="admission", active=active, max_active=MAX_ACTIVE)
                 return 0
-            ready = frontier()
+            ready, seen = [], set()
+            for issue in frontier(LABEL_AGENT) + frontier(LABEL_INVESTIGATE):
+                if issue["number"] not in seen:
+                    seen.add(issue["number"])
+                    ready.append(issue)
             if not ready:
                 log("frontier empty, nothing to do")
                 return 0

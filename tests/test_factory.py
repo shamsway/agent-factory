@@ -19,8 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 # Never read the operator's real host config; HostConfigTest writes its own here.
-XDG = Path(tempfile.mkdtemp())
-os.environ["XDG_CONFIG_HOME"] = str(XDG)
+# Other test modules import helpers as `tests.test_factory`, which under
+# `unittest discover -s tests` is a second copy of this module: reuse the first
+# copy's directory so both copies agree on where the host config lives.
+XDG = Path(os.environ.get("FACTORY_TEST_XDG") or tempfile.mkdtemp())
+os.environ["FACTORY_TEST_XDG"] = os.environ["XDG_CONFIG_HOME"] = str(XDG)
 
 from factory import __version__, config, lifecycle, manage  # noqa: E402
 
@@ -258,11 +261,12 @@ pattern = ""
 exclude = ["vendor"]
 [triage]
 model = "m"
+key = "sk-abc"
 [dashboard]
 port = 1
 """
         with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d), toml)
+            repo = make_repo(Path(d).resolve(), toml)
             cfg = config.load(repo)
             self.assertEqual((cfg.repo, cfg.upstream, cfg.main), ("other/name", "up", "trunk"))
             self.assertEqual((cfg.max_active, cfg.signoff, cfg.check_timeout), (5, False, 7))
@@ -271,9 +275,9 @@ port = 1
             self.assertEqual((cfg.manager_rounds, cfg.manager_review), (2, "all"))
             self.assertEqual([(c.name, c.exclusive) for c in cfg.checks], [("unit", True)])
             self.assertIsNone(cfg.leak_pattern)
-            self.assertEqual((cfg.leak_exclude, cfg.llm_model, cfg.dashboard_port), (["vendor"], "m", 1))
+            self.assertEqual((cfg.leak_exclude, cfg.llm_model, cfg.llm_key, cfg.dashboard_port), (["vendor"], "m", "sk-abc", 1))
             # A worktree resolves to the main checkout, not itself.
-            wt = Path(d) / "wt"
+            wt = Path(d).resolve() / "wt"
             git(repo, "worktree", "add", "-q", str(wt), "-b", "agent/1")
             self.assertEqual(config.load(wt).root, repo)
 
@@ -313,7 +317,7 @@ class HostConfigTest(unittest.TestCase):
 
     def test_precedence_and_filter(self) -> None:
         host_file(
-            '[defaults.triage]\nurl = "http://h/v1/chat/completions"\nmodel = "d"\n'
+            '[defaults.triage]\nurl = "http://h/v1/chat/completions"\nmodel = "d"\nkey = "sk-default"\n'
             '[defaults.dashboard]\nport = 9000\ntheme = "host.css"\n'
             '[defaults.gate]\nlock = "/tmp/host.lock"\n[[defaults.gate.check]]\nname = "evil"\nrun = ["true"]\n'
             '[defaults.leak_scan]\npattern = ""\n[defaults.repo]\nupstream = "evil"\n'
@@ -328,8 +332,9 @@ class HostConfigTest(unittest.TestCase):
                 Path(d), '[triage]\nmodel = "f"\n[install]\npython = "/committed/python"\n'
             )
             cfg = config.load(repo)
-            # defaults < per-repo < repo file
-            self.assertEqual((cfg.llm_url, cfg.llm_model, cfg.dashboard_port), ("http://h/v1/chat/completions", "f", 9001))
+            # defaults < per-repo < repo file; key comes only from defaults here
+            # (a per-repo/committed key would be a real secret leaking into git).
+            self.assertEqual((cfg.llm_url, cfg.llm_model, cfg.llm_key, cfg.dashboard_port), ("http://h/v1/chat/completions", "f", "sk-default", 9001))
             self.assertEqual(cfg.lock, Path("/tmp/host.lock"))
             self.assertEqual(cfg.install, {"every": "5min", "dashboard": True, "host": "127.0.0.1", "python": "/committed/python", "env": {"A": "1"}})
             # repo-owned keys never come from the host
@@ -356,6 +361,11 @@ class HostConfigTest(unittest.TestCase):
     def test_unknown_keys(self) -> None:
         raw = {"triage": {"mdoel": "x"}, "gate": {"check": [{"name": "a", "run": [], "exclusiv": True}]}, "bogus": {}}
         self.assertEqual(config.unknown_keys(raw), ["triage.mdoel", "gate.check[0].exclusiv", "bogus"])
+        # triage.key (the Authorization-header bearer token) is loader-known,
+        # not drift -- regression check for the gap where config.load() read
+        # it fine but doctor's "host config: ignored (not host-owned)" check
+        # flagged it as unknown anyway (KNOWN_KEYS wasn't updated alongside).
+        self.assertEqual(config.unknown_keys({"triage": {"key": "sk-x"}}), [])
 
     def test_install_print_uses_host_defaults_and_env(self) -> None:
         host_file('[defaults.install]\nevery = "5min"\ndashboard = true\n[defaults.install.env]\nUV_EXCLUDE_NEWER = "2026-01-01T00:00:00Z"\n')
@@ -1107,6 +1117,46 @@ class DashboardTest(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
+
+    def test_triage_llm_online_sends_bearer_header_only_when_key_configured(self) -> None:
+        """Same gap as call_llm() and doctor()'s endpoint check, found in a
+        third place: a gated endpoint (e.g. LiteLLM) 401s without a bearer
+        header, so this reported "offline" in the dashboard even while
+        triage was working fine through the (correctly authenticated)
+        call_llm() path. Confirmed live: the dashboard showed the triage LLM
+        as offline against a real, healthy, authenticated LiteLLM endpoint."""
+        from unittest import mock
+
+        from factory import dashboard
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[triage]\nurl = "http://h/v1/chat/completions"\nkey = "sk-secret"\n')
+            dashboard.configure(config.load(repo))
+            captured = {}
+
+            def fake_urlopen(req, timeout=None):
+                captured["auth"] = req.get_header("Authorization")
+                return FakeResponse()
+
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                self.assertTrue(dashboard.triage_llm_online())
+            self.assertEqual(captured["auth"], "Bearer sk-secret")
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[triage]\nurl = "http://h/v1/chat/completions"\n')
+            dashboard.configure(config.load(repo))
+            with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                dashboard.triage_llm_online()
+            self.assertIsNone(captured["auth"])
 
     def test_metrics_from_synthetic_tickets(self) -> None:
         from factory import dashboard
@@ -2633,6 +2683,109 @@ class DispatchTest(unittest.TestCase):
             with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b", "comments": []}):
                 self.assertIn("## Lessons from previous tickets", dispatch.build_prompt(3, wt))
 
+    def test_review_prompt_inlines_issue_text(self) -> None:
+        """The review command runs sandboxed (no --dangerously-skip-permissions),
+        so it can't fetch the issue itself -- confirmed live on ticket #45,
+        where the reviewer stalled asking for `gh issue view` approval it
+        could never get non-interactively, twice, then escalated. The issue's
+        title/body must be inlined into the prompt instead."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        original_run = dispatch.run
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            issue = {"title": "Add a widget", "body": "Acceptance: widget exists."}
+            captured = {}
+
+            def fake_run(cmd, cwd=None, check=True, **kw):
+                if cmd[0] == "git":
+                    return original_run(cmd, cwd=cwd, check=check, **kw)
+                captured["prompt"] = cmd[-1]
+                return subprocess.CompletedProcess(cmd, 0, stdout="VERDICT: APPROVE", stderr="")
+
+            head = git(repo, "rev-parse", "HEAD")
+            with mock.patch.object(dispatch, "gh_json", return_value=issue) as gh_mock, \
+                 mock.patch.object(dispatch, "run", side_effect=fake_run):
+                verdict, findings = dispatch.review(repo, 45, "gate report", head)
+            self.assertEqual(verdict, "APPROVE")
+            self.assertIn("Add a widget", captured["prompt"])
+            self.assertIn("Acceptance: widget exists.", captured["prompt"])
+            self.assertIn("do not try to fetch it yourself", captured["prompt"])
+            gh_mock.assert_called_once_with(
+                ["issue", "view", "45", "--repo", dispatch.REPO, "--json", "title,body"]
+            )
+
+    def test_review_rejects_verdict_when_reviewer_process_fails(self) -> None:
+        """SHA-177: a reviewer process failure (auth, crash, network -- not a
+        genuine review) must never be accepted as an approval-eligible
+        result; review() must fall back to REVISE and say why, not surface
+        whatever the failed process happened to print."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        original_run = dispatch.run
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            head = git(repo, "rev-parse", "HEAD")
+
+            def fake_run(cmd, cwd=None, check=True, **kw):
+                if cmd[0] == "git":
+                    return original_run(cmd, cwd=cwd, check=check, **kw)
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="OAuth 401: token expired")
+
+            with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}), \
+                 mock.patch.object(dispatch, "run", side_effect=fake_run):
+                verdict, findings = dispatch.review(repo, 45, "gate report", head)
+            self.assertEqual(verdict, "REVISE")
+            self.assertIn("Factory rejected reviewer evidence", findings)
+
+            # A genuine REVISE (reviewer ran fine, just found problems) is unaffected.
+            def fake_revise(cmd, cwd=None, check=True, **kw):
+                if cmd[0] == "git":
+                    return original_run(cmd, cwd=cwd, check=check, **kw)
+                return subprocess.CompletedProcess(cmd, 0, stdout="some findings\nVERDICT: REVISE", stderr="")
+
+            with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}), \
+                 mock.patch.object(dispatch, "run", side_effect=fake_revise):
+                verdict, findings = dispatch.review(repo, 45, "gate report", head)
+            self.assertEqual(verdict, "REVISE")
+            self.assertIn("some findings", findings)
+
+    def test_approve_pr_edits_by_resolved_pr_number_not_branch_name(self) -> None:
+        """Confirmed live (ticket #45): `gh pr edit agent/{n}` silently no-ops
+        from the dispatcher's cwd (always `main`, never the branch), so the
+        factory-approved label never lands even though dispatch logs
+        "done (approved)". The edit call must use the numeric PR id."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            head = "c0ffee"
+            # SHA-bound gate + review evidence dispatch.approve_pr requires before it labels anything.
+            dispatch.record("attempt", ticket=45, attempt=1, gate="PASS", head=head, actual_head=head)
+            dispatch.record("review", ticket=45, verdict="APPROVE", accepted=True, head=head, actual_head=head)
+            pr = {"number": 46, "state": "OPEN", "headRefOid": head, "baseRefName": "main", "reviewDecision": None}
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, cwd=None, check=True, **kw):
+                calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(dispatch, "gh_json", return_value=pr), \
+                 mock.patch.object(dispatch, "run", side_effect=fake_run):
+                self.assertTrue(dispatch.approve_pr(45, head))
+            edit_call = next(c for c in calls if c[:3] == ["gh", "pr", "edit"])
+            self.assertEqual(edit_call[3], "46")
+            self.assertNotIn("agent/45", edit_call)
+
     def learn_scenario(self, root: Path, reply: str) -> tuple[Path, Path, str, Path]:
         """Repo with a bare origin and a fake manager that records its prompt and prints `root/reply.txt`."""
         repo = make_repo(root)
@@ -2763,7 +2916,10 @@ class DispatchTest(unittest.TestCase):
                             f"import sys; print({output!r}); raise SystemExit({returncode})",
                         ],
                     ))
-                    verdict, findings = dispatch.review(repo, 7, "PASS", head)
+                    from unittest import mock
+
+                    with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}):
+                        verdict, findings = dispatch.review(repo, 7, "PASS", head)
                     self.assertEqual(verdict, "REVISE")
                     self.assertIn("Factory rejected reviewer evidence", findings)
 
@@ -2823,7 +2979,8 @@ class DispatchTest(unittest.TestCase):
                     return subprocess.CompletedProcess(cmd, 0, "VERDICT: APPROVE\n", "")
                 return original_run(cmd, *args, **kwargs)
 
-            with mock.patch.object(dispatch, "run", side_effect=raced_run):
+            with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}), \
+                 mock.patch.object(dispatch, "run", side_effect=raced_run):
                 verdict, findings = dispatch.review(repo, 7, "PASS", expected)
 
             self.assertEqual(verdict, "REVISE")

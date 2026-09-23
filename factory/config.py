@@ -25,9 +25,14 @@ LABEL_REVIEW = "needs-review"
 LABEL_TRIAGE = "needs-triage"
 LABEL_INFO = "needs-info"
 LABEL_AGENT = "ready-for-agent"
+LABEL_INVESTIGATE = "ready-for-investigation"
 LABEL_HUMAN = "ready-for-human"
 LABEL_APPROVED = "factory-approved"
 LABEL_CHORE = "chore"
+# Reporter/detector-applied marker, never a triage decision itself: exempts an
+# issue from the acceptance-criteria lint so "service is down, cause unknown"
+# incident reports aren't wrongly bounced to needs-info.
+LABEL_OPS = "kind/ops"
 LABEL_INITIATIVE = "initiative"
 LABEL_WONTFIX = "wontfix-proposal"
 LABELS = {
@@ -36,9 +41,11 @@ LABELS = {
     LABEL_TRIAGE: ("FBCA04", "Maintainer needs to evaluate this issue"),
     LABEL_INFO: ("D4C5F9", "Waiting on reporter for more information"),
     LABEL_AGENT: ("0E8A16", "Fully specified and ready for an AFK agent"),
+    LABEL_INVESTIGATE: ("1D76DB", "Evidence-gathering pass; agent reports, does not diff"),
     LABEL_HUMAN: ("B60205", "Requires human implementation"),
     LABEL_APPROVED: ("0E8A16", "Reviewer APPROVE recorded by the factory; merge-stage precondition"),
     LABEL_CHORE: ("C2E0C6", "Mechanical task; routed to the chore worker"),
+    LABEL_OPS: ("5319E7", "Operational/infra issue; exempt from the acceptance-criteria triage lint"),
     LABEL_WONTFIX: ("EDEDED", "Triage or manager proposes not to action this; a human decides"),
     LABEL_INITIATIVE: ("1D76DB", "Shared initiative plan read by `factory plan`; never triaged, dispatched, managed or merged"),
 }
@@ -82,7 +89,7 @@ KNOWN_KEYS = {
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
     "gate": ("timeout", "lock", "check"),
     "leak_scan": ("pattern", "exclude"),
-    "triage": ("url", "model"),
+    "triage": ("url", "model", "key"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),
     "collaboration": ("fallback", "reasons", "components"),
@@ -145,6 +152,7 @@ class Config:
     leak_exclude: list[str] = field(default_factory=list)
     llm_url: str = DEFAULT_LLM_URL
     llm_model: str = DEFAULT_LLM_MODEL
+    llm_key: str = ""  # bearer token for a gated endpoint (e.g. LiteLLM); host config only, never committed
     manager_model: str | None = None  # dashboard's no-tools OMP briefing; never a command
     dashboard_port: int = 8765
     dashboard_theme: Path | None = None  # CSS file served after the built-in stylesheet
@@ -416,6 +424,7 @@ def load(start: Path | None = None) -> Config:
     cfg.leak_exclude = list(leak.get("exclude", []))
     cfg.llm_url = triage.get("url", cfg.llm_url)
     cfg.llm_model = triage.get("model", cfg.llm_model)
+    cfg.llm_key = str(triage.get("key", cfg.llm_key))
     cfg.dashboard_port = int(dash.get("port", cfg.dashboard_port))
     cfg.dashboard_theme = root / dash["theme"] if dash.get("theme") else None
     cfg.install = merge(DEFAULT_INSTALL, raw.get("install", {}))
