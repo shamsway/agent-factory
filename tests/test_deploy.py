@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -15,6 +18,15 @@ from unittest import mock
 
 from factory import apply, config, deploy, dispatch
 from tests.test_factory import make_repo
+
+
+def detached_from(fake_run):
+    """Adapt a `subprocess.run` fake for `terraform apply` to the
+    `deploy.run_terraform_detached` signature."""
+    def run(cmd, cwd, env, timeout, log_path):
+        result = fake_run(cmd)
+        return result.returncode, (result.stdout or "") + (result.stderr or ""), False
+    return run
 
 
 class DeployTargetConfigTest(unittest.TestCase):
@@ -333,6 +345,7 @@ class DeployApplyIntegrationTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "show_json", return_value={}), \
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[]), \
                  mock.patch("subprocess.run", side_effect=fake_subproc_run), \
+                 mock.patch("factory.deploy.run_terraform_detached", side_effect=detached_from(fake_subproc_run)), \
                  mock.patch.object(dispatch, "run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")), \
                  mock.patch.object(dispatch, "pr_comment"):
                 apply.apply_one(ticket, dry_run=False)
@@ -380,6 +393,7 @@ class DeployApplyIntegrationTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "show_json", return_value={}), \
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[]), \
                  mock.patch("subprocess.run", side_effect=fake_subproc_run), \
+                 mock.patch("factory.deploy.run_terraform_detached", side_effect=detached_from(fake_subproc_run)), \
                  mock.patch.object(dispatch, "run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")), \
                  mock.patch.object(dispatch, "pr_comment"):
                 apply.apply_one(ticket, dry_run=False)
@@ -893,28 +907,6 @@ adapter = "terraform"
             # Execution count MUST remain 1 -- no duplicate apply!
             self.assertEqual(tf_call_count, 1)
 
-    def test_bounded_subprocess_execution_timeout(self) -> None:
-        """TerraformDeployAdapter catches subprocess timeout and records durable error."""
-        adapter = deploy.TerraformDeployAdapter(timeout_sec=1)
-        with tempfile.TemporaryDirectory() as d:
-            ctx = deploy.DeployContext(
-                target=config.DeployTarget(name="default", dir="."),
-                ticket={"ticket": 80, "pr": 35, "commit": "c80"},
-                root=Path(d),
-                factory_dir=Path(d) / ".factory",
-                worktree=Path(d),
-                planfile=Path(d) / "plan",
-            )
-            ctx.planfile.touch()
-
-            def fake_timeout(*args, **kwargs):
-                raise subprocess.TimeoutExpired(cmd=["terraform", "apply"], timeout=1, output="partial...", stderr="")
-
-            with mock.patch("subprocess.run", side_effect=fake_timeout):
-                res = adapter.execute(ctx, dry_run=False)
-                self.assertFalse(res.ok)
-                self.assertIn("timed out after 1s", res.error)
-
     def test_truthful_exit_codes(self) -> None:
         """Exit code is 0 on success/dry-run, and 1 on error/reconciliation required."""
         with tempfile.TemporaryDirectory() as d:
@@ -1294,35 +1286,6 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
                 ok_b2, fd_b2 = deploy.acquire_backend_lock(checkout_b, "shared_backend_key")
                 self.assertTrue(ok_b2)
                 deploy.release_lock(fd_b2)
-
-    def test_defect_8_timeout_expired_bytes_streams_decoded_safely(self) -> None:
-        """[P2] TimeoutExpired with bytes output/stderr is safely decoded without raising TypeError."""
-        from unittest import mock
-
-        adapter = deploy.TerraformDeployAdapter(timeout_sec=1)
-        with tempfile.TemporaryDirectory() as d:
-            ctx = deploy.DeployContext(
-                target=config.DeployTarget(name="default", dir="."),
-                ticket={"ticket": 99, "pr": 44, "commit": "c99"},
-                root=Path(d),
-                factory_dir=Path(d) / ".factory",
-                worktree=Path(d),
-                planfile=Path(d) / "plan",
-            )
-            ctx.planfile.touch()
-
-            def fake_timeout_bytes(*args, **kwargs):
-                exc = subprocess.TimeoutExpired(cmd=["terraform", "apply"], timeout=1)
-                exc.output = b"partial bytes stdout..."
-                exc.stderr = b"partial bytes stderr..."
-                raise exc
-
-            with mock.patch("subprocess.run", side_effect=fake_timeout_bytes):
-                res = adapter.execute(ctx, dry_run=False)
-                self.assertFalse(res.ok)
-                self.assertIn("timed out after 1s", res.error)
-                self.assertIn("partial bytes stdout", res.output)
-                self.assertIn("partial bytes stderr", res.output)
 
     def test_followup_1_affirmative_reviewer_identity_and_permission_required(self) -> None:
         """[P1] Reviews without affirmative identity or without repository permission are rejected."""
@@ -1718,3 +1681,130 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+FAKE_TERRAFORM = """\
+import os, signal, sys, time
+# Behave like a Go binary: a write to a broken stdout pipe kills the process.
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+mode = os.environ.get("FAKE_TF_MODE", "normal")
+if mode == "graceful":
+    def stop(*_):
+        print("Interrupt received. Gracefully shutting down; releasing state lock.", flush=True)
+        sys.exit(1)
+    signal.signal(signal.SIGINT, stop)
+elif mode == "stubborn":
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+with open(os.environ["FAKE_TF_ARGV"], "w") as f:
+    f.write(" ".join(sys.argv[1:]))
+sys.stdout.buffer.write(b"\\xff\\xfe non-utf8 provider bytes\\n")
+for i in range(int(os.environ.get("FAKE_TF_TICKS", "10"))):
+    print(f"Still creating... [{i}]", flush=True)
+    time.sleep(0.1)
+if os.environ.get("FAKE_TF_MARKER"):
+    open(os.environ["FAKE_TF_MARKER"], "w").write("state written")
+print("Apply complete! Resources: 1 added, 0 changed, 0 destroyed.", flush=True)
+"""
+
+
+class TerraformProcessIsolationTest(unittest.TestCase):
+    """`terraform apply` must outlive an abrupt Factory exit and stop gracefully on timeout."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "terraform"
+        fake.write_text("#!" + sys.executable + "\n" + FAKE_TERRAFORM)
+        fake.chmod(0o755)
+        self.marker = self.root / "state-written"
+        self.argv_file = self.root / "argv"
+        self.env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "FAKE_TF_ARGV": str(self.argv_file),
+                    "FAKE_TF_MARKER": str(self.marker)}
+
+    def ctx(self, **env) -> deploy.DeployContext:
+        ctx = deploy.DeployContext(
+            target=config.DeployTarget(name="default", dir="."),
+            ticket={"ticket": 90, "pr": 91, "commit": "c90"},
+            root=self.root, factory_dir=self.root / ".factory",
+            worktree=self.root, planfile=self.root / "plan", env={**self.env, **env})
+        ctx.planfile.touch()
+        return ctx
+
+    def logs(self) -> list[Path]:
+        return sorted((self.root / ".factory" / "logs").glob("terraform-apply-default-90-*.log"))
+
+    def wait_for(self, path: Path, seconds: float = 15.0) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if path.exists():
+                return True
+            time.sleep(0.05)
+        return path.exists()
+
+    def test_success_uses_no_color_and_keeps_a_private_log(self) -> None:
+        res = deploy.TerraformDeployAdapter(timeout_sec=30).execute(self.ctx(FAKE_TF_TICKS="2"))
+        self.assertTrue(res.ok, res.output)
+        self.assertIn("-no-color", self.argv_file.read_text().split())
+        self.assertIn("Apply complete!", res.output)
+        self.assertIn("non-utf8 provider bytes", res.output)  # undecodable bytes replaced, no exception
+        [log] = self.logs()
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertIn(b"Apply complete!", log.read_bytes())
+
+    def test_apply_survives_factory_being_killed(self) -> None:
+        """Regression for the live post-migration test C: a SIGKILLed Factory
+        previously killed terraform through its stdout pipe, leaving a partial
+        apply and a held state lock."""
+        script = (
+            "import sys; from pathlib import Path\n"
+            "sys.path.insert(0, %r)\n"
+            "from factory import config, deploy\n"
+            "ctx = deploy.DeployContext(target=config.DeployTarget(name='default', dir='.'),\n"
+            "    ticket={'ticket': 90, 'pr': 91, 'commit': 'c90'}, root=Path(%r),\n"
+            "    factory_dir=Path(%r), worktree=Path(%r), planfile=Path(%r), env=%r)\n"
+            "deploy.TerraformDeployAdapter(timeout_sec=60).execute(ctx)\n"
+        ) % (str(Path(deploy.__file__).resolve().parents[1]), str(self.root), str(self.root / ".factory"),
+             str(self.root), str(self.root / "plan"), {**self.env, "FAKE_TF_TICKS": "15"})
+        (self.root / "plan").touch()
+        factory_proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: factory_proc.poll() is None and factory_proc.kill())
+        self.assertTrue(self.wait_for(self.argv_file), "fake terraform never started")
+        time.sleep(0.3)
+        factory_proc.kill()
+        factory_proc.wait()
+        self.assertTrue(self.wait_for(self.marker), "terraform died with Factory")
+        [log] = self.logs()
+        deadline = time.monotonic() + 5
+        while b"Apply complete!" not in log.read_bytes() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIn(b"Apply complete!", log.read_bytes())
+
+    def test_pipe_output_reproduces_the_original_failure(self) -> None:
+        """Negative control: with stdout on a pipe whose reader has gone, the
+        Go-like process dies before writing state."""
+        env = {**self.env, "FAKE_TF_TICKS": "15"}
+        proc = subprocess.Popen(["terraform", "apply"], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertTrue(self.wait_for(self.argv_file))
+        proc.stdout.close()  # the reader (Factory) is gone
+        proc.wait(timeout=15)
+        self.assertEqual(proc.returncode, -signal.SIGPIPE)
+        self.assertFalse(self.marker.exists())
+
+    def test_timeout_interrupts_gracefully_before_killing(self) -> None:
+        with mock.patch.object(deploy, "TERRAFORM_INTERRUPT_GRACE_SEC", 10):
+            res = deploy.TerraformDeployAdapter(timeout_sec=1).execute(self.ctx(FAKE_TF_MODE="graceful", FAKE_TF_TICKS="100"))
+        self.assertFalse(res.ok)
+        self.assertIn("timed out after 1s", res.error)
+        self.assertIn("releasing state lock", res.output)
+        self.assertFalse(self.marker.exists())
+
+    def test_timeout_escalates_to_kill_when_interrupt_is_ignored(self) -> None:
+        with mock.patch.object(deploy, "TERRAFORM_INTERRUPT_GRACE_SEC", 1):
+            t0 = time.monotonic()
+            res = deploy.TerraformDeployAdapter(timeout_sec=1).execute(self.ctx(FAKE_TF_MODE="stubborn", FAKE_TF_TICKS="100"))
+        self.assertFalse(res.ok)
+        self.assertIn("timed out after 1s", res.error)
+        self.assertLess(time.monotonic() - t0, 8)
+        self.assertFalse(self.marker.exists())

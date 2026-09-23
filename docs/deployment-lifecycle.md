@@ -115,7 +115,7 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 
 1. `prepare(ctx)`: Sets up isolated worktree at merge commit and initializes planfile paths.
 2. `check(ctx)`: Runs fresh re-plan (`tf_plan_check.run_plan`), parses plan JSON, and validates destructive changes against `AllowedDestroy:` lines in the ticket body.
-3. `execute(ctx, dry_run)`: Bounded subprocess execution with timeout. Dry-run plans actions without mutating live state.
+3. `execute(ctx, dry_run)`: Bounded subprocess execution with timeout. The Terraform adapter runs `terraform apply -no-color` in its own session with output in a kept log file (not a pipe), so an abrupt Factory exit does not abort the apply. On timeout it sends SIGINT so Terraform can stop gracefully and release its state lock, and SIGKILLs only after a grace period. Dry-run plans actions without mutating live state.
 4. `verify(ctx)`: Post-mutation health checks or state verification.
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
@@ -136,13 +136,34 @@ On the next pass, `factory apply` logs:
 [apply] target `collectors`: stopped (reconciliation required: interrupted terraform run deploy-collectors-c1a2b3c4-1 requires operator reconciliation)
 ```
 
+`terraform apply` runs in its own session and writes to a log file rather than
+a pipe, so when only the Factory process dies, Terraform normally keeps running
+and finishes the apply, releasing its state lock. Its full output is in
+`.factory/logs/terraform-apply-<target>-<ticket>-<UTC timestamp>.log` (mode 0600).
+A host reboot, OOM kill of Terraform itself, or stopping the systemd unit (which
+signals the whole control group) can still interrupt Terraform mid-apply.
+
 **Recovery Procedure:**
-1. Inspect the live infrastructure and state backend to check if the partial apply finished or left locks:
+1. Make sure no Terraform for this target is still running (`pgrep -a terraform`),
+   then read the run's log. A final `Apply complete!` means the apply finished;
+   anything else means it was cut short.
+2. Inspect the state backend: which resources are recorded, and whether a state
+   lock is still held.
    ```sh
    cd terraform/homelab-collectors
    terraform state list
    ```
-2. Reconcile the run via the `factory apply` CLI:
+   If Terraform was cut short, a lock is typically left behind. On backends such
+   as Consul, a lock without a session never expires, and the next apply fails
+   with `Error acquiring the state lock`. Only after confirming that no Terraform
+   process is running, release it using the lock ID from that error or from the
+   backend's lock info:
+   ```sh
+   terraform force-unlock <LOCK_ID>
+   ```
+   The same applies if Factory died during the fresh `terraform plan` of the check
+   phase. In that case no deploy run is recorded; only the plan lock is left.
+3. Reconcile the run via the `factory apply` CLI:
    - If the changes are healthy and reflected in state:
      ```sh
      factory apply --target collectors --reconcile-run deploy-collectors-c1a2b3c4-1 --reconcile-status succeeded --reconcile-note "operator verified state clean"
@@ -151,7 +172,11 @@ On the next pass, `factory apply` logs:
      ```sh
      factory apply --target collectors --reconcile-run deploy-collectors-c1a2b3c4-1 --reconcile-status failed --reconcile-note "operator rolled back partial state"
      ```
-3. Re-run `factory apply` to resume normal operation.
+   Reconcile `succeeded` only when the log shows the apply completed and the state
+   matches the merged change. If the change is only partly in state, reconcile
+   `failed`, acknowledge it, and repair with a new reviewed PR (for example, one
+   removing configuration that never reached state).
+4. Re-run `factory apply` to resume normal operation.
 
 ### 2. Sequential Failure Halting
 

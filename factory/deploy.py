@@ -13,6 +13,7 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -877,6 +878,52 @@ def _safe_decode_stream(stream: Any) -> str:
     return str(stream)
 
 
+TERRAFORM_INTERRUPT_GRACE_SEC = 60
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def run_terraform_detached(cmd: list[str], cwd: Path, env: dict | None, timeout: float,
+                           log_path: Path) -> tuple[int, str, bool]:
+    """Run terraform so an abrupt Factory exit cannot abort it mid-apply.
+
+    Output goes to `log_path`, not a pipe. Go programs exit on SIGPIPE when
+    stdout/stderr is a broken pipe, so a killed Factory used to take a
+    running apply down with it and leave a partial apply plus a held backend
+    state lock. A new session keeps process-group signals aimed at Factory
+    (a terminal Ctrl-C, `kill -- -PGID`) away from terraform. On timeout,
+    SIGINT lets terraform stop gracefully and release its state lock;
+    SIGKILL follows only after TERRAFORM_INTERRUPT_GRACE_SEC. Returns
+    (returncode, output tail, timed_out).
+    """
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as log:
+        proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _signal_group(proc, signal.SIGINT)
+            try:
+                proc.wait(timeout=TERRAFORM_INTERRUPT_GRACE_SEC)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc, signal.SIGKILL)
+                proc.wait()
+    with open(log_path, "rb") as log:
+        log.seek(0, os.SEEK_END)
+        log.seek(max(0, log.tell() - 16000))
+        tail = log.read()
+    return proc.returncode, _safe_decode_stream(tail), timed_out
+
+
 class TerraformDeployAdapter(DeployAdapter):
     """Deploy adapter for Terraform roots with bounded subprocess execution."""
 
@@ -927,40 +974,21 @@ class TerraformDeployAdapter(DeployAdapter):
             )
 
         tf_dir = ctx.worktree / ctx.target.dir
+        # Kept after the run: evidence for reconciling an interrupted run.
+        log_path = ctx.factory_dir / "logs" / (
+            f"terraform-apply-{ctx.target.name}-{ctx.ticket.get('ticket')}-"
+            f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.log")
         t0 = time.monotonic()
-        try:
-            result = subprocess.run(
-                ["terraform", "apply", "-input=false", "-auto-approve", str(ctx.planfile)],
-                cwd=tf_dir,
-                capture_output=True,
-                text=True,
-                env=ctx.env,
-                timeout=self.timeout_sec,
-            )
-            duration = round(time.monotonic() - t0, 3)
-            out_str = _safe_decode_stream(result.stdout)
-            err_str = _safe_decode_stream(result.stderr)
-            output = (out_str + err_str)[-4000:]
-            ok = result.returncode == 0
-            return DeployExecutionResult(
-                ok=ok,
-                output=output,
-                error=None if ok else "terraform apply failed",
-                duration_sec=duration,
-            )
-        except subprocess.TimeoutExpired as exc:
-            duration = round(time.monotonic() - t0, 3)
-            raw_out = getattr(exc, "output", None) or getattr(exc, "stdout", None) or ""
-            raw_err = getattr(exc, "stderr", None) or ""
-            out_str = _safe_decode_stream(raw_out)
-            err_str = _safe_decode_stream(raw_err)
-            out = (out_str + err_str)[-4000:]
-            return DeployExecutionResult(
-                ok=False,
-                output=out,
-                error=f"terraform apply timed out after {self.timeout_sec}s",
-                duration_sec=duration,
-            )
+        returncode, output, timed_out = run_terraform_detached(
+            ["terraform", "apply", "-input=false", "-no-color", "-auto-approve", str(ctx.planfile)],
+            tf_dir, ctx.env, self.timeout_sec, log_path)
+        duration = round(time.monotonic() - t0, 3)
+        ok = returncode == 0 and not timed_out
+        if timed_out:
+            error = f"terraform apply timed out after {self.timeout_sec}s"
+        else:
+            error = None if ok else "terraform apply failed"
+        return DeployExecutionResult(ok=ok, output=output[-4000:], error=error, duration_sec=duration)
 
     def verify(self, ctx: DeployContext) -> tuple[bool, str]:
         return True, ""

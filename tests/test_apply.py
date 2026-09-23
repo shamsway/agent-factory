@@ -15,6 +15,15 @@ from factory import config
 from tests.test_factory import make_repo
 
 
+def detached_from(fake_run):
+    """Adapt a `subprocess.run` fake for `terraform apply` to the
+    `deploy.run_terraform_detached` signature."""
+    def run(cmd, cwd, env, timeout, log_path):
+        result = fake_run(cmd)
+        return result.returncode, (result.stdout or "") + (result.stderr or ""), False
+    return run
+
+
 class ApplyConfigTest(unittest.TestCase):
     def test_apply_table_parses(self) -> None:
         toml = '[apply]\nenabled = true\ndir = "terraform/prod"\n[apply.env]\nAWS_PROFILE = "infra-apply"\n'
@@ -235,6 +244,7 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "show_json", return_value={}), \
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[]), \
                  mock.patch("subprocess.run", side_effect=fake_subproc_run), \
+                 mock.patch("factory.deploy.run_terraform_detached", side_effect=detached_from(fake_subproc_run)), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment:
                 apply.apply_one(ticket, dry_run=False)
@@ -293,6 +303,7 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "show_json", return_value={}), \
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[]), \
                  mock.patch("subprocess.run", side_effect=fake_subproc_run), \
+                 mock.patch("factory.deploy.run_terraform_detached", side_effect=detached_from(fake_subproc_run)), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment:
                 apply.apply_one(ticket, dry_run=False)
@@ -386,11 +397,13 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "run_plan", return_value=plan_proc), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment, \
-                 mock.patch("subprocess.run") as mock_subproc_run:
+                 mock.patch("subprocess.run") as mock_subproc_run, \
+                 mock.patch("factory.deploy.run_terraform_detached") as mock_tf_apply:
                 apply.apply_one(ticket, dry_run=False)
 
             # terraform apply should NOT have been reached
             mock_subproc_run.assert_not_called()
+            mock_tf_apply.assert_not_called()
 
             # Escalation should have been posted to both issue and PR
             issue_calls = [c for c in calls if c[:3] == ["gh", "issue", "comment"]]
@@ -433,11 +446,13 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[("aws_s3_bucket.logs", ["delete"])]), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment, \
-                 mock.patch("subprocess.run") as mock_subproc_run:
+                 mock.patch("subprocess.run") as mock_subproc_run, \
+                 mock.patch("factory.deploy.run_terraform_detached") as mock_tf_apply:
                 apply.apply_one(ticket, dry_run=False)
 
             # terraform apply should NOT have been reached
             mock_subproc_run.assert_not_called()
+            mock_tf_apply.assert_not_called()
 
             # Escalation should have been posted to both issue and PR
             issue_calls = [c for c in calls if c[:3] == ["gh", "issue", "comment"]]
