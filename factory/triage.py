@@ -24,6 +24,8 @@ from factory.config import (
     LABEL_CHORE,
     LABEL_HUMAN,
     LABEL_INFO,
+    LABEL_INVESTIGATE,
+    LABEL_OPS,
     LABEL_TRIAGE,
     LABEL_REVIEW,
     LABEL_VIABILITY,
@@ -33,13 +35,15 @@ from factory.config import (
 cfg: Config
 LLM_URL = os.environ.get("FACTORY_LLM_URL", config.DEFAULT_LLM_URL)
 LLM_MODEL = os.environ.get("FACTORY_LLM_MODEL", config.DEFAULT_LLM_MODEL)
+LLM_KEY = os.environ.get("FACTORY_LLM_KEY", "")
 
 
 def configure(c: Config) -> None:
-    global cfg, LLM_URL, LLM_MODEL
+    global cfg, LLM_URL, LLM_MODEL, LLM_KEY
     cfg = c
     LLM_URL = os.environ.get("FACTORY_LLM_URL", cfg.llm_url)
     LLM_MODEL = os.environ.get("FACTORY_LLM_MODEL", cfg.llm_model)
+    LLM_KEY = os.environ.get("FACTORY_LLM_KEY", cfg.llm_key)
 
 
 LABEL_TABLE = "\n".join(
@@ -49,13 +53,21 @@ LABEL_TABLE = "\n".join(
         *(
             f"| {label} | {meaning} |"
             for label, (_color, meaning) in config.LABELS.items()
-            if label not in (LABEL_APPROVED, LABEL_CHORE, LABEL_REVIEW, LABEL_VIABILITY, config.LABEL_WONTFIX)
+            # LABEL_APPROVED/LABEL_CHORE are factory bookkeeping, not triage
+            # decisions; LABEL_OPS is an input signal the reporter/a detector
+            # sets, not something the triage model produces; LABEL_REVIEW and
+            # LABEL_VIABILITY are opt-in manager recommendations, not triage
+            # outputs either.
+            if label not in (
+                LABEL_APPROVED, LABEL_CHORE, LABEL_OPS,
+                LABEL_REVIEW, LABEL_VIABILITY, config.LABEL_WONTFIX,
+            )
         ),
         "| wontfix | Will not be actioned |",
     ]
 )
 
-DECISIONS = (LABEL_AGENT, LABEL_INFO, LABEL_HUMAN, config.LABEL_WONTFIX)
+DECISIONS = (LABEL_AGENT, LABEL_INFO, LABEL_HUMAN, LABEL_INVESTIGATE, config.LABEL_WONTFIX)
 
 ACCEPTANCE_HINTS = re.compile(
     r"acceptance|exit gate|verification|expected behavior|steps to reproduce",
@@ -63,14 +75,22 @@ ACCEPTANCE_HINTS = re.compile(
 )
 
 
-def deterministic_needs_info(body: str, comments: str) -> str | None:
-    """Cheap lint before the LLM: obviously under-specified -> needs-info."""
+def deterministic_needs_info(body: str, comments: str, ops: bool = False) -> str | None:
+    """Cheap lint before the LLM: obviously under-specified -> needs-info.
+
+    `ops` (the issue carries LABEL_OPS) exempts it from the acceptance-
+    criteria requirement: an incident report ("service is down, cause
+    unknown") is real and actionable without a done-condition yet — that's
+    exactly what a ready-for-investigation pass exists to produce.
+    """
     if len(body.strip()) < 80:
         return (
             "The issue body is too short to act on. Describe the problem and "
             "add acceptance criteria (an observable done-condition) plus the "
             "command that verifies it."
         )
+    if ops:
+        return None
     text = f"{body}\n{comments}"
     if not ACCEPTANCE_HINTS.search(text) and "```" not in text:
         return (
@@ -121,10 +141,11 @@ Choose exactly one decision for the issue:
 - "ready-for-agent": the issue is fully specified — it has a problem statement AND acceptance criteria or an observable done-condition. Also fill "brief": a short restatement of the acceptance criteria and the exact verification command, for the implementing agent.
 - "needs-info": information is missing; state the specific missing information as a question.
 - "ready-for-human": needs design judgment, touches release, signing, or security policy, or has blast radius beyond this repository.
+- "ready-for-investigation": the problem is real but the cause and/or fix are unknown (service down, alert firing, unexplained drift) — there is nothing to specify acceptance criteria against yet. Also fill "brief": what to investigate and what evidence to gather, not what to implement.
 - "wontfix-proposal": the issue should not be actioned; explain why.
 
 Respond with strict JSON only, no markdown, no prose outside the JSON:
-{{"decision": "<one of ready-for-agent|needs-info|ready-for-human|wontfix-proposal>", "rationale": "<one short paragraph>", "question": "<the question for the reporter, or empty string if decision is not needs-info>", "brief": "<agent brief for ready-for-agent, else empty string>"}}"""
+{{"decision": "<one of ready-for-agent|needs-info|ready-for-human|ready-for-investigation|wontfix-proposal>", "rationale": "<one short paragraph>", "question": "<the question for the reporter, or empty string if decision is not needs-info>", "brief": "<agent brief for ready-for-agent or ready-for-investigation, else empty string>"}}"""
 
 
 def call_llm(messages: list[dict], execution=None) -> str:
@@ -135,10 +156,13 @@ def call_llm(messages: list[dict], execution=None) -> str:
             "temperature": 0.1,
         }
     ).encode()
+    headers = {"Content-Type": "application/json"}
+    if LLM_KEY:
+        headers["Authorization"] = f"Bearer {LLM_KEY}"
     req = urllib.request.Request(
         LLM_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -196,7 +220,8 @@ def triage_issue(issue: dict, execution=None) -> dict | None:
         for c in issue.get("comments", [])
     )
     body = issue.get("body") or ""
-    question = deterministic_needs_info(body, comments)
+    ops = LABEL_OPS in {label["name"] for label in issue.get("labels", [])}
+    question = deterministic_needs_info(body, comments, ops)
     if question:
         return {
             "decision": LABEL_INFO,
@@ -236,6 +261,8 @@ def apply_decision(number: int, decision: dict, dry_run: bool, execution=None) -
         comment = f"Triage: {rationale}\n\nQuestion: {decision['question']}"
     elif label == LABEL_AGENT and decision.get("brief"):
         comment = f"Triage: {rationale}\n\nAgent brief: {decision['brief']}"
+    elif label == LABEL_INVESTIGATE and decision.get("brief"):
+        comment = f"Triage: {rationale}\n\nInvestigation brief: {decision['brief']}"
     elif label == "wontfix-proposal":
         comment = f"Triage proposal: wontfix — {rationale}"
     else:
