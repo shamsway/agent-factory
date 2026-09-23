@@ -1228,9 +1228,26 @@ ADAPTERS: dict[str, type[DeployAdapter]] = {
 }
 
 
+def unknown_adapters(targets) -> list[str]:
+    """`name: adapter` for each enabled target whose adapter is not registered."""
+    return [
+        f"{t.name}: {t.adapter}"
+        for t in targets
+        if t.enabled and t.adapter.lower() not in ADAPTERS
+    ]
+
+
 def get_adapter(name: str = "terraform") -> DeployAdapter:
-    """Get an instantiated deploy adapter by name."""
-    cls = ADAPTERS.get(name.lower(), TerraformDeployAdapter)
+    """Get an instantiated deploy adapter by name.
+
+    An unknown name is an error, never a silent fallback: a target naming an
+    adapter that is not registered (a typo, or a plugin that failed to load)
+    must not run `terraform apply` instead.
+    """
+    try:
+        cls = ADAPTERS[name.lower()]
+    except KeyError:
+        raise ValueError(f"unknown deploy adapter {name!r} (registered: {', '.join(sorted(ADAPTERS))})") from None
     return cls()
 
 
