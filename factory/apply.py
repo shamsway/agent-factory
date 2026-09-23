@@ -562,6 +562,11 @@ def main(argv: list[str]) -> int:
         log("apply not enabled for this repo ([apply].enabled = true to turn on)")
         return 0
 
+    unknown = deploy.unknown_adapters(cfg.targets.values())
+    if unknown:
+        log(f"error: unknown deploy adapter ({'; '.join(unknown)}); registered: {', '.join(sorted(deploy.ADAPTERS))}")
+        return 1
+
     a_ok, lock_fd = deploy.acquire_apply_lock(cfg.factory)
     if not a_ok:
         log("skipped (another apply run holds the lock)")

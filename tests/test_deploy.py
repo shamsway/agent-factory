@@ -1706,6 +1706,44 @@ print("Apply complete! Resources: 1 added, 0 changed, 0 destroyed.", flush=True)
 """
 
 
+class UnknownAdapterTest(unittest.TestCase):
+    """An unregistered adapter name must never fall back to Terraform."""
+
+    def test_get_adapter_rejects_unknown_name(self) -> None:
+        self.assertIsInstance(deploy.get_adapter("Terraform"), deploy.TerraformDeployAdapter)
+        with self.assertRaisesRegex(ValueError, "unknown deploy adapter 'helm'"):
+            deploy.get_adapter("helm")
+
+    def test_apply_pass_stops_before_any_work_on_unknown_adapter(self) -> None:
+        toml = """
+[apply]
+enabled = true
+
+[apply.targets.chart]
+dir = "charts/app"
+adapter = "helm"
+
+[apply.targets.disabled]
+dir = "charts/old"
+adapter = "also-unknown"
+enabled = false
+"""
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            cfg = config.load(repo)
+            self.assertEqual(deploy.unknown_adapters(cfg.targets.values()), ["chart: helm"])
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            with mock.patch.object(config, "load", return_value=cfg), \
+                 mock.patch.object(dispatch, "run") as run_mock, \
+                 mock.patch.object(dispatch, "gh_json") as gh_mock, \
+                 mock.patch.object(deploy, "acquire_apply_lock") as lock_mock:
+                self.assertEqual(apply.main([]), 1)
+            run_mock.assert_not_called()
+            gh_mock.assert_not_called()
+            lock_mock.assert_not_called()
+
+
 class TerraformProcessIsolationTest(unittest.TestCase):
     """`terraform apply` must outlive an abrupt Factory exit and stop gracefully on timeout."""
 

@@ -63,7 +63,7 @@ adapter = "terraform"
 ```
 
 * `backend_key`: Serializes deployment across multiple targets that share a common state backend (e.g. shared S3 state lock or Consul cluster), preventing overlapping apply passes.
-* `adapter`: Pluggable deployment adapter (`"terraform"`, `"fake"`, etc.).
+* `adapter`: Pluggable deployment adapter (`"terraform"`, `"fake"`, etc.). An enabled target naming an adapter that is not registered stops the whole `factory apply` pass before any lock, fetch or deployment; it never falls back to Terraform.
 * `supersession`: `"sequential"` enforces that tickets apply strictly in git topological commit order. A failure halts the target until resolved; subsequent commits are never applied out of order.
 
 ---
