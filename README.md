@@ -457,9 +457,12 @@ ticket's `human_touch` details. The dashboard retains its existing 100-issue,
    `factory gate`), and — on retries — the previous gate report or the
    reviewer's findings. Up to `max_attempts` rounds within `budget_min`.
 4. **Gate.** `conflict-markers`, your `[[gate.check]]` list in order, then a
-   `leak-scan` of added lines against a regex. Checks marked `exclusive`
-   serialise on a host-wide lock (one GPU, many worktrees). Every check has a
-   timeout; a wedged check fails instead of holding the lock.
+   `leak-scan` of added lines against a regex. A check is arbitrary argv —
+   a live-system health probe or a `terraform plan` safety check work the
+   same as a test command — with an optional per-check `timeout` override.
+   Checks marked `exclusive` serialise on a host-wide lock (one GPU, many
+   worktrees). Every check has a timeout; a wedged check fails instead of
+   holding the lock.
 5. **Review.** The reviewer runs the diff itself, gets the gate report inline, and
    is told to read issue #N's comments (the triage brief, approved scope changes).
    Every finding cites `path:line`; a required fix also cites an acceptance

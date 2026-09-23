@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 
 from factory import __version__, config
-from factory.config import CONFIG_NAME, LABELS, ConfigError
+from factory.config import CONFIG_NAME, DASHBOARD_ALLOW_REMOTE_VAR, LABELS, LOOPBACK_HOSTS, ConfigError
 
 TEMPLATES = Path(__file__).with_name("templates")
 GITIGNORE_LINES = ("/.factory/", ".factory-prompt.md")
@@ -459,6 +459,23 @@ def doctor(argv: list[str]) -> int:
 
     port_ok, port_detail = _dashboard_port_check(cfg, cfg.install["host"], cfg.dashboard_port)
     report(port_ok, f"dashboard port {cfg.dashboard_port}", port_detail)
+
+    host = cfg.install.get("host", "127.0.0.1")
+    allow_remote = DASHBOARD_ALLOW_REMOTE_VAR in cfg.install["env"]
+    if host in LOOPBACK_HOSTS:
+        report(True, "dashboard bind", f"{host} (loopback; reach it via an SSH tunnel)")
+    elif allow_remote:
+        report(
+            None, "dashboard bind",
+            f"{host} (non-loopback), {DASHBOARD_ALLOW_REMOTE_VAR} set -- confirm real "
+            "auth (e.g. a reverse proxy) actually sits in front of it",
+        )
+    else:
+        report(
+            False, "dashboard bind",
+            f"{host} (non-loopback) -- `factory dashboard` refuses to start without "
+            f"{DASHBOARD_ALLOW_REMOTE_VAR}=1 in [install].env",
+        )
 
     fails = sum(r["status"] == "FAIL" for r in rows)
     if args.json:

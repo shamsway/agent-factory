@@ -43,13 +43,26 @@ LABELS = {
     LABEL_INITIATIVE: ("1D76DB", "Shared initiative plan read by `factory plan`; never triaged, dispatched, managed or merged"),
 }
 
-DEFAULT_LEAK_PATTERN = r"internal|confidential|proprietary|private|jira|confluence|\.corp|\.internal"
+DEFAULT_LEAK_PATTERN = (
+    r"internal|confidential|proprietary|private|jira|confluence|\.corp|\.internal"
+    r"|AKIA[0-9A-Z]{16}|-----BEGIN[ A-Z]*PRIVATE KEY-----"
+)
 DEFAULT_WORKER = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
 DEFAULT_CHORE_WORKER = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
 DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
 DEFAULT_LLM_MODEL = "qwen3:30b"
 DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "python": None, "env": {}}
+# The dashboard's /api/act performs real GitHub mutations with the operator's
+# own `gh` credentials and has no authentication of its own -- policy is
+# loopback-only + SSH tunnel access, enforced by a hard refusal to bind
+# elsewhere (see dashboard.py's main()). Escape hatch for someone who
+# deliberately wants LAN/WAN exposure (and puts real auth in front of it,
+# e.g. a reverse proxy): set FACTORY_DASHBOARD_ALLOW_REMOTE=1 in
+# `[install].env` (host config) -- same mechanism used to reach any other
+# systemd-unit env var, see onboard.py's `units()`.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+DASHBOARD_ALLOW_REMOTE_VAR = "FACTORY_DASHBOARD_ALLOW_REMOTE"
 
 # Host-side layer: `$XDG_CONFIG_HOME/factory/config.toml`, same table shapes
 # as `.factory.toml`. `[defaults.*]` < `[repo."owner/name".*]` < the repo file.
@@ -74,7 +87,7 @@ KNOWN_KEYS = {
     "install": ("every", "dashboard", "host", "python", "env"),
     "collaboration": ("fallback", "reasons", "components"),
 }
-CHECK_KEYS = ("name", "run", "exclusive")
+CHECK_KEYS = ("name", "run", "exclusive", "timeout")
 ROUTE_REASONS = ("requirements", "implementation", "ci", "unknown")
 # GitHub login, or `@org/team`. Syntax only: never proof of membership or authorization.
 OWNER = re.compile(r"@?(?P<login>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)|(?P<team>@[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100})")
@@ -90,12 +103,15 @@ class Check:
     """One gate check: argv run inside the worktree; nonzero exit = FAIL.
 
     `exclusive` checks hold the host lock (shared GPU, licence server, ...)
-    so two worktrees never run them at once.
+    so two worktrees never run them at once. `timeout` overrides the gate's
+    global per-check timeout for this one check (e.g. a live-system health
+    probe wants seconds, a Terraform plan wants minutes).
     """
 
     name: str
     run: list[str]
     exclusive: bool = False
+    timeout: int | None = None
 
 
 @dataclass
@@ -389,7 +405,8 @@ def load(start: Path | None = None) -> Config:
     cfg.check_timeout = int(gate.get("timeout", cfg.check_timeout))
     cfg.lock = Path(gate.get("lock", cfg.lock))
     cfg.checks = [
-        Check(c["name"], list(c["run"]), bool(c.get("exclusive", False))) for c in gate.get("check", [])
+        Check(c["name"], list(c["run"]), bool(c.get("exclusive", False)), c.get("timeout"))
+        for c in gate.get("check", [])
     ]
     names = [c.name for c in cfg.checks]
     if len(set(names)) != len(names) or {"conflict-markers", "leak-scan"} & set(names):

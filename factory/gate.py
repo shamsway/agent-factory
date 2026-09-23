@@ -34,13 +34,14 @@ def configure(c: Config) -> None:
     CHECK_TIMEOUT = cfg.check_timeout
 
 
-def timed(cmd: list[str]) -> subprocess.CompletedProcess:
-    """Run a command with the per-check timeout.
+def timed(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Run a command with the per-check timeout (or `timeout` if given).
 
     A wedged check must FAIL, not sit on the GPU lock (ticket #5's gate hung
     for 2h). The check runs in its own session so a timeout kills the whole
     tree (cargo/test grandchildren included), not just the direct child.
     """
+    t = CHECK_TIMEOUT if timeout is None else timeout
     execution = lifecycle.current()
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
@@ -49,7 +50,7 @@ def timed(cmd: list[str]) -> subprocess.CompletedProcess:
     if execution:
         execution.child(proc.pid)
     try:
-        out, _ = proc.communicate(timeout=CHECK_TIMEOUT)
+        out, _ = proc.communicate(timeout=t)
         if execution:
             execution.emit("result", command=cmd, returncode=proc.returncode, timed_out=False)
             if proc.returncode < 0:
@@ -60,22 +61,22 @@ def timed(cmd: list[str]) -> subprocess.CompletedProcess:
         if execution:
             execution.outcome = "unknown"
             execution.reason = "check_timeout"
-            execution.emit("timeout", command=cmd, timeout_seconds=CHECK_TIMEOUT)
+            execution.emit("timeout", command=cmd, timeout_seconds=t)
         os.killpg(proc.pid, signal.SIGKILL)
         out, _ = proc.communicate()
         if execution:
             execution.emit("result", command=cmd, returncode=proc.returncode, timed_out=True)
         return subprocess.CompletedProcess(
-            cmd, 124, f"{out}\ncheck timed out after {CHECK_TIMEOUT}s", ""
+            cmd, 124, f"{out}\ncheck timed out after {t}s", ""
         )
     finally:
         if execution and proc.poll() is not None:
             execution.child_done(proc.pid)
 
 
-def run(cmd: list[str]) -> tuple[bool, str]:
+def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
     """Run a command, return (passed, combined output)."""
-    proc = timed(cmd)
+    proc = timed(cmd, timeout)
     execution = lifecycle.current()
     if execution and proc.returncode != 0 and execution.outcome == "completed":
         execution.outcome = "product_feedback"
@@ -165,7 +166,7 @@ def execute(args: argparse.Namespace, execution) -> int:
 
     checks = [
         ("conflict-markers", check_conflict_markers),
-        *((check.name, (lambda c=check: run(c.run))) for check in cfg.checks),
+        *((check.name, (lambda c=check: run(c.run, c.timeout))) for check in cfg.checks),
         ("leak-scan", lambda: check_leaks(args.base)),
     ]
 
