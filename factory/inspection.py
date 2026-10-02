@@ -259,63 +259,51 @@ def locks(cfg: config.Config, extra_directories: list[Path] = ()) -> list[dict]:
     return [lock_snapshot(path) for path in sorted(paths)] + errors
 
 
-def archived_deploy_rows(path: Path) -> tuple[list[dict], bytes]:
-    """Deploy rows from rotated journal segments, oldest first, and their raw bytes.
+def _scan(lines, rows: list[dict], digest, remaining: int) -> int:
+    """Validate every journal line, keeping only the rows deployment replay reads.
 
-    The caller holds the live journal's flock. A segment holds up to
-    `[journal] max_mb` of mostly unrelated rows, so stream it and keep only what
-    deployment replay reads; LIMIT bounds what is kept, not what is scanned.
+    The journal is mostly lifecycle rows and outgrows any fixed read cap, so
+    LIMIT bounds what is kept, not what is scanned. Returns the unused budget.
     """
-    rows, kept = [], []
-    size = 0
-    for n in lifecycle._segments(path):
-        with gzip.open(lifecycle._segment(path, n), "rb") as segment:
-            for line in segment:
-                if not line.endswith(b"\n"):
-                    raise Unavailable("incomplete_segment")
-                row = json.loads(line)
-                if not isinstance(row, dict):
-                    raise ValueError
-                if row.get("event") not in deploy.REPLAY_EVENTS:
-                    continue
-                size += len(line)
-                if size > LIMIT:
-                    raise Unavailable("size_limit")
-                if row.get("event") == "deploy_run":
-                    deploy.DeployRun.from_dict(row)  # malformed deployment state is not a clean ledger
-                rows.append(row)
-                kept.append(line)
-    return rows, b"".join(kept)
+    for line in lines:
+        digest.update(line)
+        if not line.endswith(b"\n"):
+            raise Unavailable("incomplete_tail")
+        if not line.strip() or b"\x00" in line:
+            continue  # lifecycle.append explicitly quarantines interrupted tails
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError
+        if row.get("event") not in deploy.REPLAY_EVENTS:
+            continue
+        remaining -= len(line)
+        if remaining < 0:
+            raise Unavailable("size_limit")
+        if row.get("event") == "deploy_run":
+            deploy.DeployRun.from_dict(row)  # malformed deployment state is not a clean ledger
+        rows.append(row)
+    return remaining
 
 
 def deployment_snapshot(cfg: config.Config) -> dict:
     path = cfg.factory / "events.jsonl"
+    rows: list[dict] = []
+    digest = hashlib.sha256()
     try:
         try:
             with path.open("rb") as handle:
                 fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                data = handle.read(LIMIT + 1)
-                if len(data) > LIMIT:
-                    raise Unavailable("size_limit")
-                # Under the same flock, so a concurrent rotation cannot move rows between the reads.
-                rows, archived = archived_deploy_rows(path)
+                # Rotated segments hold the oldest rows. Read them under the same
+                # flock, so a concurrent rotation cannot move rows between reads.
+                remaining = LIMIT
+                for n in lifecycle._segments(path):
+                    with gzip.open(lifecycle._segment(path, n), "rb") as segment:
+                        remaining = _scan(segment, rows, digest, remaining)
+                _scan(handle, rows, digest, remaining)
         except FileNotFoundError:
             if not path.exists():
                 return {"status": "absent", "targets": []}
             raise
-        if data and not data.endswith(b"\n"):
-            raise Unavailable("incomplete_tail")
-        for line in data.splitlines():
-            if not line.strip():
-                continue
-            if b"\x00" in line:
-                continue  # lifecycle.append explicitly quarantines interrupted tails
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError
-            if row.get("event") == "deploy_run":
-                deploy.DeployRun.from_dict(row)  # malformed deployment state is not a clean ledger
-            rows.append(row)
         state = deploy.replay_rows(rows)
         targets = []
         for name in sorted(set(cfg.targets) | set(state)):
@@ -327,7 +315,7 @@ def deployment_snapshot(cfg: config.Config) -> dict:
                             "unresolved_runs": [run.run_id for run in target.interrupted_runs] if target else [],
                             "terminal_tickets": sorted(target.terminal_tickets) if target else [],
                             "unacknowledged_failed_tickets": sorted(target.unacknowledged_failed_tickets) if target else []})
-        return {"status": "observed", "sha256": hashlib.sha256(archived + data).hexdigest(), "targets": targets}
+        return {"status": "observed", "sha256": digest.hexdigest(), "targets": targets}
     except (Unavailable, OSError, EOFError, zlib.error, ValueError, KeyError, TypeError, AttributeError):
         return {"status": "unavailable", "targets": []}
 
