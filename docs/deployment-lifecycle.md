@@ -92,6 +92,8 @@ All deployments are recorded durably to `.factory/events.jsonl` using a versione
 }
 ```
 
+When the journal rotates (`[journal] max_mb` / `retention`), deploy rows move into `events.jsonl.N.gz` segments but are never dropped. Target-state replay (`factory apply`) and `factory inspect` read the segments as well as the live file, so failed-run blocks and acknowledgments survive rotation.
+
 ### Legacy Migration
 
 Legacy events (`applied` with `ok=true`/`ok=false`, `apply-escalate`) are parsed and projected cleanly:

@@ -10,7 +10,6 @@ auto-retried.
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import re
 import signal
@@ -253,19 +252,16 @@ def parse_legacy_row(row: dict[str, Any]) -> DeployRun | None:
 
 
 def replay_events(events_path: Path) -> dict[str, TargetState]:
-    """Replay events.jsonl into target states, preserving full run history."""
-    if not events_path.exists():
-        return {}
+    """Replay events.jsonl into target states, preserving full run history.
 
-    rows = []
-    for line in events_path.read_text().splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return replay_rows(rows)
+    Reads rotated gzip segments too: rotation archives deploy rows, it never
+    drops them, so a live-file-only read would forget failed runs and acks.
+    """
+    return replay_rows(lifecycle.read_events(events_path))
+
+
+# The only journal events replay_rows reads; everything else is ignored.
+REPLAY_EVENTS = frozenset({"deploy_run", "deploy_acknowledged", "deploy_superseded", "applied", "apply-escalate"})
 
 
 def replay_rows(rows: list[dict]) -> dict[str, TargetState]:

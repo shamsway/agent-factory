@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from factory import config, deploy, inspection, verify_secrets
+from factory import config, deploy, inspection, lifecycle, verify_secrets
 
 SECRET = "credential-sentinel-do-not-render"
 
@@ -144,6 +144,29 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(report['targets'][0]['unresolved_runs'], ['r1'])
         self.assertNotIn(SECRET, json.dumps(report))
         self.assertEqual(path.read_bytes(), before)
+
+    def test_rotated_ledger_segments_are_observed(self):
+        path = self.cfg.factory / 'events.jsonl'
+        failed = deploy.DeployRun(run_id='r1', target='default', commit='a'*40, ticket=1,
+                                  attempt=1, status=deploy.DeployStatus.FAILED,
+                                  started_at='2026-10-02T00:00:00Z', output=SECRET)
+        with patch.dict(os.environ, {lifecycle.CONTEXT_ENV: ''}), \
+                patch.object(lifecycle, 'MAX_BYTES', 2_000), patch.object(lifecycle, 'RETENTION', 2):
+            deploy.record_deploy_run(failed, events_path=path)
+            for i in range(60):
+                lifecycle.append(path, {'event': 'noise', 'i': i, 'pad': 'x' * 200})
+        self.assertNotIn(b'deploy_run', path.read_bytes())
+        report = inspection.deployment_snapshot(self.cfg)
+        self.assertEqual(report['status'], 'observed')
+        self.assertEqual(report['targets'][0]['unacknowledged_failed_tickets'], [1])
+        self.assertNotIn(SECRET, json.dumps(report))
+
+    def test_corrupt_ledger_segment_is_unavailable(self):
+        path = self.cfg.factory / 'events.jsonl'
+        path.parent.mkdir()
+        path.write_bytes(b'')
+        (self.cfg.factory / 'events.jsonl.1.gz').write_bytes(b'not gzip')
+        self.assertEqual(inspection.deployment_snapshot(self.cfg)['status'], 'unavailable')
 
     def test_missing_partial_and_invalid_ledger_are_distinguished(self):
         self.assertEqual(inspection.deployment_snapshot(self.cfg)['status'], 'absent')

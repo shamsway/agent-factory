@@ -16,7 +16,7 @@ from pathlib import Path
 
 from unittest import mock
 
-from factory import apply, config, deploy, dispatch
+from factory import apply, config, deploy, dispatch, lifecycle
 from tests.test_factory import make_repo
 
 
@@ -1846,3 +1846,51 @@ class TerraformProcessIsolationTest(unittest.TestCase):
         self.assertIn("timed out after 1s", res.error)
         self.assertLess(time.monotonic() - t0, 8)
         self.assertFalse(self.marker.exists())
+
+
+class JournalRotationReplayTest(unittest.TestCase):
+    """Rotation archives deploy rows into gzip segments; replay must still see them."""
+
+    def setUp(self) -> None:
+        # An inherited dispatcher context would redirect lifecycle rows to the real journal.
+        context = mock.patch.dict(os.environ, {lifecycle.CONTEXT_ENV: ""})
+        context.start()
+        self.addCleanup(context.stop)
+
+    def run_row(self, ticket: int, attempt: int, status: deploy.DeployStatus) -> deploy.DeployRun:
+        return deploy.DeployRun(
+            run_id=f"deploy-default-commit{ticket}-{attempt}", target="default", commit=f"commit{ticket}",
+            ticket=ticket, attempt=attempt, status=status, started_at="2026-10-02T00:00:00Z",
+            completed_at="2026-10-02T00:00:05Z", duration_sec=5.0,
+        )
+
+    def observed(self, events: Path) -> tuple:
+        state = deploy.get_target_state("default", events_path=events)
+        return (
+            [run.run_id for run in state.runs],
+            state.terminal_tickets,
+            state.unacknowledged_failed_tickets,
+            set(state.acknowledged_failures),
+            deploy.next_attempt("default", 50, "commit50", events_path=events),
+        )
+
+    def test_deploy_history_survives_rotation_past_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lifecycle, "MAX_BYTES", 4_000), \
+                mock.patch.object(lifecycle, "RETENTION", 2):
+            events = Path(d) / "events.jsonl"
+            deploy.record_deploy_run(self.run_row(50, 1, deploy.DeployStatus.FAILED), events_path=events)
+            deploy.record_deploy_run(self.run_row(51, 1, deploy.DeployStatus.FAILED), events_path=events)
+            deploy.record_deploy_run(self.run_row(52, 1, deploy.DeployStatus.SUCCEEDED), events_path=events)
+            lifecycle.append(events, {"event": "applied", "ticket": 53, "ok": False, "commit": "commit53"})
+            self.assertIsNotNone(deploy.acknowledge_failure("default", 51, events_path=events))
+            before = self.observed(events)
+            self.assertEqual(before[2], {50, 53})
+            self.assertEqual(before[4], 2)
+
+            for i in range(200):
+                lifecycle.append(events, {"event": "noise", "i": i, "pad": "x" * 200})
+
+            self.assertGreaterEqual(len(list(Path(d).glob("events.jsonl.*.gz"))), 2)
+            self.assertNotIn(b"deploy_", events.read_bytes())
+            self.assertEqual(self.observed(events), before)

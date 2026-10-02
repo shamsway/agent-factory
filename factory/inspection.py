@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import gzip
 import hashlib
 import json
 import os
@@ -14,8 +15,9 @@ import shlex
 import stat
 import subprocess
 import sys
+import zlib
 
-from . import config, deploy, verify_secrets
+from . import config, deploy, lifecycle, verify_secrets
 
 LIMIT = 8 * 1024 * 1024
 PROPERTIES = "LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment,ExecStart,WorkingDirectory,InvocationID"
@@ -257,6 +259,35 @@ def locks(cfg: config.Config, extra_directories: list[Path] = ()) -> list[dict]:
     return [lock_snapshot(path) for path in sorted(paths)] + errors
 
 
+def archived_deploy_rows(path: Path) -> tuple[list[dict], bytes]:
+    """Deploy rows from rotated journal segments, oldest first, and their raw bytes.
+
+    The caller holds the live journal's flock. A segment holds up to
+    `[journal] max_mb` of mostly unrelated rows, so stream it and keep only what
+    deployment replay reads; LIMIT bounds what is kept, not what is scanned.
+    """
+    rows, kept = [], []
+    size = 0
+    for n in lifecycle._segments(path):
+        with gzip.open(lifecycle._segment(path, n), "rb") as segment:
+            for line in segment:
+                if not line.endswith(b"\n"):
+                    raise Unavailable("incomplete_segment")
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError
+                if row.get("event") not in deploy.REPLAY_EVENTS:
+                    continue
+                size += len(line)
+                if size > LIMIT:
+                    raise Unavailable("size_limit")
+                if row.get("event") == "deploy_run":
+                    deploy.DeployRun.from_dict(row)  # malformed deployment state is not a clean ledger
+                rows.append(row)
+                kept.append(line)
+    return rows, b"".join(kept)
+
+
 def deployment_snapshot(cfg: config.Config) -> dict:
     path = cfg.factory / "events.jsonl"
     try:
@@ -266,13 +297,14 @@ def deployment_snapshot(cfg: config.Config) -> dict:
                 data = handle.read(LIMIT + 1)
                 if len(data) > LIMIT:
                     raise Unavailable("size_limit")
+                # Under the same flock, so a concurrent rotation cannot move rows between the reads.
+                rows, archived = archived_deploy_rows(path)
         except FileNotFoundError:
             if not path.exists():
                 return {"status": "absent", "targets": []}
             raise
         if data and not data.endswith(b"\n"):
             raise Unavailable("incomplete_tail")
-        rows = []
         for line in data.splitlines():
             if not line.strip():
                 continue
@@ -295,8 +327,8 @@ def deployment_snapshot(cfg: config.Config) -> dict:
                             "unresolved_runs": [run.run_id for run in target.interrupted_runs] if target else [],
                             "terminal_tickets": sorted(target.terminal_tickets) if target else [],
                             "unacknowledged_failed_tickets": sorted(target.unacknowledged_failed_tickets) if target else []})
-        return {"status": "observed", "sha256": hashlib.sha256(data).hexdigest(), "targets": targets}
-    except (Unavailable, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"status": "observed", "sha256": hashlib.sha256(archived + data).hexdigest(), "targets": targets}
+    except (Unavailable, OSError, EOFError, zlib.error, ValueError, KeyError, TypeError, AttributeError):
         return {"status": "unavailable", "targets": []}
 
 
