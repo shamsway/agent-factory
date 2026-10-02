@@ -101,10 +101,13 @@ KNOWN_KEYS = {
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),
-    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter"),
+    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify"),
     "collaboration": ("fallback", "reasons", "components"),
 }
 CHECK_KEYS = ("name", "run", "exclusive", "timeout")
+VERIFY_KEYS = ("nomad", "nomad_addr", "timeout", "interval", "periodic", "check")
+VERIFY_CHECK_KEYS = ("name", "run", "timeout")
+PERIODIC_POLICIES = ("registered", "launch")
 ROUTE_REASONS = ("requirements", "implementation", "ci", "unknown")
 # GitHub login, or `@org/team`. Syntax only: never proof of membership or authorization.
 OWNER = re.compile(r"@?(?P<login>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)|(?P<team>@[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100})")
@@ -124,6 +127,75 @@ class DeployTarget:
     enabled: bool = True
     backend_key: str = ""
     adapter: str = "terraform"
+    verify: VerifyPolicy | None = None
+
+
+@dataclass
+class VerifyPolicy:
+    """Post-apply health verification for one target (see factory/health.py).
+
+    Off unless the target's `verify` table asks for something to observe.
+    """
+
+    nomad: bool = False  # observe the nomad_job resources the applied plan changed
+    nomad_addr: str = ""  # falls back to NOMAD_ADDR in the apply env
+    timeout: int = 300  # seconds for the whole observation window
+    interval: int = 5  # seconds between polls
+    periodic: str = "registered"  # or "launch": force one run and require it to complete
+    checks: list[Check] = field(default_factory=list)
+
+    @property
+    def active(self) -> bool:
+        return self.nomad or bool(self.checks)
+
+
+def _positive_int(value: object, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{where} must be a positive integer")
+    return value
+
+
+def verify_policy(raw: object, where: str) -> VerifyPolicy | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    unknown = sorted(k for k in raw if k not in VERIFY_KEYS)
+    if unknown:
+        raise ConfigError(f"{where}: unknown key(s) {', '.join(unknown)}")
+    policy = VerifyPolicy()
+    if "nomad" in raw:
+        if not isinstance(raw["nomad"], bool):
+            raise ConfigError(f"{where}.nomad must be true or false")
+        policy.nomad = raw["nomad"]
+    if "nomad_addr" in raw:
+        if not isinstance(raw["nomad_addr"], str):
+            raise ConfigError(f"{where}.nomad_addr must be a string")
+        policy.nomad_addr = raw["nomad_addr"]
+    for key in ("timeout", "interval"):
+        if key in raw:
+            setattr(policy, key, _positive_int(raw[key], f"{where}.{key}"))
+    if policy.interval > policy.timeout:
+        raise ConfigError(f"{where}.interval must not exceed {where}.timeout")
+    if "periodic" in raw:
+        if raw["periodic"] not in PERIODIC_POLICIES:
+            raise ConfigError(f"{where}.periodic must be one of {', '.join(PERIODIC_POLICIES)}")
+        policy.periodic = raw["periodic"]
+    for i, c in enumerate(raw.get("check") or []):
+        at = f"{where}.check[{i}]"
+        if not isinstance(c, dict) or not isinstance(c.get("name"), str) or not c["name"]:
+            raise ConfigError(f"{at} needs a name")
+        if [k for k in c if k not in VERIFY_CHECK_KEYS]:
+            raise ConfigError(f"{at}: allowed keys are {', '.join(VERIFY_CHECK_KEYS)}")
+        run = c.get("run")
+        if not isinstance(run, list) or not run or not all(isinstance(a, str) for a in run):
+            raise ConfigError(f"{at}.run must be a non-empty list of strings")
+        timeout = _positive_int(c["timeout"], f"{at}.timeout") if "timeout" in c else None
+        policy.checks.append(Check(c["name"], list(run), timeout=timeout))
+    names = [c.name for c in policy.checks]
+    if len(set(names)) != len(names):
+        raise ConfigError(f"{where}.check names must be unique")
+    return policy
 
 
 @dataclass
@@ -505,6 +577,7 @@ def load(start: Path | None = None) -> Config:
                     enabled=bool(item.get("enabled", True)),
                     backend_key=str(item.get("backend_key", "")),
                     adapter=str(item.get("adapter", default_adapter)),
+                    verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                 )
     elif isinstance(raw_targets, dict):
         for name, item in raw_targets.items():
@@ -515,13 +588,18 @@ def load(start: Path | None = None) -> Config:
                     enabled=bool(item.get("enabled", True)),
                     backend_key=str(item.get("backend_key", "")),
                     adapter=str(item.get("adapter", default_adapter)),
+                    verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                 )
+    if targets and "verify" in apply_t:
+        raise ConfigError("[apply].verify applies to the implicit default target only; "
+                          "with [apply.targets], set verify on each target")
     if not targets:
         targets["default"] = DeployTarget(
             name="default",
             dir=cfg.apply_dir,
             enabled=cfg.apply_enabled,
             adapter=default_adapter,
+            verify=verify_policy(apply_t.get("verify"), "apply.verify"),
         )
     cfg.targets = targets
     return cfg

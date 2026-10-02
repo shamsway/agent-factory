@@ -82,6 +82,17 @@ def sanitize(text: str, secrets: list[str] | None = None) -> str:
     return "".join(out)
 
 
+def sanitize_tree(value: Any, secrets: list[str] | None = None) -> Any:
+    """`sanitize` every string inside a JSON-shaped value."""
+    if isinstance(value, str):
+        return sanitize(value, secrets)
+    if isinstance(value, dict):
+        return {k: sanitize_tree(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_tree(v, secrets) for v in value]
+    return value
+
+
 def _write_private(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = path.with_name(path.name + ".tmp")
@@ -204,6 +215,7 @@ def write_run_artifacts(factory_dir: Path, run: Any, *, log_path: Path | None = 
         "output_tail": sanitize(run.output or "", secrets)[-output_tail:],
         "log_artifact": "apply.log" if names else None,
         "headline": headline or None,
+        "verification": sanitize_tree(getattr(run, "verification", None), secrets),
     }
     _write_json(d / "summary.json", summary)
     names.append(("summary.json", "summary"))
@@ -231,6 +243,22 @@ PostFn = Callable[[str, int, str], tuple[bool, str]]
 sink `issue` and the explicit PR number for sink `pr`."""
 
 
+def _render_verification(v: dict | None, limit: int = 10) -> list[str]:
+    if not v:
+        return []
+    items = v.get("items") or []
+    healthy = sum(1 for i in items if i.get("state") == "healthy")
+    lines = [f"\nHealth verification: **{v.get('verdict')}** ({healthy}/{len(items)} healthy, "
+             f"{v.get('elapsed_sec')}s of {v.get('timeout_sec')}s)"]
+    for i in sorted(items, key=lambda i: i.get("state") == "healthy")[:limit]:
+        label = i.get("id") or i.get("name") or i.get("address") or "?"
+        detail = (i.get("detail") or "").splitlines()[-1:] or [""]
+        lines.append(f"- `{label}` ({i.get('policy') or i.get('kind')}): {i.get('state')} -- {detail[0]}")
+    if len(items) > limit:
+        lines.append(f"- ... {len(items) - limit} more in `summary.json`")
+    return lines
+
+
 def render_comment(summary: dict, run_dir_hint: str = "") -> str:
     verb = "succeeded" if summary["status"] == "succeeded" else "FAILED" if summary["status"] == "failed" else summary["status"].upper()
     lines = [f"{summary.get('headline') or 'Deploy run `' + summary['run_id'] + '`'} {verb} for the merged change:"
@@ -240,6 +268,7 @@ def render_comment(summary: dict, run_dir_hint: str = "") -> str:
         lines.append(f"\nError: {summary['error']}")
     if summary.get("output_tail"):
         lines.append(f"\n```\n{summary['output_tail']}\n```")
+    lines += _render_verification(summary.get("verification"))
     lines.append(f"\nArtifacts: `{run_dir_hint or 'artifacts/' + summary['target'] + '/' + summary['run_id']}` "
                  "(sanitized manifest, summary and log; plans and state are kept private).")
     return "\n".join(lines)

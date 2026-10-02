@@ -404,10 +404,14 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         exec_res = adapter.execute(ctx, dry_run=False)
 
         if exec_res.ok:
-            v_ok, v_err = adapter.verify(ctx)
+            try:
+                v_ok, v_err = adapter.verify(ctx)
+            except Exception as verify_err:  # an applied change is never reported healthy by default
+                v_ok, v_err = False, f"post-apply verification raised {type(verify_err).__name__}: {verify_err}"
             if not v_ok:
                 exec_res.ok = False
                 exec_res.error = v_err or "post-apply verify failed"
+        verification = ctx.metadata.get("verification")
 
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         final_run = deploy.DeployRun(
@@ -424,6 +428,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             output=artifacts.sanitize(exec_res.output, secrets),
             error=artifacts.sanitize(exec_res.error or "", secrets) or None,
             version=deploy.CONTRACT_VERSION,
+            verification=artifacts.sanitize_tree(verification, secrets) if verification else None,
         )
 
         # Durable disk persistence written BEFORE artifacts and notifications!

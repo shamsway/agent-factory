@@ -19,7 +19,7 @@ flowchart TD
     Prepare --> Check["adapter.check() (Fresh re-plan, AllowedDestroy validation)"]
     Check --> RecordRunning["Record status=RUNNING in events.jsonl"]
     RecordRunning --> Execute["adapter.execute() (Bounded subprocess apply)"]
-    Execute --> Verify["adapter.verify() (Post-mutation assertion)"]
+    Execute --> Verify["adapter.verify() (Bounded post-apply health observation)"]
     Verify --> RecordTerminal["Record status=SUCCEEDED / FAILED in events.jsonl"]
     RecordTerminal --> Notify["Post GitHub issue/PR comments (Safe)"]
     Notify --> Cleanup["adapter.cleanup() (Worktree cleanup in finally)"]
@@ -118,11 +118,68 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 1. `prepare(ctx)`: Sets up isolated worktree at merge commit and initializes planfile paths.
 2. `check(ctx)`: Runs fresh re-plan (`tf_plan_check.run_plan`), parses plan JSON, and validates destructive changes against `AllowedDestroy:` lines in the ticket body.
 3. `execute(ctx, dry_run)`: Bounded subprocess execution with timeout. The Terraform adapter runs `terraform apply -no-color` in its own session with output in a kept log file (not a pipe), so an abrupt Factory exit does not abort the apply. On timeout it sends SIGINT so Terraform can stop gracefully and release its state lock, and SIGKILLs only after a grace period. Dry-run plans actions without mutating live state.
-4. `verify(ctx)`: Post-mutation health checks or state verification.
+4. `verify(ctx)`: Post-apply health verification under the target's `verify` policy (see below). A failed verification, or a verifier that raises, records the run `FAILED`.
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
+
+---
+
+## Post-apply Health Verification
+
+A successful `terraform apply` proves the API accepted the change, not that the workload
+is healthy. A target's `verify` table makes Factory observe what the change touched for a
+bounded window after execute. Anything not observed healthy in that window (unhealthy,
+unreachable, still converging) fails verification: the run is recorded `FAILED`, escalated
+and blocks the target like any failed apply, so an operator decides whether to acknowledge
+it. Without a `verify` table nothing is observed and behavior is unchanged.
+
+```toml
+[apply.targets.collectors.verify]
+nomad = true                          # observe the nomad_job resources the applied plan changed
+nomad_addr = "nomad.service.consul:4646"  # else NOMAD_ADDR from the apply env; NOMAD_TOKEN is sent if set
+timeout = 300                         # seconds for the whole window (default 300)
+interval = 5                          # seconds between polls (default 5)
+periodic = "registered"               # or "launch"
+
+[[apply.targets.collectors.verify.check]]
+name = "results-api"                  # argv run in the target dir with the apply env; retried until exit 0
+run = ["curl", "-fsS", "http://results.service.consul/health"]
+timeout = 10                          # per attempt (default: the rest of the window)
+```
+
+For the implicit single target, use `[apply.verify]`.
+
+Nomad jobs are taken from the plan JSON that `check()` approved: every managed
+`nomad_job` it created, updated, replaced or deleted. The policy depends on the live job:
+
+| Job | Healthy when |
+| --- | --- |
+| service / system | The latest deployment for the current job version is `successful`. Without one, enough allocations of the current version are running (the summed group counts for a service job, at least one for a system job). A `failed` or `cancelled` deployment fails at once. |
+| periodic (`periodic = "registered"`) | Registered, not stopped, periodic launches enabled. |
+| periodic (`periodic = "launch"`) | As above, then Factory forces one launch and the launched child job completes with every allocation `complete`. |
+| other batch, parameterized | Registered and not stopped. |
+| deleted by the plan | Gone (404) or stopped. |
+
+Evidence is a structured object (`verdict`, `elapsed_sec`, `timeout_sec`, and one item
+per job or check with its policy, state, detail, poll count and observed values). It is
+sanitized like the rest of the run and recorded on the terminal `deploy_run` row as
+`verification`, in `summary.json`, and summarized in the issue and PR comments. Verdicts:
+`healthy`, `unhealthy`, or `nothing_to_observe` (the policy is on but the plan changed no
+Nomad job and no check is configured), which passes.
+
+Limitations:
+
+- A job ID the plan does not know (an unresolved `name`) cannot be observed and fails.
+- `periodic = "launch"` really runs each changed periodic job once, with its side effects;
+  with many changed jobs they all launch together. A job whose `prohibit_overlap` skips the
+  forced launch times out. Use it where an extra run is harmless.
+- `registered` proves the next scheduled launch will be attempted, not that it will
+  succeed.
+- The run stays `RUNNING` while it is observed. A Factory crash during the window leaves
+  an interrupted run that needs reconciliation, as with a crash during execute.
+- Health is checked once, after apply. Ongoing monitoring is out of scope.
 
 ---
 
@@ -135,7 +192,7 @@ cleanup never removes them:
 * `apply.log`: the adapter's log, streamed line by line through the sanitizer
   (capped at 20 MiB, mode 0600).
 * `summary.json`: structured run summary (status, ticket, **explicit `pr`**, commit,
-  attempt, timings, sanitized error and output tail).
+  attempt, timings, sanitized error and output tail, and health `verification` evidence).
 * `manifest.json`: file names, sizes and sha256 of the above, plus per-sink publication
   state (`issue`, `pr`): `pending` / `ok` / `skipped` / `failed`, attempts, last error.
 

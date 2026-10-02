@@ -67,6 +67,7 @@ class DeployRun:
     output: str = ""
     error: str | None = None
     version: int = CONTRACT_VERSION
+    verification: dict[str, Any] | None = None  # post-apply health evidence (factory/health.py)
 
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
@@ -74,6 +75,8 @@ class DeployRun:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["status"] = self.status.value
+        if d["verification"] is None:
+            del d["verification"]
         return d
 
     @classmethod
@@ -97,6 +100,7 @@ class DeployRun:
             output=str(data.get("output", "")),
             error=data.get("error"),
             version=int(data.get("version", CONTRACT_VERSION)),
+            verification=data["verification"] if isinstance(data.get("verification"), dict) else None,
         )
 
 
@@ -849,8 +853,21 @@ class DeployAdapter:
         raise NotImplementedError
 
     def verify(self, ctx: DeployContext) -> tuple[bool, str]:
-        """Post-apply verification check."""
-        return True, ""
+        """Post-apply health verification under the target's `verify` policy.
+
+        Evidence lands in ctx.metadata["verification"]. Nomad jobs come from
+        ctx.metadata["plan"], the plan JSON `check()` approved and `execute()`
+        applied; checks run in the target directory with the apply env.
+        """
+        policy = getattr(ctx.target, "verify", None)
+        if policy is None or not policy.active:
+            return True, ""
+        from factory import health
+        base = ctx.worktree or ctx.root
+        ok, reason, evidence = health.verify(policy, plan=ctx.metadata.get("plan"),
+                                             cwd=base / ctx.target.dir, env=ctx.env)
+        ctx.metadata["verification"] = evidence
+        return ok, reason
 
     def cleanup(self, ctx: DeployContext) -> None:
         """Guaranteed cleanup of temporary resources."""
@@ -948,6 +965,7 @@ class TerraformDeployAdapter(DeployAdapter):
         repo_arg = ["--repo", ctx.repo] if ctx.repo else []
         issue = dispatch.gh_json(["issue", "view", str(ctx.ticket["ticket"]), *repo_arg, "--json", "body"])
         plan = tf_plan_check.show_json(tf_dir, ctx.planfile)
+        ctx.metadata["plan"] = plan  # what execute applies; verify observes its nomad_job changes
         unexpected = tf_plan_check.unexpected_changes(plan, issue.get("body") or "")
         if unexpected:
             detail = ", ".join(f"{addr} ({'/'.join(actions)})" for addr, actions in unexpected)
@@ -986,9 +1004,6 @@ class TerraformDeployAdapter(DeployAdapter):
         else:
             error = None if ok else "terraform apply failed"
         return DeployExecutionResult(ok=ok, output=output[-4000:], error=error, duration_sec=duration, log_path=log_path)
-
-    def verify(self, ctx: DeployContext) -> tuple[bool, str]:
-        return True, ""
 
     def cleanup(self, ctx: DeployContext) -> None:
         if ctx.worktree:
