@@ -5,6 +5,7 @@ Run: python -m unittest discover -s tests
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -245,8 +246,7 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[]), \
                  mock.patch("subprocess.run", side_effect=fake_subproc_run), \
                  mock.patch("factory.deploy.run_terraform_detached", side_effect=detached_from(fake_subproc_run)), \
-                 mock.patch.object(dispatch, "run", side_effect=fake_run), \
-                 mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment:
+                 mock.patch.object(dispatch, "run", side_effect=fake_run):
                 apply.apply_one(ticket, dry_run=False)
 
             # Issue comment
@@ -257,15 +257,11 @@ class ApplyTest(unittest.TestCase):
             self.assertIn("`terraform apply` succeeded for the merged change:", summary)
             self.assertIn(apply_output, summary)
 
-            # PR comment via dispatch.pr_comment
-            mock_pr_comment.assert_called_once_with(42, summary)
-
-            # PR comment via gh pr comment call
+            # PR comment targets the explicit PR number (10), not agent/<ticket>
             pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
             self.assertEqual(len(pr_calls), 1)
-            self.assertEqual(pr_calls[0][3], "agent/42")
-            body_file = Path(pr_calls[0][pr_calls[0].index("--body-file") + 1])
-            self.assertEqual(body_file.read_text().strip(), summary.strip())
+            self.assertEqual(pr_calls[0][3], "10")
+            self.assertEqual(pr_calls[0][pr_calls[0].index("--body") + 1], summary)
 
     def test_apply_one_posts_to_issue_and_pr_on_failure(self) -> None:
         from unittest import mock
@@ -304,8 +300,7 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[]), \
                  mock.patch("subprocess.run", side_effect=fake_subproc_run), \
                  mock.patch("factory.deploy.run_terraform_detached", side_effect=detached_from(fake_subproc_run)), \
-                 mock.patch.object(dispatch, "run", side_effect=fake_run), \
-                 mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment:
+                 mock.patch.object(dispatch, "run", side_effect=fake_run):
                 apply.apply_one(ticket, dry_run=False)
 
             # Issue comments: 1 for apply result (FAILED), 1 for escalation
@@ -320,17 +315,11 @@ class ApplyTest(unittest.TestCase):
             escalate_body = issue_calls[1][issue_calls[1].index("--body") + 1]
             self.assertEqual(escalate_body, "`factory apply` did not proceed: terraform apply failed.")
 
-            # Both comments were also posted to the PR
-            self.assertEqual(mock_pr_comment.call_count, 2)
-            mock_pr_comment.assert_has_calls([
-                mock.call(42, summary),
-                mock.call(42, escalate_body),
-            ])
-
+            # Both comments were also posted to the explicit PR number
             pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
             self.assertEqual(len(pr_calls), 2)
-            self.assertEqual(pr_calls[0][3], "agent/42")
-            self.assertEqual(pr_calls[1][3], "agent/42")
+            self.assertEqual([c[3] for c in pr_calls], [str(ticket["pr"])] * 2)
+            self.assertEqual([c[c.index("--body") + 1] for c in pr_calls], [summary, escalate_body])
 
     def test_apply_escalate_posts_to_issue_and_pr_when_called_directly(self) -> None:
         from unittest import mock
@@ -350,8 +339,7 @@ class ApplyTest(unittest.TestCase):
                 calls.append(cmd)
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-            with mock.patch.object(dispatch, "run", side_effect=fake_run), \
-                 mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment:
+            with mock.patch.object(dispatch, "run", side_effect=fake_run):
                 apply.apply_escalate(42, 10, "fresh plan failed: syntax error")
 
             expected_body = "`factory apply` did not proceed: fresh plan failed: syntax error."
@@ -361,13 +349,37 @@ class ApplyTest(unittest.TestCase):
             self.assertEqual(issue_calls[0][3], "42")
             self.assertEqual(issue_calls[0][issue_calls[0].index("--body") + 1], expected_body)
 
-            mock_pr_comment.assert_called_once_with(42, expected_body)
-
             pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
             self.assertEqual(len(pr_calls), 1)
-            self.assertEqual(pr_calls[0][3], "agent/42")
-            body_file = Path(pr_calls[0][pr_calls[0].index("--body-file") + 1])
-            self.assertEqual(body_file.read_text().strip(), expected_body.strip())
+            self.assertEqual(pr_calls[0][3], "10")
+            self.assertEqual(pr_calls[0][pr_calls[0].index("--body") + 1], expected_body)
+
+    def test_apply_escalate_sanitizes_reason_everywhere_it_lands(self) -> None:
+        from unittest import mock
+
+        from factory import apply, dispatch
+
+        secret = "apply-secret-sentinel-0123456789"
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), "[apply]\nenabled = true\n")
+            cfg = config.load(repo)
+            cfg.apply_env = {"TF_VAR_db_password": secret}
+            dispatch.configure(cfg)
+            apply.configure(cfg)
+            cfg.factory.mkdir(parents=True, exist_ok=True)
+
+            calls: list[list[str]] = []
+
+            def fake_run(cmd, cwd=None, check=True):
+                calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with mock.patch.object(dispatch, "run", side_effect=fake_run):
+                apply.apply_escalate(42, None, f"pre-apply check failed: password = {secret}")
+
+            self.assertNotIn(secret, dispatch.EVENTS.read_text())
+            self.assertNotIn(secret, json.dumps(calls))
+            self.assertEqual([c[:3] for c in calls], [["gh", "issue", "comment"]])  # no PR number: no PR post
 
     def test_apply_one_posts_to_issue_and_pr_on_fresh_plan_failure(self) -> None:
         from unittest import mock
@@ -396,7 +408,6 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(apply, "fresh_checkout", return_value=wt), \
                  mock.patch.object(tf_plan_check, "run_plan", return_value=plan_proc), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
-                 mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment, \
                  mock.patch("subprocess.run") as mock_subproc_run, \
                  mock.patch("factory.deploy.run_terraform_detached") as mock_tf_apply:
                 apply.apply_one(ticket, dry_run=False)
@@ -410,8 +421,9 @@ class ApplyTest(unittest.TestCase):
             self.assertEqual(len(issue_calls), 1)
             self.assertIn("fresh terraform plan failed", issue_calls[0][issue_calls[0].index("--body") + 1])
 
-            self.assertEqual(mock_pr_comment.call_count, 1)
-            self.assertIn("fresh terraform plan failed", mock_pr_comment.call_args[0][1])
+            pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
+            self.assertEqual(len(pr_calls), 1)
+            self.assertIn("fresh terraform plan failed", pr_calls[0][pr_calls[0].index("--body") + 1])
 
             pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
             self.assertEqual(len(pr_calls), 1)
@@ -445,7 +457,6 @@ class ApplyTest(unittest.TestCase):
                  mock.patch.object(tf_plan_check, "show_json", return_value={}), \
                  mock.patch.object(tf_plan_check, "unexpected_changes", return_value=[("aws_s3_bucket.logs", ["delete"])]), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
-                 mock.patch.object(dispatch, "pr_comment", wraps=dispatch.pr_comment) as mock_pr_comment, \
                  mock.patch("subprocess.run") as mock_subproc_run, \
                  mock.patch("factory.deploy.run_terraform_detached") as mock_tf_apply:
                 apply.apply_one(ticket, dry_run=False)
@@ -459,11 +470,9 @@ class ApplyTest(unittest.TestCase):
             self.assertEqual(len(issue_calls), 1)
             self.assertIn("fresh plan destroys/replaces aws_s3_bucket.logs (delete)", issue_calls[0][issue_calls[0].index("--body") + 1])
 
-            self.assertEqual(mock_pr_comment.call_count, 1)
-            self.assertIn("fresh plan destroys/replaces aws_s3_bucket.logs (delete)", mock_pr_comment.call_args[0][1])
-
             pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
             self.assertEqual(len(pr_calls), 1)
+            self.assertIn("fresh plan destroys/replaces aws_s3_bucket.logs (delete)", pr_calls[0][pr_calls[0].index("--body") + 1])
 
 
 if __name__ == "__main__":

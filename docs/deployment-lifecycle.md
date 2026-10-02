@@ -126,6 +126,54 @@ Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and ne
 
 ---
 
+## Durable Sanitized Artifacts
+
+Every executed run (succeeded or failed) publishes artifacts to
+`.factory/artifacts/<target>/<run_id>/`, outside the deploy worktree, so adapter
+cleanup never removes them:
+
+* `apply.log`: the adapter's log, streamed line by line through the sanitizer
+  (capped at 20 MiB, mode 0600).
+* `summary.json`: structured run summary (status, ticket, **explicit `pr`**, commit,
+  attempt, timings, sanitized error and output tail).
+* `manifest.json`: file names, sizes and sha256 of the above, plus per-sink publication
+  state (`issue`, `pr`): `pending` / `ok` / `skipped` / `failed`, attempts, last error.
+
+The sanitizer redacts every `[apply].env` value, secret-named environment values, common
+token shapes (GitHub, Anthropic, Slack, AWS, 1Password, `Bearer`, `token=`) and PEM private
+key blocks. The same sanitized text feeds `events.jsonl`, issue and PR comments.
+
+**Private store.** The plan file (which can embed secrets) is copied to
+`.factory/private/<run_id>/` (0700, files 0600) before cleanup. It is never listed in a
+manifest, served or posted.
+
+**Publication.** The issue comment goes to the ticket number, the PR comment to the
+recorded PR number (never inferred from `agent/<ticket>`); a run with no PR number
+marks the `pr` sink `skipped`. Sinks are independent: one failing leaves the other
+posted and the run's terminal state untouched. `factory apply` retries `pending` sinks
+at the start of each pass (up to 10 attempts, then `failed`).
+
+**Lookup.** The dashboard serves `/api/artifacts/<target>/<run_id>/<name>` only for names
+listed in the run's manifest whose on-disk sha256 still matches. `/api/file` refuses
+`private/`, `artifacts/`, `apply-checkout/`, raw `terraform-apply-*` logs, plan and
+state files.
+
+Limitations:
+
+- Runs that stop before execution (prepare/check failures) record the sanitized
+  escalation reason but have no artifact directory, and their escalation comments are
+  posted once without retry.
+- The sanitizer redacts `[apply].env` values, secret-named environment values, common
+  token shapes and PEM private-key blocks. A secret in an unrecognized format that is in
+  none of those passes through.
+- Plans in `private/<run_id>/` are stored raw (0700, files 0600) and have no retention
+  yet; prune them by hand if disk matters.
+- Journal rows written before this contract (`applied` output, escalation reasons) were
+  not sanitized and remain in `events.jsonl` and its rotated segments, which `/api/file`
+  still serves on the loopback-only dashboard.
+
+---
+
 ## Operational Limitations & Recovery Procedures
 
 ### 1. Interrupted / Crashed Apply

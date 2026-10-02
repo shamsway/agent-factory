@@ -830,6 +830,7 @@ class DeployExecutionResult:
     output: str = ""
     error: str | None = None
     duration_sec: float = 0.0
+    log_path: Path | None = None  # raw adapter log; sanitized before publication
 
 
 class DeployAdapter:
@@ -984,7 +985,7 @@ class TerraformDeployAdapter(DeployAdapter):
             error = f"terraform apply timed out after {self.timeout_sec}s"
         else:
             error = None if ok else "terraform apply failed"
-        return DeployExecutionResult(ok=ok, output=output[-4000:], error=error, duration_sec=duration)
+        return DeployExecutionResult(ok=ok, output=output[-4000:], error=error, duration_sec=duration, log_path=log_path)
 
     def verify(self, ctx: DeployContext) -> tuple[bool, str]:
         return True, ""

@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from factory import config, deploy, dispatch, tf_plan_check
+from factory import artifacts, config, deploy, dispatch, tf_plan_check
 from factory.config import Config
 
 cfg: Config
@@ -252,6 +252,17 @@ def apply_env() -> dict:
     return env
 
 
+def post_comment(sink: str, number: int, body: str) -> tuple[bool, str]:
+    """Post to the issue (`number` = ticket) or the PR (`number` = explicit PR
+    number, never derived from the ticket's `agent/<n>` branch). Reports
+    failure so the publication can be retried."""
+    kind = "issue" if sink == "issue" else "pr"
+    proc = dispatch.run(["gh", kind, "comment", str(number), "--repo", cfg.repo, "--body", body], check=False)
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or f"gh {kind} comment exited {proc.returncode}").strip()
+    return True, ""
+
+
 def apply_escalate(
     n: int,
     pr: int,
@@ -264,6 +275,9 @@ def apply_escalate(
     """Post-merge escalation: the tracking issue is already closed, so this
     only comments + records an event rather than touching labels the way
     `dispatch.escalate` does for in-flight tickets."""
+    # Prepare/check errors can quote Terraform output: sanitize once, before
+    # the reason reaches the journal, the logs or GitHub.
+    reason = artifacts.sanitize(reason, artifacts.secret_values(cfg.apply_env, os.environ))
     if dry_run:
         log(f"#{n}: would escalate ({reason})")
         return
@@ -299,7 +313,8 @@ def apply_escalate(
             ],
             check=False,
         )
-        dispatch.pr_comment(n, body)
+        if pr is not None:
+            post_comment("pr", pr, body)
     except Exception as exc:
         log(f"#{n}: notification failed: {exc}")
     log(f"#{n}: apply escalated ({reason})")
@@ -366,8 +381,13 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             log(f"#{n}: {res.output}")
             return True
 
-        # Durable RUNNING state recorded BEFORE execution!
+        secrets = artifacts.secret_values(cfg.apply_env, ctx.env)
         run_id = f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}"
+        # The planfile lives in the worktree that cleanup removes, and can embed
+        # secrets: keep a private copy, outside every served or posted path.
+        artifacts.store_private(cfg.factory, run_id, {"plan": ctx.planfile})
+
+        # Durable RUNNING state recorded BEFORE execution!
         running_run = deploy.DeployRun(
             run_id=run_id,
             target=target,
@@ -401,32 +421,26 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             completed_at=completed_at,
             duration_sec=exec_res.duration_sec,
             pr=pr,
-            output=exec_res.output,
-            error=exec_res.error,
+            output=artifacts.sanitize(exec_res.output, secrets),
+            error=artifacts.sanitize(exec_res.error or "", secrets) or None,
             version=deploy.CONTRACT_VERSION,
         )
 
-        # Durable disk persistence written BEFORE notifications!
+        # Durable disk persistence written BEFORE artifacts and notifications!
         deploy.record_deploy_run(final_run)
-        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=exec_res.ok, output=exec_res.output, run_id=final_run.run_id, target=target)
+        dispatch.record("applied", ticket=n, pr=pr, commit=commit, ok=exec_res.ok, output=final_run.output, run_id=final_run.run_id, target=target)
 
-        verb = "succeeded" if exec_res.ok else "FAILED"
-        prefix = "terraform apply" if target_obj.adapter == "terraform" else f"{target_obj.adapter} deploy"
-        summary = (
-            f"`{prefix}` {verb} "
-            f"for the merged change:\n\n```\n{exec_res.output}\n```"
-        )
+        # Artifacts survive cleanup (they live outside the worktree); each
+        # GitHub sink is attempted independently and retried on later passes.
         try:
-            dispatch.run(
-                [
-                    "gh", "issue", "comment", str(n), "--repo", cfg.repo,
-                    "--body", summary,
-                ],
-                check=False,
-            )
-            dispatch.pr_comment(n, summary)
+            prefix = "terraform apply" if target_obj.adapter == "terraform" else f"{target_obj.adapter} deploy"
+            artifacts.write_run_artifacts(cfg.factory, final_run, log_path=exec_res.log_path,
+                                          secrets=secrets, headline=f"`{prefix}`")
+            sinks = artifacts.publish(cfg.factory, target, final_run.run_id, post_comment)
+            if any(st == "pending" for st in sinks.values()):
+                log(f"#{n}: publication pending retry ({sinks})")
         except Exception as notify_err:
-            log(f"#{n}: notification failed: {notify_err}")
+            log(f"#{n}: artifact publication failed: {notify_err}")
 
         if not exec_res.ok:
             apply_escalate(
@@ -573,6 +587,9 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
+        if not args.dry_run:
+            for rid, sinks in artifacts.retry_pending(cfg.factory, post_comment).items():
+                log(f"retried publication for {rid}: {sinks}")
         all_prs = fetch_all_merged_prs()
 
         targets = cfg.targets or {

@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
-from factory import __version__, briefing, codebase, config, dispatch, feedback, lifecycle, settings, stats
+from factory import __version__, artifacts, briefing, codebase, config, dispatch, feedback, lifecycle, settings, stats
 from factory.config import (
     DASHBOARD_ALLOW_REMOTE_VAR,
     LABEL_AGENT,
@@ -1263,6 +1263,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "application/json", json.dumps(data).encode())
         elif url.path == "/api/file":
             self._file(query.get("path", [""])[0])
+        elif url.path.startswith("/api/artifacts/"):
+            self._artifact(url.path[len("/api/artifacts/"):])
         else:
             self.send_error(404)
 
@@ -1311,13 +1313,23 @@ class Handler(BaseHTTPRequestHandler):
     def _file(self, rel: str) -> None:
         root = FACTORY.resolve()
         path = (root / rel).resolve()
-        if not rel or not path.is_relative_to(root) or not path.is_file():
+        if (not rel or not path.is_relative_to(root) or not path.is_file()
+                or artifacts.is_private_path(str(path.relative_to(root)))):
             self.send_error(404)
             return
         data = path.read_bytes()
         if len(data) > FILE_CAP:
             data = b"[... truncated ...]\n" + data[-FILE_CAP:]
         self._send(200, "text/plain; charset=utf-8", data)
+
+    def _artifact(self, rest: str) -> None:
+        """Serve one manifest-listed, sanitized artifact: /api/artifacts/<target>/<run_id>/<name>."""
+        parts = rest.split("/")
+        found = artifacts.lookup(FACTORY, *parts) if len(parts) == 3 else None
+        if found is None:
+            self.send_error(404)
+            return
+        self._send(200, found[1], found[0])
 
     def _send(self, status: int, ctype: str, body: bytes) -> None:
         self.send_response(status)
