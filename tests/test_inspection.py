@@ -161,6 +161,21 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(report['targets'][0]['unacknowledged_failed_tickets'], [1])
         self.assertNotIn(SECRET, json.dumps(report))
 
+    def test_ledger_larger_than_limit_bounds_only_deploy_rows(self):
+        path = self.cfg.factory / 'events.jsonl'
+        failed = deploy.DeployRun(run_id='r1', target='default', commit='a'*40, ticket=1,
+                                  attempt=1, status=deploy.DeployStatus.FAILED,
+                                  started_at='2026-10-02T00:00:00Z')
+        deploy.record_deploy_run(failed, events_path=path)
+        for i in range(40):
+            lifecycle.append(path, {'event': 'lifecycle', 'i': i, 'pad': 'x' * 200})
+        with patch.object(inspection, 'LIMIT', 2_000):
+            report = inspection.deployment_snapshot(self.cfg)
+            self.assertEqual(report['status'], 'observed')
+            self.assertEqual(report['targets'][0]['unacknowledged_failed_tickets'], [1])
+            with patch.object(inspection, 'LIMIT', 100):  # deploy rows alone exceed the cap
+                self.assertEqual(inspection.deployment_snapshot(self.cfg)['status'], 'unavailable')
+
     def test_corrupt_ledger_segment_is_unavailable(self):
         path = self.cfg.factory / 'events.jsonl'
         path.parent.mkdir()
