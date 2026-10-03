@@ -403,8 +403,11 @@ def verify_nomad_token(cfg, token: str) -> str:
         names = identity.get("Policies") or []
         if not names or len(names) > 8:
             return "invalid"
-        allowed = {"list-jobs", "read-job", "read-logs", "read-fs", "read-scaling", "list-scaling-policies",
-                   "read-scaling-policy", "read", "list"}
+        allowed = {"list-jobs", "read-job", "read-logs", "read-scaling", "list-scaling-policies",
+                   "read-scaling-policy"}
+        if any(t.diagnostics and t.diagnostics.get("logs") is True and t.diagnostics.get("error_logs")
+               for t in cfg.targets.values()):
+            allowed.add("read-fs")
         for name in names:
             rules = get("/v1/acl/policy/" + urllib.parse.quote(name, safe="")).get("Rules", "")
             # Conservative: reject unknown capabilities and non-read policies.
@@ -413,6 +416,10 @@ def verify_nomad_token(cfg, token: str) -> str:
             # scanning HCL. Operator can use a simple explicit read-only policy.
             if any(part in rules for part in ("#", "//", "/*", "\\")):
                 return "unavailable"
+            # Read-only variables still expose stored secrets. Never accept
+            # variable access, even when an explicit path only grants read/list.
+            if re.search(r"\bvariables\s*\{", rules):
+                return "invalid"
             if len(re.findall(r"\bpolicy\s*=", rules)) != len(re.findall(r'\bpolicy\s*=\s*"[^"]+"', rules)):
                 return "unavailable"
             if len(re.findall(r"\bcapabilities\s*=", rules)) != len(re.findall(r"\bcapabilities\s*=\s*\[[^]]*\]", rules)):
