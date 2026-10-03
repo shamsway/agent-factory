@@ -15,7 +15,8 @@ timeout = 20
 call_timeout = 3
 max_bytes = 262144
 response_bytes = 65536
-lookback = 600
+lookback = 3600
+logs = false
 nomad_addr = "http://nomad.service.consul:4646"
 consul_addr = "http://127.0.0.1:8500"
 services = ["collector-dependency"]
@@ -25,7 +26,13 @@ error_logs = ["collector/local/error.log"]
 ```
 
 Use actual discovered endpoints for your environment. `nomad_addr` can fall
-back to `NOMAD_ADDR` in the apply environment. Nomad uses `NOMAD_TOKEN`; Consul
+back to `NOMAD_ADDR` in the apply environment. Diagnostics use only the optional host-owned `[apply.env]` key
+`FACTORY_DIAGNOSTIC_NOMAD_TOKEN`, never the apply `NOMAD_TOKEN`. Omit it
+for anonymous reads. `factory verify-secrets --scope all --live` rejects reuse
+of the apply token, management tokens, write capabilities and unsupported ACL
+policy shapes; it requires inspectable attached read-only policies and a
+successful jobs read. Roles, commented/escaped/complex policies fail closed as
+unavailable or invalid; no raw policy or token is emitted. Consul
 uses `CONSUL_HTTP_TOKEN`. Credentials stay in memory and request headers.
 URLs cannot contain userinfo, queries or fragments. Redirects are refused.
 Only allowlist GET endpoints whose application semantics are read-only.
@@ -54,7 +61,9 @@ evidence, including namespace/region. The current job is separate context: a
 new healthy version never supplies the failed version's allocations or logs.
 Missing job/version evidence remains unavailable; the collector does not guess
 that a current version corresponds to a Terraform commit. Apply failures before
-health verification can therefore have only local apply evidence.
+health verification retain job IDs/namespace/region from the approved plan in
+the durable run. They collect current job state and time-window evaluations,
+but allocation/log version evidence remains unavailable rather than guessed.
 
 Evaluation evidence is filtered by job/namespace and failure time. Nomad's
 evaluation list lacks a job-version field, so it is explicitly weaker evidence,
@@ -69,6 +78,17 @@ The API calls use Nomad's [job state endpoints](https://developer.hashicorp.com/
 and [Consul health checks](https://developer.hashicorp.com/consul/api-docs/health).
 There are no variable, execute, restart, launch, registration or GC calls.
 
+Default lookback is one hour, retaining the start of ordinary apply-plus-health
+runs. Explicitly smaller windows and runs longer than one hour can still clip
+early events; window bounds are recorded.
+
+Logs default off. With `logs = false`, stdout/stderr/error files are not read;
+free-form task event messages, local apply error/output and Consul check Output
+are omitted from the bundle. Structured states/events remain. Enable logs only
+for an explicitly reviewed target; workload credentials injected by Nomad or
+templates are unknown to Factory and may survive redaction. Keep raw bundle
+text local; SHA-201 must not quote it or automatically publish it to GitHub.
+
 Task events are restricted to the failure window. Stdout/stderr and explicitly
 allowlisted `.log` files are bounded tails. Nomad logs do not guarantee
 timestamps; they are marked `untimestamped_bounded_tail`, not claimed as proof
@@ -79,7 +99,8 @@ and ACL denial may remove evidence: 404 is `absent_or_expired`, 410 `expired`,
 Consul and HTTP probes are explicitly current-state dependency context.
 Probes retain success/failure metadata only, never their response body.
 Error-log access is restricted to explicit relative `.log` paths; there is no
-allocation filesystem browsing or arbitrary file request.
+allocation filesystem browsing or arbitrary file request. `secrets/` path segments are
+rejected even when the filename ends in `.log`.
 
 ## Budgets and safety
 

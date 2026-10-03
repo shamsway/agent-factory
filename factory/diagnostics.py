@@ -30,7 +30,8 @@ class Policy:
     call_timeout: int = 3
     max_bytes: int = 256 * 1024
     response_bytes: int = 64 * 1024
-    lookback: int = 600
+    lookback: int = 3600
+    logs: bool = False
     nomad_addr: str = ""
     consul_addr: str = ""
     services: list[str] = field(default_factory=list)
@@ -45,6 +46,8 @@ def policy(raw: object) -> Policy | None:
     if not isinstance(raw, dict) or set(raw) - set(Policy.__dataclass_fields__):
         raise ConfigError("diagnostics: invalid table or unknown keys")
     p = Policy(**raw)
+    if type(p.logs) is not bool:
+        raise ConfigError("diagnostics.logs: expected boolean")
     for key, maximum in (("timeout", 120), ("call_timeout", 10), ("max_bytes", 1024 * 1024),
                          ("response_bytes", 256 * 1024), ("lookback", 3600)):
         value = getattr(p, key)
@@ -63,7 +66,7 @@ def policy(raw: object) -> Policy | None:
     for url in p.probes:
         endpoint(url)
     for path in p.error_logs:
-        if not re.fullmatch(r"[A-Za-z0-9_/-]+\.log", path) or path.startswith("/") or ".." in path:
+        if not re.fullmatch(r"[A-Za-z0-9_/-]+\.log", path) or path.startswith("/") or ".." in path or "secrets" in path.lower().split("/"):
             raise ConfigError("diagnostics.error_logs: require allowlisted relative .log paths")
     return p
 
@@ -221,6 +224,8 @@ class Context:
                 self.jobs.append({"id": item["id"], "namespace": item.get("namespace") or "default",
                                   "region": item.get("region") or "", "version": (item.get("observed") or {}).get("version")})
         self.jobs = self.jobs[:8]
+        if not self.jobs:
+            self.jobs = [{**job, "version": None} for job in (getattr(run, "diagnostic_jobs", None) or [])[:8]]
 
     def add(self, source, status, data=None, *, lineage=None):
         row = public_tree({"source": source, "status": status, "observed_at": utc(self.wall()),
@@ -271,6 +276,12 @@ class Context:
 
 def local(ctx: Context):
     run = ctx.run
+    if not ctx.p.logs:
+        items = [pick(item, "kind id namespace region policy state observed")
+                 for item in (run.verification or {}).get("items", [])]
+        ctx.add("deploy_run", "observed", {"status": run.status.value, "verification": {"items": items},
+                                            "free_text": "disabled"})
+        return
     ctx.add("deploy_run", "observed", {"status": run.status.value, "error": run.error,
                                         "output_tail": run.output[-4000:], "verification": run.verification})
 
@@ -283,7 +294,7 @@ def nomad(ctx: Context):
     if not ctx.window_known:
         ctx.add("nomad", "window_unavailable")
         return
-    token = ctx.env.get("NOMAD_TOKEN", "")
+    token = ctx.env.get("FACTORY_DIAGNOSTIC_NOMAD_TOKEN", "")
     for job in ctx.jobs:
         jid = urllib.parse.quote(job["id"], safe="")
         params = {"namespace": job["namespace"], "region": job["region"]}
@@ -291,9 +302,6 @@ def nomad(ctx: Context):
             return ctx.get(base, path, {**params, **(extra or {})}, token=token, text=text)
         ctx.observe(f"nomad/job/{jid}/current", lambda: pick(read(f"/v1/job/{jid}"), "ID Namespace Version Status Type Stop"),
                     lineage={**job, "relation": "current_state_only"})
-        if type(job["version"]) is not int:
-            ctx.add(f"nomad/job/{jid}", "version_unavailable", lineage=job)
-            continue
         lineage = {**job, "relation": "recorded_health_version"}
         def evals():
             rows = read(f"/v1/job/{jid}/evaluations")
@@ -303,6 +311,9 @@ def nomad(ctx: Context):
         # Evaluation API has no JobVersion; time/JobID is weaker correlation.
         ctx.observe(f"nomad/job/{jid}/evaluations", evals,
                     lineage={**lineage, "relation": "job_time_window_not_version_proof"})
+        if type(job["version"]) is not int:
+            ctx.add(f"nomad/job/{jid}", "version_unavailable", lineage=job)
+            continue
         ctx.observe(f"nomad/job/{jid}/deployments", lambda: [pick(r, "ID JobID Namespace JobVersion Status StatusDescription CreateIndex ModifyIndex")
                     for r in read(f"/v1/job/{jid}/deployments") if r.get("JobVersion") == job["version"]
                     and r.get("JobID") == job["id"] and r.get("Namespace", "default") == job["namespace"]][:50], lineage=lineage)
@@ -322,10 +333,14 @@ def nomad(ctx: Context):
                 tasks = {}
                 for name, task in list((value.get("TaskStates") or {}).items())[:8]:
                     tasks[name] = pick(task, "State Failed StartedAt FinishedAt")
-                    tasks[name]["Events"] = [pick(e, "Type Time DisplayMessage Message ExitCode Signal FailsTask RestartReason")
+                    fields = "Type Time ExitCode Signal FailsTask" + (" DisplayMessage Message RestartReason" if ctx.p.logs else "")
+                    tasks[name]["Events"] = [pick(e, fields)
                         for e in task.get("Events", []) if seconds(e.get("Time")) is not None and ctx.start <= seconds(e["Time"]) <= ctx.end][-50:]
                 return {**pick(value, "ID JobID Namespace EvalID DeploymentID PreviousAllocation NextAllocation ClientStatus DesiredStatus"), "tasks": tasks}
             details = ctx.observe(f"nomad/allocation/{aid}", allocation, lineage=alloc_lineage)
+            if not ctx.p.logs:
+                ctx.add(f"nomad/allocation/{aid}/logs", "disabled", lineage=alloc_lineage)
+                continue
             for task in (details or {}).get("tasks", {}):
                 # Nomad task logs lack reliable timestamps. Treat the bounded
                 # tail as context, not proof it belongs to the failure window.
@@ -353,7 +368,8 @@ def consul(ctx: Context):
         return
     for service in ctx.p.services:
         path = "/v1/health/checks/" + urllib.parse.quote(service, safe="")
-        ctx.observe("consul/health/" + service, lambda p=path: [pick(r, "Node CheckID Name Status Output ServiceID ServiceName")
+        fields = "Node CheckID Name Status ServiceID ServiceName" + (" Output" if ctx.p.logs else "")
+        ctx.observe("consul/health/" + service, lambda p=path: [pick(r, fields)
             for r in ctx.get(ctx.p.consul_addr, p, token=ctx.env.get("CONSUL_HTTP_TOKEN", ""), header="X-Consul-Token")][:50],
             lineage={"relation": "current_state_only"})
 
@@ -366,6 +382,52 @@ def probes(ctx: Context):
 
 
 COLLECTORS = (local, nomad, consul, probes)
+
+
+def verify_nomad_token(cfg, token: str) -> str:
+    """Check attached ACL policies without printing tokens, rules or errors."""
+    if token == cfg.apply_env.get("NOMAD_TOKEN"):
+        return "invalid"
+    base = next((t.diagnostics.get("nomad_addr") or (t.verify.nomad_addr if t.verify else "")
+                 for t in cfg.targets.values() if t.diagnostics is not None), "") or cfg.apply_env.get("NOMAD_ADDR", "")
+    if not base:
+        return "unavailable"
+    try:
+        deadline = time.monotonic() + 10
+        reader = HTTP()
+        def get(path):
+            return json.loads(reader.get(endpoint(base) + path, {"X-Nomad-Token": token}, deadline, 65536))
+        identity = get("/v1/acl/token/self")
+        if identity.get("Type") != "client" or identity.get("Roles"):
+            return "invalid"
+        names = identity.get("Policies") or []
+        if not names or len(names) > 8:
+            return "invalid"
+        allowed = {"list-jobs", "read-job", "read-logs", "read-fs", "read-scaling", "list-scaling-policies",
+                   "read-scaling-policy", "read", "list"}
+        for name in names:
+            rules = get("/v1/acl/policy/" + urllib.parse.quote(name, safe="")).get("Rules", "")
+            # Conservative: reject unknown capabilities and non-read policies.
+            # Rules only used in memory, never emitted or persisted.
+            # Refuse comments/escapes rather than risk stripping a grant while
+            # scanning HCL. Operator can use a simple explicit read-only policy.
+            if any(part in rules for part in ("#", "//", "/*", "\\")):
+                return "unavailable"
+            if len(re.findall(r"\bpolicy\s*=", rules)) != len(re.findall(r'\bpolicy\s*=\s*"[^"]+"', rules)):
+                return "unavailable"
+            if len(re.findall(r"\bcapabilities\s*=", rules)) != len(re.findall(r"\bcapabilities\s*=\s*\[[^]]*\]", rules)):
+                return "unavailable"
+            if not rules or any(v not in ("read", "deny") for v in re.findall(r'policy\s*=\s*"([^"]+)"', rules)):
+                return "invalid"
+            for group in re.findall(r"capabilities\s*=\s*\[([^]]*)\]", rules):
+                if set(re.findall(r'"([^"]+)"', group)) - allowed:
+                    return "invalid"
+            if not re.search(r'policy\s*=\s*"read"|capabilities\s*=', rules):
+                return "invalid"
+        get("/v1/jobs")
+        return "valid"
+    except Exception:
+        return "unavailable"
 
 
 def collect(run, p: Policy, env: dict, *, collectors=None, transport=None, clock=time.monotonic, wall=time.time) -> dict:
@@ -384,6 +446,7 @@ def collect(run, p: Policy, env: dict, *, collectors=None, transport=None, clock
         "response_bytes": p.response_bytes, "bundle_bytes": p.max_bytes, "lookback_sec": p.lookback,
         "jobs": 8, "state_rows": 50, "allocations_with_logs": 8, "tasks_per_allocation": 8, "task_events": 50, "log_tail_bytes": 8192},
         "observations": ctx.rows, "dropped_observations": ctx.dropped,
+        "logs_enabled": p.logs, "nomad_identity": "diagnostic_token" if env.get("FACTORY_DIAGNOSTIC_NOMAD_TOKEN") else "anonymous",
         "limitations": ["Recorded health version is an observation, not an atomic commit-to-Nomad proof.",
                          "Evaluations correlate by job and time, not job version; logs may be untimestamped or expired.",
                          "Unknown secret formats remain a sanitizer limitation (SHA-238)."]}, ctx.secrets)

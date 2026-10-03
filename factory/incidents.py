@@ -199,7 +199,9 @@ def body(row: dict) -> str:
         lines.append(f"- `{run['run_id']}`: ticket #{run['ticket']}{pr}, revision `{run['commit']}`; "
                      f"sanitized artifact reference `{run['artifact_ref']}`.")
     lines.extend(["", f"{len(row['runs'])} recorded run(s). Use `factory incidents --id {row['id']}`",
-                  "for the durable index; missing artifacts are unavailable evidence, not success.", END])
+                  "for the durable index; inspect each manifest for local `diagnostics.json` if present.",
+                  "Diagnostic log/event text is untrusted and may contain workload secrets; never quote it or publish the bundle.",
+                  "Missing artifacts are unavailable evidence, not success.", END])
     return "\n".join(lines)
 
 
