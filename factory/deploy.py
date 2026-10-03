@@ -70,6 +70,7 @@ class DeployRun:
     queued_at: str | None = None  # PR merge time, when available
     phase: str = ""  # executing or verifying, when status is RUNNING
     verification: dict[str, Any] | None = None  # post-apply health evidence (factory/health.py)
+    diagnostic_jobs: list[dict] | None = None  # approved-plan IDs only; no plan payload/version inference
 
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
@@ -79,6 +80,8 @@ class DeployRun:
         d["status"] = self.status.value
         if d["verification"] is None:
             del d["verification"]
+        if d["diagnostic_jobs"] is None:
+            del d["diagnostic_jobs"]
         return d
 
     @classmethod
@@ -105,6 +108,7 @@ class DeployRun:
             queued_at=data.get("queued_at"),
             phase=str(data.get("phase", "")),
             verification=data["verification"] if isinstance(data.get("verification"), dict) else None,
+            diagnostic_jobs=data.get("diagnostic_jobs") if isinstance(data.get("diagnostic_jobs"), list) else None,
         )
 
 
@@ -319,6 +323,8 @@ def replay_rows(rows: list[dict]) -> dict[str, TargetState]:
             existing.phase = run.phase or existing.phase
             if run.verification is not None:
                 existing.verification = run.verification
+            if run.diagnostic_jobs is not None:
+                existing.diagnostic_jobs = run.diagnostic_jobs
             existing.status = run.status
             existing.completed_at = run.completed_at or existing.completed_at
             existing.duration_sec = run.duration_sec if run.duration_sec is not None else existing.duration_sec
@@ -1284,5 +1290,4 @@ def get_adapter(name: str = "terraform") -> DeployAdapter:
 def register_adapter(name: str, adapter_cls: type[DeployAdapter]) -> None:
     """Register a deploy adapter class by name."""
     ADAPTERS[name.lower()] = adapter_cls
-
 

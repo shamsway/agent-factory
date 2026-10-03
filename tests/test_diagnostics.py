@@ -69,7 +69,7 @@ def fixture():
 
 class DiagnosticTests(unittest.TestCase):
     def collect(self, f=None, r=None, p=None, **kw):
-        return diagnostics.collect(r or run(), p or diagnostics.Policy(nomad_addr="http://nomad"),
+        return diagnostics.collect(r or run(), p or diagnostics.Policy(nomad_addr="http://nomad", logs=True),
             {"NOMAD_TOKEN": TOKEN}, transport=kw.pop("transport", f or fixture()), wall=lambda: NOW, **kw)
 
     def test_failure_version_and_replacement_lineage(self):
@@ -101,6 +101,87 @@ class DiagnosticTests(unittest.TestCase):
         b = self.collect(f, run(None))
         self.assertTrue(any(r["status"] == "version_unavailable" for r in b["observations"]))
         self.assertFalse(any("allocations" in c[0] or "logs" in c[0] for c in f.calls))
+
+    def test_logs_off_excludes_unrecognized_workload_secret_and_all_log_reads(self):
+        f = fixture()
+        f.rows["/v1/allocation/failed"]["TaskStates"]["main"]["Events"][0]["DisplayMessage"] = "unknown-workload-credential"
+        f.rows["/v1/health/checks/db"] = [{"Status": "critical", "Output": "unknown-workload-credential"}]
+        p = diagnostics.Policy(nomad_addr="http://nomad", consul_addr="http://consul", services=["db"], error_logs=["main/local/error.log"])
+        b = self.collect(f, p=p)
+        self.assertNotIn("unknown-workload-credential", json.dumps(b))
+        self.assertFalse(any("/fs/" in call[0] for call in f.calls))
+        self.assertFalse(b["logs_enabled"])
+
+    def test_apply_token_is_never_used_by_diagnostics(self):
+        f = fixture()
+        self.collect(f)
+        self.assertTrue(all(not call[2] for call in f.calls))
+        f = fixture()
+        diagnostics.collect(run(), diagnostics.Policy(nomad_addr="http://nomad"),
+                            {"NOMAD_TOKEN": "apply-token", "FACTORY_DIAGNOSTIC_NOMAD_TOKEN": TOKEN},
+                            transport=f, wall=lambda: NOW)
+        self.assertTrue(all(call[2] == {"X-Nomad-Token": TOKEN} for call in f.calls))
+
+    def test_failed_terraform_execute_persists_plan_jobs_without_guessing_version(self):
+        class PlanAdapter(deploy.FakeDeployAdapter):
+            def check(self, ctx):
+                ctx.metadata["plan"] = {"resource_changes": [{"type": "nomad_job", "change": {
+                    "actions": ["update"], "after": {"name": "worker", "namespace": "infra"}}}]}
+                return True, ""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp), '[apply]\nenabled=true\n[apply.diagnostics]\nnomad_addr="http://nomad"\n')
+            cfg = config.load(repo)
+            apply.configure(cfg)
+            cfg.factory.mkdir(exist_ok=True)
+            f = fixture()
+            with mock.patch.object(apply, "touches_apply_dir", return_value=True), \
+                 mock.patch.object(apply, "apply_escalate"), mock.patch.object(apply, "post_comment", return_value=(True, "")), \
+                 mock.patch.object(diagnostics, "HTTP", return_value=f):
+                self.assertFalse(apply.apply_one({"ticket": 1, "pr": 2, "commit": "abcd1234"}, False,
+                                                adapter=PlanAdapter(execute_error="provider rejected job registration")))
+            failed = deploy.get_target_state("default", cfg.factory / "events.jsonl").latest_run
+            self.assertIsNone(failed.verification)
+            self.assertEqual(failed.diagnostic_jobs[0]["id"], "worker")
+            self.assertTrue(any(c[0] == "/v1/job/worker" for c in f.calls))
+            self.assertTrue(any(c[0].endswith("/evaluations") for c in f.calls))
+            self.assertFalse(any("allocations" in c[0] or "/fs/" in c[0] for c in f.calls))
+
+    def test_default_window_covers_long_apply_and_health_run(self):
+        r = run()
+        r.started_at = diagnostics.utc(NOW - 1200)
+        b = self.collect(r=r)
+        self.assertEqual(b["window"]["start"], r.started_at)
+
+    def test_secret_directory_rejected(self):
+        with self.assertRaises(config.ConfigError):
+            diagnostics.policy({"error_logs": ["main/secrets/x.log"]})
+
+    def test_nomad_diagnostic_credential_verifier_rejects_write_and_management(self):
+        from factory import verify_secrets
+        cfg = config.Config(Path("/tmp/fixture"), "test/repo")
+        cfg.apply_env = {"NOMAD_TOKEN": "apply", "FACTORY_DIAGNOSTIC_NOMAD_TOKEN": TOKEN}
+        cfg.targets = {"default": config.DeployTarget("default", ".", diagnostics={"nomad_addr": "http://nomad"})}
+        def check(identity, rules):
+            with mock.patch.object(diagnostics.HTTP, "get", side_effect=[json.dumps(identity).encode(), json.dumps({"Rules": rules}).encode(), b"[]"]):
+                return verify_secrets.credential_rows(cfg, "apply", True)[0]["status"]
+        client = {"Type": "client", "Policies": ["diagnostic-read"]}
+        self.assertEqual(check(client, 'namespace "infra" {policy="read" capabilities=["read-logs","read-fs"]}'), "valid")
+        self.assertEqual(check(client, 'namespace "infra" {policy="write"}'), "invalid")
+        self.assertEqual(check({"Type": "management"}, ""), "invalid")
+        self.assertEqual(check(client, 'namespace "infra" {policy="read" capabilities=["submit-job"]}'), "invalid")
+
+    def test_diagnostic_token_cannot_copy_apply_token_even_without_live_check(self):
+        from factory import verify_secrets
+        cfg = config.Config(Path("/tmp/fixture"), "test/repo")
+        cfg.apply_env = {"NOMAD_TOKEN": TOKEN, "FACTORY_DIAGNOSTIC_NOMAD_TOKEN": TOKEN}
+        rows = verify_secrets.credential_rows(cfg, "apply", False)
+        self.assertEqual(next(row["status"] for row in rows if row["key"] == "FACTORY_DIAGNOSTIC_NOMAD_TOKEN"), "invalid")
+
+    def test_comment_or_unreadable_policy_cannot_claim_read_only(self):
+        cfg = config.Config(Path("/tmp/fixture"), "test/repo")
+        cfg.targets = {"default": config.DeployTarget("default", ".", diagnostics={"nomad_addr": "http://nomad"})}
+        with mock.patch.object(diagnostics.HTTP, "get", side_effect=[b'{"Type":"client","Policies":["read"]}', b'{"Rules":"# comment"}']):
+            self.assertEqual(diagnostics.verify_nomad_token(cfg, TOKEN), "unavailable")
 
     def test_missing_failure_time_never_guesses_current_window(self):
         r = run()
@@ -146,7 +227,7 @@ class DiagnosticTests(unittest.TestCase):
         f = FixtureHTTP()
         f.rows["/v1/health/checks/database"] = [{"CheckID": "db", "Status": "critical", "Output": "dependency refused token=" + TOKEN, "Definition": {"Env": "never-store"}}]
         f.rows["/health"] = "secret payload should never be retained"
-        p = diagnostics.Policy(consul_addr="http://consul", services=["database"], probes=["http://dependency/health"])
+        p = diagnostics.Policy(consul_addr="http://consul", services=["database"], probes=["http://dependency/health"], logs=True)
         b = self.collect(f, p=p)
         text = json.dumps(b)
         self.assertIn("dependency refused", text)
@@ -219,7 +300,7 @@ class DiagnosticTests(unittest.TestCase):
         for aid in ("failed", "replacement"):
             f.rows["/v1/client/fs/stat/" + aid] = {"Size": 12000, "IsDir": False}
             f.rows["/v1/client/fs/readat/" + aid] = "error secret=" + TOKEN
-        b = self.collect(f, p=diagnostics.Policy(nomad_addr="http://nomad", error_logs=["main/local/error.log"]))
+        b = self.collect(f, p=diagnostics.Policy(nomad_addr="http://nomad", error_logs=["main/local/error.log"], logs=True))
         reads = [c for c in f.calls if "/readat/" in c[0]]
         self.assertEqual(len(reads), 2)
         self.assertEqual(reads[0][1]["offset"], "3808")

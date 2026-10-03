@@ -429,6 +429,9 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         verification = ctx.metadata.get("verification")
 
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        from factory import health
+        planned_jobs = [{key: value for key, value in job.items() if key in ("id", "namespace", "region")}
+                        for job in health.nomad_jobs(ctx.metadata.get("plan")) if job.get("id")][:8]
         final_run = deploy.DeployRun(
             run_id=run_id,
             target=target,
@@ -444,6 +447,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             error=artifacts.sanitize(exec_res.error or "", secrets) or None,
             version=deploy.CONTRACT_VERSION,
             verification=artifacts.sanitize_tree(verification, secrets) if verification else None,
+            diagnostic_jobs=artifacts.sanitize_tree(planned_jobs, secrets) if planned_jobs else None,
             queued_at=ticket.get("queued_at"),
         )
 

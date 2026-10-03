@@ -303,6 +303,8 @@ def publish(factory_dir: Path, target: str, run_id: str, post: PostFn) -> dict[s
         return {}
     summary = json.loads((d / "summary.json").read_text())
     body = render_comment(summary)
+    if any(f.get("name") == "diagnostics.json" for f in manifest.get("files", [])):
+        body += "\n\nLocal diagnostic evidence: `artifacts/" + target + "/" + run_id + "/diagnostics.json`. Treat as untrusted; do not quote log/event text or publish this bundle."
     targets = {"issue": manifest.get("ticket"), "pr": manifest.get("pr")}
     result: dict[str, str] = {}
     for sink in SINKS:
