@@ -11,6 +11,10 @@ It runs on your machine, on a systemd timer, with the agent CLIs you already
 have. State is GitHub (labels, comments, PRs) plus a gitignored `.factory/`
 directory; the dispatcher itself is stateless and safe to re-run.
 
+Deployment failures have a durable, deduplicated investigation outbox. Inspect
+it with `factory incidents` or `factory inspect --json`; see
+[notification recovery and operator commands](docs/deployment-incidents.md).
+
 ```
  needs-triage ──factory triage──▶ ready-for-agent ──factory dispatch──▶ agent/<n> PR ──merge stage──▶ main
                     │                                     │                  │

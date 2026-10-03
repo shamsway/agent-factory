@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from factory import artifacts, config, deploy, dispatch, tf_plan_check
+from factory import artifacts, config, deploy, dispatch, incidents, tf_plan_check
 from factory.config import Config
 
 cfg: Config
@@ -309,6 +309,12 @@ def apply_escalate(
         run_id = run.run_id
 
     dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason, run_id=run_id, target=target)
+    # The terminal deployment is authoritative; outbox failures cannot replace it.
+    try:
+        incidents.sync_failed(cfg)
+        incidents.deliver(cfg.factory, incidents.GitHub(cfg))
+    except Exception as exc:
+        log(f"#{n}: incident delivery skipped: {type(exc).__name__}")
     body = f"`factory apply` did not proceed: {reason}."
     try:
         dispatch.run(
@@ -610,6 +616,11 @@ def main(argv: list[str]) -> int:
             log(f"private retention skipped: {type(error).__name__}; inspect with factory prune-private --dry-run")
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
         if not args.dry_run:
+            try:
+                incidents.sync_failed(cfg)
+                incidents.deliver(cfg.factory, incidents.GitHub(cfg))
+            except Exception as exc:
+                log(f"incident delivery skipped: {type(exc).__name__}")
             for rid, sinks in artifacts.retry_pending(cfg.factory, post_comment).items():
                 log(f"retried publication for {rid}: {sinks}")
         all_prs = fetch_all_merged_prs()
