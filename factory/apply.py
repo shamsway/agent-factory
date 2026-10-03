@@ -600,6 +600,9 @@ def main(argv: list[str]) -> int:
         log("skipped (another apply run holds the lock)")
         return 0
     try:
+        from factory import retention
+        private = retention.prune(cfg.factory, dry_run=args.dry_run)
+        log(f"private retention: {'would prune' if args.dry_run else 'pruned'} {len(private['removed'])} runs; {len(private['retained'])} retained; {len(private['errors'])} errors")
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
         if not args.dry_run:
             for rid, sinks in artifacts.retry_pending(cfg.factory, post_comment).items():

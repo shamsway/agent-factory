@@ -223,11 +223,11 @@ Limitations:
 - The sanitizer redacts `[apply].env` values, secret-named environment values, common
   token shapes and PEM private-key blocks. A secret in an unrecognized format that is in
   none of those passes through.
-- Plans in `private/<run_id>/` are stored raw (0700, files 0600) and have no retention
-  yet; prune them by hand if disk matters.
+- Plans in `private/<run_id>/` are stored raw (0700, files 0600) and follow the retention
+  policy described below; unknown and unresolved runs are retained.
 - Journal rows written before this contract (`applied` output, escalation reasons) were
   not sanitized and remain in `events.jsonl` and its rotated segments, which `/api/file`
-  still serves on the loopback-only dashboard.
+  now refuses, including rotated segments and symlink aliases.
 
 ---
 
@@ -357,7 +357,7 @@ private plans/state and raw apply logs. No historical journal rewrite is needed.
 The dashboard remains subject to its existing loopback/access restrictions.
 
 Private plans remain in `.factory/private/<run_id>/` for recovery. Automated
-retention is tracked separately by SHA-240; current storage is not pruned.
+retention keeps the latest ten terminal runs per target plus protected runs (see below).
 Sanitizer coverage for unknown provider-emitted secret formats remains SHA-238.
 
 Validation: `scripts/test-linux.sh`; browser fixture:
@@ -373,3 +373,75 @@ with the job summary's running count and rejects queued/starting placements.
 It does not independently enumerate every eligible node. Placement failures on
 a node may therefore go unnoticed; Nomad's cumulative Failed count cannot be
 used as the expected allocation count for the current revision.
+
+## Private plan retention
+
+At the start of each normal apply pass, while holding apply.lock, Factory
+keeps the latest ten terminal runs per target plus every unfinished run and
+every failed run not explicitly acknowledged or superseded. A later successful
+attempt does not by itself acknowledge an older failed run. Directories absent
+from retained journal history, ambiguous ownership and symlink directories are
+kept for operator inspection. No plan contents are read, posted or served.
+Unreadable history aborts pruning. Failed deletions are reported and retried
+on a later pass; this does not rewrite deployment outcomes.
+
+Preview with `factory prune-private --dry-run`. This CLI is serialized with
+apply passes; `--keep N` overrides the default ten for an explicit manual pass
+(N must be at least one). `factory apply --dry-run` previews default retention
+without deleting. Rotation is included in the authoritative replay. Retention
+is not a guarantee of bounded storage while unresolved or unknown runs exist.
+Backups and logs outside the private store have separate lifecycles.
+
+## Operator recovery quick runbook
+
+1. Pause scheduling with `systemctl --user stop <unit>.timer`. Run `factory
+   inspect --json --live` using the service's absolute interpreter from the
+   consumer checkout. Confirm process identity, target/apply/backend locks and
+   Terraform activity before reconciliation. A free Factory lock alone does not
+   prove an orphaned Terraform process is gone. Preserve private plans/logs
+   needed for investigation; do not print secret-bearing state or raw logs into
+   tickets. Check resource state and service health independently.
+2. Preview reconciliation: `factory apply --target TARGET --reconcile-run RUN
+   --reconcile-status failed --reconcile-note "operator verified stopped; repair required"
+   --dry-run`. Remove `--dry-run` only after investigating the actual outcome.
+   Choose succeeded only with completed apply, state and health proof; otherwise
+   record failed. Do not replay a plan blindly or force-unlock a live Terraform
+   process. The longer recovery procedure above covers genuine stale state locks.
+3. For failed reconciliation, preview `factory apply --target TARGET
+   --acknowledge-failure RUN --reconcile-note "reviewed failure; repair PR approved"
+   --dry-run`, then record acknowledgment when repair is authorized. Acknowledgment
+   permits future reviewed repair work; it does not claim health or erase history.
+   It also makes the old private plan eligible for retention, so preserve needed
+   recovery material first.
+4. Inspect again, use apply dry-run to review selection, and resume the timer only
+   when the intended recovery and locks are understood. A successful source/test
+   result is separate from live apply/health/recovery evidence.
+
+### Roll back a versioned Factory runtime
+
+Pause timers, drain active dispatch/apply work, then stop the dashboard. Keep
+consumer tracked changes intact. Restore the prior protected host config and
+systemd unit backups from the release acceptance record, and restore the CLI
+symlink to the prior versioned runtime. Run `systemctl --user daemon-reload`.
+Use that runtime's absolute interpreter with `-P -m factory` for doctor,
+verify-secrets (both scopes, live and nonlive), inspect and dispatch/apply dry
+runs before activation. Check interpreter/gate match and credential isolation.
+Run one controlled empty-queue pass, then resume dashboard/timer and inspect
+again. Retain both runtimes and protected rollback assets until acceptance.
+Runtime rollback does not revert infrastructure state or restore pruned private
+plans; those require independently reviewed recovery and protected backups.
+
+## Terraform PR plan-summary review contract
+
+In apply-enabled repositories, Terraform source/lockfile changes require a
+`## Terraform plan summary` PR-description section with numeric
+`Plan: N to add, N to change, N to destroy` counts or `No changes` with rationale,
+plus target, resource actions, validation context and `Revision: <full HEAD SHA>`.
+Before PR creation the worker writes this section to the gitignored
+`.factory/terraform-plan-summary-<ticket>.md`; the dispatcher copies it to the PR
+and refreshes only that section after revisions. It sanitizes known credential
+values before publication. The worker receives this instruction. Review fetches the PR description at the exact gated head and
+rejects missing/incomplete evidence before a model can approve. The reviewer
+checks the summary against the diff; the syntax gate does not prove a plan
+actually ran. Software-only workflows are unaffected. Update the description
+when revisions change the plan; never paste secrets or the raw plan.
