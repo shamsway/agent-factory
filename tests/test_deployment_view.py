@@ -77,3 +77,53 @@ class DeploymentViewTest(unittest.TestCase):
             data=deployment_view.project(root,[row('safe','succeeded',output='unknown old secret')])
             self.assertEqual(data['runs'][0]['result']['output_tail'],'sanitized result')
             self.assertNotIn('unknown old secret',json.dumps(data))
+
+
+class HistoryAvailabilityTest(unittest.TestCase):
+    def test_optional_projection_failure_is_isolated(self):
+        with mock.patch.object(
+            deployment_view, "project", side_effect=PermissionError("lock")
+        ):
+            with self.assertLogs("factory.deployment_view", level="WARNING"):
+                self.assertIsNone(deployment_view.safe_project(Path("."), []))
+
+    def test_missing_start_timestamp_does_not_break_history(self):
+        event = row("missing-start", "succeeded")
+        event["started_at"] = None
+        event["queued_at"] = "2026-10-03T00:00:00Z"
+        with tempfile.TemporaryDirectory() as tmp:
+            data = deployment_view.project(Path(tmp), [event])
+        self.assertIsNone(data["runs"][0]["queue_sec"])
+
+    def test_target_lock_retries_a_transient_observer(self):
+        import errno
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                deploy.fcntl,
+                "flock",
+                side_effect=[BlockingIOError(errno.EAGAIN, "busy"), None],
+            ):
+                acquired, handle = deploy.acquire_target_lock(Path(tmp), "default")
+            self.assertTrue(acquired)
+            handle.close()
+
+    def test_target_lock_retry_is_bounded(self):
+        import errno
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(
+                    deploy.fcntl,
+                    "flock",
+                    side_effect=BlockingIOError(errno.EAGAIN, "busy"),
+                ),
+                mock.patch.object(deploy.time, "monotonic", side_effect=[0, 1]),
+            ):
+                acquired, handle = deploy.acquire_target_lock(Path(tmp), "default")
+            self.assertFalse(acquired)
+            self.assertIsNone(handle)
+
+
+if __name__ == "__main__":
+    unittest.main()
