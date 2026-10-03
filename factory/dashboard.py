@@ -1045,7 +1045,7 @@ def snapshot() -> dict:
         "resources": resources,
         "tickets": tickets,
         "review_queue": review_queue(review_prs, rows, viewer),
-        "deployments": deployment_view.project(FACTORY, rows, artifacts.secret_values(cfg.apply_env)),
+        "deployments": deployment_view.safe_project(FACTORY, rows, artifacts.secret_values(cfg.apply_env)),
     }
 
 
@@ -1263,7 +1263,7 @@ class Handler(BaseHTTPRequestHandler):
             data = cached_snapshot("fresh" in query)
             self._send(200, "application/json", json.dumps(data).encode())
         elif url.path == "/api/deployments":
-            data = deployment_view.project(FACTORY, lifecycle.read_events(FACTORY / "events.jsonl"),
+            data = deployment_view.safe_project(FACTORY, lifecycle.read_events(FACTORY / "events.jsonl"),
                                            artifacts.secret_values(cfg.apply_env))
             self._send(200, "application/json", json.dumps(data).encode())
         elif url.path == "/api/file":

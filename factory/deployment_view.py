@@ -1,6 +1,7 @@
 """Read-only deployment history. Raw journal output is never part of this API."""
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from datetime import datetime
@@ -10,6 +11,15 @@ from urllib.parse import quote
 from factory import artifacts, deploy, dispatch
 
 HISTORY_LIMIT = 200
+
+
+def safe_project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -> dict | None:
+    """Keep optional history failures from breaking the rest of the dashboard."""
+    try:
+        return project(factory, rows, secrets)
+    except Exception:
+        logging.getLogger(__name__).warning("Deployment history unavailable", exc_info=True)
+        return None
 
 
 def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -> dict:
@@ -46,7 +56,7 @@ def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -
                 if run.queued_at:
                     queue_sec = max(0, (datetime.fromisoformat(run.started_at.replace("Z", "+00:00"))
                                        - datetime.fromisoformat(run.queued_at.replace("Z", "+00:00"))).total_seconds())
-            except (ValueError, TypeError):
+            except (AttributeError, ValueError, TypeError):
                 pass
             runs.append({
                 "run_id": run.run_id, "target": target, "ticket": run.ticket, "pr": run.pr,

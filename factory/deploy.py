@@ -705,10 +705,18 @@ def acquire_target_lock(factory_dir: Path, target_name: str) -> tuple[bool, Any]
     locks_dir.mkdir(parents=True, exist_ok=True)
     lock_file = locks_dir / f"target-{safe_name}.lock"
     lock_fd = lock_file.open("w")
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True, lock_fd
-    except OSError:
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True, lock_fd
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.01, remaining))
+                continue
+        except OSError:
+            pass
         lock_fd.close()
         return False, None
 

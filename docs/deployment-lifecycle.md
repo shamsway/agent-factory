@@ -365,3 +365,11 @@ Validation: `scripts/test-linux.sh`; browser fixture:
 browser installed. Set `BROWSER_CHANNEL=chrome` to use an installed Chrome.
 The fixture exercises pending, executing, verifying, failed, interrupted,
 superseded and successful runs, filtering, and safe artifact text display.
+
+### System-job health limitations
+
+System-job allocation fallback compares current-version running allocations
+with the job summary's running count and rejects queued/starting placements.
+It does not independently enumerate every eligible node. Placement failures on
+a node may therefore go unnoticed; Nomad's cumulative Failed count cannot be
+used as the expected allocation count for the current revision.
