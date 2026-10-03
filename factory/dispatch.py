@@ -501,6 +501,9 @@ def build_prompt(n: int, wt: Path, extra: str = "", investigation: bool = False)
                 n=n, commit_flag=commit_flag, main=cfg.main, python=sys.executable
             )
         )
+    if not investigation and cfg.apply_enabled:
+        from factory import plan_summary
+        parts.append(plan_summary.INSTRUCTIONS.replace("{n}", str(n)))
     if baseline is not None:
         parts += ["", "## Admitted execution contract", "",
                   "The pinned ticket scope and exit gate define this execution. The initiative baseline "
@@ -741,6 +744,28 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
     """
     issue = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "title,body"])
     issue_text = f"# {issue['title']}\n\n{issue.get('body') or '(no body)'}"
+    pr_text = ""
+    if cfg.apply_enabled:
+        from factory import plan_summary
+        paths = run(["git", "diff", "--name-only", f"origin/{cfg.main}..HEAD"], cwd=wt).stdout
+        if plan_summary.terraform_paths(paths):
+            try:
+                pr = gh_json(["pr", "view", f"agent/{n}", "--repo", REPO, "--json", "body,headRefOid"])
+                error = ("PR head does not match the gated revision" if pr.get("headRefOid") != expected_head
+                         else plan_summary.validate(pr.get("body") or "", expected_head))
+                pr_text = pr.get("body") or ""
+            except Exception:
+                error = "Unable to verify Terraform PR description at the gated revision"
+            if error:
+                record("review", ticket=n, verdict="REVISE", parsed=True, accepted=False,
+                       head=expected_head, reason="terraform_plan_summary")
+                return "REVISE", "Required fix: " + error
+
+    terraform_rule = (
+        f"PR description evidence:\n{pr_text}\n"
+        "Verify the Terraform plan summary reflects this diff, identifies target/actions, "
+        "validation context and no-op rationale when applicable. Missing or stale evidence blocks approval.\n"
+    ) if pr_text else ""
     prompt = (
         f"Review `git diff origin/{cfg.main}..HEAD` in this repository on two axes:\n"
         f"1. Standards: does the code follow this repo's documented conventions "
@@ -749,6 +774,7 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
         f"GitHub issue #{n} in {REPO}, reproduced below -- do not try to fetch "
         f"it yourself, this is the full text:\n\n"
         f"```\n{issue_text}\n```\n\n"
+        f"{terraform_rule}"
         f"Read the issue comments for the agent brief and approved scope changes.\n"
         f"Review the DIFF only. Do NOT execute builds or tests: your sandbox "
         f"differs from the target host, so your results are not evidence. The "
@@ -825,6 +851,35 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
     return verdict, findings
 
 
+def worker_plan_summary(wt: Path, ticket: int | None) -> str:
+    if not cfg.apply_enabled or ticket is None:
+        return ""
+    from factory import artifacts, plan_summary
+    path = wt / ".factory" / f"terraform-plan-summary-{ticket}.md"
+    if not path.is_file() or path.is_symlink():
+        return ""
+    head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
+    text = path.read_text()
+    if plan_summary.validate(text, head):
+        return ""
+    return artifacts.sanitize(plan_summary.section(text),
+                              artifacts.secret_values(cfg.apply_env, cfg.install.get("env", {})))
+
+
+def update_pr_plan_summary(wt: Path, ticket: int) -> None:
+    from factory import plan_summary
+    summary = worker_plan_summary(wt, ticket)
+    if not summary:
+        return
+    current = gh_json(["pr", "view", f"agent/{ticket}", "--repo", REPO, "--json", "body,headRefOid"])
+    head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
+    if current.get("headRefOid") != head:
+        raise RuntimeError("PR head changed before plan summary publication")
+    body_file = FACTORY / f"pr-plan-body-{ticket}.md"
+    body_file.write_text(plan_summary.replace_section(current.get("body") or "", summary))
+    run(["gh", "pr", "edit", f"agent/{ticket}", "--repo", REPO, "--body-file", str(body_file)], cwd=wt)
+
+
 def push_and_pr(wt: Path, branch: str, title: str, body: str, label: str = "", ticket: int | None = None) -> bool:
     """Push `branch` and open its PR. False if the branch adds nothing over
     main (nothing to review; a worker that landed its work elsewhere)."""
@@ -843,11 +898,17 @@ def push_and_pr(wt: Path, branch: str, title: str, body: str, label: str = "", t
         return False
     run(["git", "push", "-u", "origin", branch], cwd=wt)
     if existing:
+        if ticket is not None:
+            update_pr_plan_summary(wt, ticket)
         log(f"{branch}: PR already exists (#{existing[0]['number']})")
         if ticket is not None:
             record("pr-opened", ticket=ticket, pr=existing[0]["number"])
         return True
     body_file = FACTORY / f"pr-body-{branch.removeprefix('agent/')}.md"
+    summary = worker_plan_summary(wt, ticket)
+    if summary:
+        from factory import plan_summary
+        body = plan_summary.replace_section(body, summary)
     body_file.write_text(body)
     created = run(
         [
@@ -1904,6 +1965,7 @@ def process_ticket(
                     )
                     return
                 run(["git", "push", "origin", f"agent/{n}"], cwd=wt)
+                update_pr_plan_summary(wt, n)
                 verdict, findings = review(wt, n, report, gate_head)
                 pr_comment(n, findings)
             if verdict != "APPROVE":
