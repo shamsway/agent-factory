@@ -354,6 +354,7 @@ def is_private_path(rel: str) -> bool:
     name = p.name
     return (
         bool(p.parts and p.parts[0] in PRIVATE_PARTS)
+        or name == "events.jsonl" or name.startswith("events.jsonl.")
         or name.startswith(("apply-plan-", "terraform-apply-"))
         or name.endswith(PRIVATE_SUFFIXES)
         or "tfstate" in name

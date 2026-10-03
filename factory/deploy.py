@@ -67,6 +67,8 @@ class DeployRun:
     output: str = ""
     error: str | None = None
     version: int = CONTRACT_VERSION
+    queued_at: str | None = None  # PR merge time, when available
+    phase: str = ""  # executing or verifying, when status is RUNNING
     verification: dict[str, Any] | None = None  # post-apply health evidence (factory/health.py)
 
     def is_terminal(self) -> bool:
@@ -100,6 +102,8 @@ class DeployRun:
             output=str(data.get("output", "")),
             error=data.get("error"),
             version=int(data.get("version", CONTRACT_VERSION)),
+            queued_at=data.get("queued_at"),
+            phase=str(data.get("phase", "")),
             verification=data["verification"] if isinstance(data.get("verification"), dict) else None,
         )
 
@@ -308,10 +312,16 @@ def replay_rows(rows: list[dict]) -> dict[str, TargetState]:
             states[target] = TargetState(target=target)
 
         if run.run_id in runs_by_id:
+            if event != "deploy_run":
+                continue  # Compatibility notifications cannot override the authoritative run.
             existing = runs_by_id[run.run_id]
+            existing.queued_at = run.queued_at or existing.queued_at
+            existing.phase = run.phase or existing.phase
+            if run.verification is not None:
+                existing.verification = run.verification
             existing.status = run.status
             existing.completed_at = run.completed_at or existing.completed_at
-            existing.duration_sec = run.duration_sec or existing.duration_sec
+            existing.duration_sec = run.duration_sec if run.duration_sec is not None else existing.duration_sec
             existing.output = run.output or existing.output
             existing.error = run.error if run.error is not None else existing.error
             # Ensure target state for existing.target reflects this run

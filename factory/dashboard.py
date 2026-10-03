@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
-from factory import __version__, artifacts, briefing, codebase, config, dispatch, feedback, lifecycle, settings, stats
+from factory import __version__, artifacts, briefing, codebase, config, deployment_view, dispatch, feedback, lifecycle, settings, stats
 from factory.config import (
     DASHBOARD_ALLOW_REMOTE_VAR,
     LABEL_AGENT,
@@ -1045,6 +1045,7 @@ def snapshot() -> dict:
         "resources": resources,
         "tickets": tickets,
         "review_queue": review_queue(review_prs, rows, viewer),
+        "deployments": deployment_view.project(FACTORY, rows, artifacts.secret_values(cfg.apply_env)),
     }
 
 
@@ -1260,6 +1261,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "application/json", json.dumps(data).encode())
         elif url.path == "/api/snapshot":
             data = cached_snapshot("fresh" in query)
+            self._send(200, "application/json", json.dumps(data).encode())
+        elif url.path == "/api/deployments":
+            data = deployment_view.project(FACTORY, lifecycle.read_events(FACTORY / "events.jsonl"),
+                                           artifacts.secret_values(cfg.apply_env))
             self._send(200, "application/json", json.dumps(data).encode())
         elif url.path == "/api/file":
             self._file(query.get("path", [""])[0])
