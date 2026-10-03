@@ -139,3 +139,7 @@ logs, budgets, redaction, authenticated manifests and deployment-outcome
 preservation. Source/test success is separate from installed/live acceptance.
 Use a reviewed disposable workload for any intentional live failure; do not
 break a healthy production workload to demonstrate collection.
+
+### Diagnostic ACL verification boundary
+
+The optional diagnostic token verifier rejects every `variables` block, including read/list-only paths: stored secrets are outside diagnostic scope. It also rejects `read-fs` unless an operator has enabled logs and configured allowlisted application error-log paths on a diagnostic target. `read-logs` does not itself grant filesystem access. This conservative capability check is not proof that log/filesystem contents contain no secrets; unknown workload-secret formats remain SHA-238. Optional plan-lineage extraction failures log only their exception type and cannot stop terminal deployment recording.

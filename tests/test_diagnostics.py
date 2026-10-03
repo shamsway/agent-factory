@@ -165,10 +165,52 @@ class DiagnosticTests(unittest.TestCase):
             with mock.patch.object(diagnostics.HTTP, "get", side_effect=[json.dumps(identity).encode(), json.dumps({"Rules": rules}).encode(), b"[]"]):
                 return verify_secrets.credential_rows(cfg, "apply", True)[0]["status"]
         client = {"Type": "client", "Policies": ["diagnostic-read"]}
-        self.assertEqual(check(client, 'namespace "infra" {policy="read" capabilities=["read-logs","read-fs"]}'), "valid")
+        self.assertEqual(check(client, 'namespace "infra" {policy="read" capabilities=["read-logs"]}'), "valid")
         self.assertEqual(check(client, 'namespace "infra" {policy="write"}'), "invalid")
         self.assertEqual(check({"Type": "management"}, ""), "invalid")
         self.assertEqual(check(client, 'namespace "infra" {policy="read" capabilities=["submit-job"]}'), "invalid")
+
+    def test_diagnostic_token_rejects_variables_and_unnecessary_filesystem_access(self):
+        cfg = config.Config(Path("/tmp/fixture"), "test/repo")
+        cfg.targets = {"default": config.DeployTarget("default", ".", diagnostics={"nomad_addr": "http://nomad"})}
+        def check(rules):
+            identity = {"Type": "client", "Policies": ["diagnostic-read"]}
+            responses = [json.dumps(identity).encode(), json.dumps({"Rules": rules}).encode(), b"[]"]
+            with mock.patch.object(diagnostics.HTTP, "get", side_effect=responses):
+                return diagnostics.verify_nomad_token(cfg, TOKEN)
+        for capability in ("read", "list"):
+            with self.subTest(capability=capability):
+                self.assertEqual(check('namespace "*" { policy="read" variables { path "*" { capabilities=["' + capability + '"] } } }'), "invalid")
+        filesystem = 'namespace "infra" {policy="read" capabilities=["read-fs"]}'
+        self.assertEqual(check(filesystem), "invalid")
+        cfg.targets["default"].diagnostics["error_logs"] = ["main/local/error.log"]
+        self.assertEqual(check(filesystem), "invalid")  # logs are still disabled
+        cfg.targets["default"].diagnostics["logs"] = True
+        self.assertEqual(check(filesystem), "valid")
+        self.assertEqual(check('namespace "infra" { capabilities=["read"] }'), "invalid")
+
+    def test_plan_lineage_error_cannot_leave_executed_run_running(self):
+        from factory import health
+        for error in (None, "provider failed"):
+            with self.subTest(execute_error=error), tempfile.TemporaryDirectory() as tmp:
+                repo = make_repo(Path(tmp), '[apply]\nenabled=true\n')
+                cfg = config.load(repo)
+                apply.configure(cfg)
+                cfg.factory.mkdir(exist_ok=True)
+                captured = io.StringIO()
+                with mock.patch.object(apply, "touches_apply_dir", return_value=True), \
+                     mock.patch.object(apply, "apply_escalate"), \
+                     mock.patch.object(apply, "post_comment", return_value=(True, "")), \
+                     mock.patch.object(health, "nomad_jobs", side_effect=TypeError("private-plan-secret")), \
+                     contextlib.redirect_stdout(captured):
+                    result = apply.apply_one({"ticket": 1, "pr": 2, "commit": "abcd1234"}, False,
+                                             adapter=deploy.FakeDeployAdapter(execute_error=error))
+                self.assertEqual(result, error is None)
+                final = deploy.get_target_state("default", cfg.factory / "events.jsonl").latest_run
+                self.assertEqual(final.status, deploy.DeployStatus.FAILED if error else deploy.DeployStatus.SUCCEEDED)
+                self.assertIsNone(final.diagnostic_jobs)
+                self.assertIn("diagnostic plan lineage unavailable: TypeError", captured.getvalue())
+                self.assertNotIn("private-plan-secret", captured.getvalue())
 
     def test_diagnostic_token_cannot_copy_apply_token_even_without_live_check(self):
         from factory import verify_secrets
