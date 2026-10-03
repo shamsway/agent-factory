@@ -130,5 +130,39 @@ class RetentionTest(unittest.TestCase):
         self.assertTrue((self.root / "private/old/plan").exists())
 
 
+class OptionalApplyRetentionTest(unittest.TestCase):
+    def test_retention_failure_does_not_prevent_apply_selection(self):
+        from factory import apply, config, dispatch
+        from tests.test_factory import make_repo
+        import subprocess
+
+        for error in (
+            ValueError("malformed journal"),
+            ValueError("symlink store"),
+            RuntimeError("unsafe rmtree"),
+        ):
+            with self.subTest(error=str(error)), tempfile.TemporaryDirectory() as tmp:
+                cfg = config.load(make_repo(Path(tmp), "[apply]\nenabled = true\n"))
+                dispatch.configure(cfg)
+                process = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+                with (
+                    mock.patch.object(config, "load", return_value=cfg),
+                    mock.patch.object(retention, "prune", side_effect=error),
+                    mock.patch.object(dispatch, "run", return_value=process),
+                    mock.patch.object(
+                        apply, "fetch_all_merged_prs", return_value=[]
+                    ) as select,
+                    mock.patch.object(apply, "log") as log,
+                ):
+                    self.assertEqual(apply.main(["--dry-run"]), 0)
+                select.assert_called_once()
+                self.assertTrue(
+                    any(
+                        "private retention skipped" in c.args[0]
+                        for c in log.call_args_list
+                    )
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -87,7 +87,8 @@ class PlanSummaryTest(unittest.TestCase):
         self.assertEqual(called, [])
 
     def test_pr_head_must_match_gate(self):
-        verdict, _, called = self.review(SUMMARY, head="changed")
+        with mock.patch.object(dispatch.time, "monotonic", side_effect=[0, 11]):
+            verdict, _, called = self.review(SUMMARY, head="changed")
         self.assertEqual(verdict, "REVISE")
         self.assertEqual(called, [])
 
@@ -143,6 +144,48 @@ class PlanSummaryTest(unittest.TestCase):
         verdict, _, called = self.review("", apply_enabled=False)
         self.assertEqual(verdict, "APPROVE")
         self.assertEqual(len(called), 1)
+
+
+class GitHubHeadWaitTest(unittest.TestCase):
+    def test_old_head_is_retried_until_current_body_arrives(self):
+        rows = [
+            dict(headRefOid="old", body="old body"),
+            dict(headRefOid="new", body="new body"),
+        ]
+        with (
+            mock.patch.object(dispatch, "REPO", "fixture/repo", create=True),
+            mock.patch.object(dispatch, "gh_json", side_effect=rows) as read,
+            mock.patch.object(dispatch.time, "sleep") as sleep,
+        ):
+            current = dispatch.wait_for_pr_head("agent/1", "new")
+        self.assertEqual(current["body"], "new body")
+        self.assertEqual(read.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_wait_is_bounded_and_does_not_accept_different_head(self):
+        with (
+            mock.patch.object(dispatch, "REPO", "fixture/repo", create=True),
+            mock.patch.object(dispatch, "gh_json", return_value=dict(headRefOid="old")),
+            mock.patch.object(dispatch.time, "monotonic", side_effect=[0, 0, 11]),
+            mock.patch.object(dispatch.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(RuntimeError):
+                dispatch.wait_for_pr_head("agent/1", "new")
+        sleep.assert_called_once_with(0.5)
+
+    def test_transient_api_failure_can_recover(self):
+        with (
+            mock.patch.object(dispatch, "REPO", "fixture/repo", create=True),
+            mock.patch.object(
+                dispatch,
+                "gh_json",
+                side_effect=[RuntimeError("temporary"), dict(headRefOid="new")],
+            ),
+            mock.patch.object(dispatch.time, "sleep"),
+        ):
+            self.assertEqual(
+                dispatch.wait_for_pr_head("agent/1", "new")["headRefOid"], "new"
+            )
 
 
 if __name__ == "__main__":

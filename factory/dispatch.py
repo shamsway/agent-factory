@@ -730,6 +730,22 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "") -> Non
     comment_receipt(n, "escalation", posted.stdout if posted.returncode == 0 else "", round=round_number)
 
 
+def wait_for_pr_head(ref: str, head: str, *, timeout: float = 10.0) -> dict:
+    """Wait for GitHub's post-push view, without accepting a different head."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            current = gh_json(["pr", "view", ref, "--repo", REPO, "--json", "body,headRefOid"])
+            if isinstance(current, dict) and current.get("headRefOid") == head:
+                return current
+        except Exception:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("GitHub PR head did not reach the gated revision within the wait window")
+        time.sleep(min(0.5, remaining))
+
+
 def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str, str]:
     """Run the two-axis diff review against the exact head that passed the gate.
 
@@ -750,7 +766,7 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
         paths = run(["git", "diff", "--name-only", f"origin/{cfg.main}..HEAD"], cwd=wt).stdout
         if plan_summary.terraform_paths(paths):
             try:
-                pr = gh_json(["pr", "view", f"agent/{n}", "--repo", REPO, "--json", "body,headRefOid"])
+                pr = wait_for_pr_head(f"agent/{n}", expected_head)
                 error = ("PR head does not match the gated revision" if pr.get("headRefOid") != expected_head
                          else plan_summary.validate(pr.get("body") or "", expected_head))
                 pr_text = pr.get("body") or ""
@@ -871,10 +887,8 @@ def update_pr_plan_summary(wt: Path, ticket: int) -> None:
     summary = worker_plan_summary(wt, ticket)
     if not summary:
         return
-    current = gh_json(["pr", "view", f"agent/{ticket}", "--repo", REPO, "--json", "body,headRefOid"])
     head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
-    if current.get("headRefOid") != head:
-        raise RuntimeError("PR head changed before plan summary publication")
+    current = wait_for_pr_head(f"agent/{ticket}", head)
     body_file = FACTORY / f"pr-plan-body-{ticket}.md"
     body_file.write_text(plan_summary.replace_section(current.get("body") or "", summary))
     run(["gh", "pr", "edit", f"agent/{ticket}", "--repo", REPO, "--body-file", str(body_file)], cwd=wt)
