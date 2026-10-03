@@ -17,7 +17,7 @@ import subprocess
 import sys
 import zlib
 
-from . import config, deploy, lifecycle, verify_secrets
+from . import config, deploy, incidents, lifecycle, verify_secrets
 
 LIMIT = 8 * 1024 * 1024
 PROPERTIES = "LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment,ExecStart,WorkingDirectory,InvocationID"
@@ -380,7 +380,7 @@ def inspect(cfg: config.Config, *, live: bool = False, candidates: bool = False,
                                       "directory": target.dir, "adapter": target.adapter}
                                      for name, target in sorted(cfg.targets.items())],
               "units": units, "credentials": verify_secrets.credential_rows(cfg, "all", live),
-              "deployment": ledger, "locks": locks(cfg, lock_dirs),
+              "deployment": ledger, "incidents": incidents.snapshot(cfg.factory), "locks": locks(cfg, lock_dirs),
               "candidates": candidate_snapshot(cfg, ledger) if candidates else {"status": "not_requested"},
               "limits": ["Point-in-time observations; keep scheduling paused for drain checks.",
                          "Live module bytes are not observable; correlate process invocation with immutable artifact.",

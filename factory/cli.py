@@ -15,6 +15,7 @@ COMMANDS = {
     "dispatch": ("dispatch", "main", "one pass: sync, merge stage, claim and work tickets"),
     "prune-private": ("retention", "main", "prune resolved private plans under the apply lock (supports --dry-run)"),
     "apply": ("apply", "main", "terraform apply for merged, apply-eligible tickets"),
+    "incidents": ("incidents", "main", "inspect and reconcile durable deployment incident delivery"),
     "manage": ("manage", "main", "recommend PR/issue viability, resolve untouched escalations, publish terminal human handoffs"),
     "gate": ("gate", "main", "run the deterministic quality gate in this worktree"),
     "stats": ("stats", "main", "ticket metrics from GitHub"),
