@@ -10,12 +10,15 @@ import argparse
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 from factory import artifacts
@@ -90,6 +93,33 @@ class HTTP:
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def get(self, url: str, headers: dict, deadline: float, limit: int) -> bytes:
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            raise Unavailable("budget_expired")
+        # A socket timeout does not bound getaddrinfo. An isolated reader can
+        # be killed even when DNS or TLS is stuck. Credentials travel through
+        # stdin, never argv; raw bounded output remains in memory only.
+        env = {key: value for key, value in os.environ.items() if key in
+               ("PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                "http_proxy", "https_proxy", "no_proxy")}
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        try:
+            result = subprocess.run([sys.executable, "-P", "-c",
+                "from factory.diagnostics import http_worker; http_worker()"],
+                input=json.dumps({"url": url, "headers": headers, "deadline": deadline, "limit": limit}).encode(),
+                capture_output=True, env=env, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise Unavailable("budget_expired") from None
+        if result.returncode:
+            reason = result.stderr.decode(errors="replace").strip()
+            safe = {"permission_denied", "absent_or_expired", "expired", "transport_unavailable", "budget_expired",
+                    "redirect_refused", "response_too_large"}
+            raise Unavailable(reason if reason in safe or re.fullmatch(r"HTTP\d{3}", reason) else "transport_unavailable")
+        if self.clock() > deadline or len(result.stdout) > limit:
+            raise Unavailable("budget_expired")
+        return result.stdout
+
+    def _read(self, url: str, headers: dict, deadline: float, limit: int) -> bytes:
         try:
             remaining = deadline - self.clock()
             if remaining <= 0:
@@ -121,6 +151,20 @@ class HTTP:
                                404: "absent_or_expired", 410: "expired"}.get(exc.code, f"HTTP{exc.code}")) from None
         except (OSError, urllib.error.URLError):
             raise Unavailable("transport_unavailable") from None
+
+
+def http_worker():
+    """Private fixed GET reader; no filesystem persistence or other commands."""
+    try:
+        request = json.loads(sys.stdin.buffer.read())
+        value = HTTP()._read(request["url"], request["headers"], request["deadline"], request["limit"])
+    except Unavailable as exc:
+        sys.stderr.write(str(exc))
+        raise SystemExit(1)
+    except Exception:
+        sys.stderr.write("transport_unavailable")
+        raise SystemExit(1)
+    sys.stdout.buffer.write(value)
 
 
 def seconds(value) -> float | None:

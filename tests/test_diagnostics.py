@@ -4,6 +4,7 @@ import contextlib
 import io
 import tempfile
 import time
+import subprocess
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -320,6 +321,15 @@ class DiagnosticTests(unittest.TestCase):
                 http.get(fake.addr + "/large", {}, time.monotonic() + 3, 1024)
         finally:
             fake.close()
+
+    def test_transport_timeout_bounds_dns_and_keeps_credentials_out_of_argv(self):
+        with mock.patch.object(diagnostics.subprocess, "run", side_effect=subprocess.TimeoutExpired("reader", 1)) as process:
+            with self.assertRaisesRegex(diagnostics.Unavailable, "budget_expired"):
+                diagnostics.HTTP().get("http://nomad/v1/job/worker", {"X-Nomad-Token": TOKEN}, time.monotonic() + 1, 1024)
+        call = process.call_args
+        self.assertNotIn(TOKEN, " ".join(call.args[0]))
+        self.assertIn(TOKEN.encode(), call.kwargs["input"])
+        self.assertLessEqual(call.kwargs["timeout"], 1)
 
 
 if __name__ == "__main__":

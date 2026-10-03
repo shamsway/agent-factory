@@ -84,7 +84,10 @@ allocation filesystem browsing or arbitrary file request.
 ## Budgets and safety
 
 All built-in collectors share a total wall-clock deadline, bounded request/socket
-timeouts and download/output byte budgets. Limits appear in the bundle: up to
+timeouts and download/output byte budgets. HTTP reads run in a bounded child
+process so a stuck DNS lookup can be killed; credentials pass via stdin rather
+than argv, and role credentials are not inherited in that child environment.
+Limits appear in the bundle: up to
 8 jobs, 50 state rows per source, 8 allocations with logs, 8 tasks each, 50 task
 events each and 8 KiB per log tail. These are bounded samples, not exhaustive
 cluster history. Oversized responses are rejected instead of stored. Output
