@@ -769,6 +769,23 @@ class HostConfigTest(unittest.TestCase):
             row = doctor()["github workflow"]
             self.assertEqual((row["status"], row["detail"].startswith("none")), ("WARN", True))
 
+    def test_doctor_warns_when_the_main_checkout_is_off_main_or_edited(self) -> None:
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            stubs = stub_bin(Path(d), gh=gh, systemctl="echo inactive")
+            row = lambda: next(r for r in json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]  # noqa: E731
+                               if r["label"] == "main checkout")
+            self.assertEqual((row()["status"], row()["detail"]), ("PASS", "on main, clean"))
+            (repo / "scratch.txt").write_text("untracked files are fine\n")
+            self.assertEqual(row()["status"], "PASS")
+            git(repo, "switch", "-q", "-c", "feature")
+            (repo / "README.md").write_text("edited\n")
+            r = row()
+            self.assertEqual(r["status"], "WARN")
+            self.assertIn("on feature, not main", r["detail"])
+            self.assertIn("1 tracked file(s) modified", r["detail"])
+
     def test_doctor_accepts_district_engine_metadata_without_loading_it(self) -> None:
         metadata = (
             '[defaults.triage]\nurl = "http://127.0.0.1:1/v1/chat/completions"\n'
