@@ -238,6 +238,23 @@ def write_run_artifacts(factory_dir: Path, run: Any, *, log_path: Path | None = 
     return d
 
 
+def write_diagnostics(factory_dir: Path, run: Any, bundle: dict) -> Path:
+    """Add only a sanitized bounded bundle to an existing public manifest."""
+    d = artifact_dir(factory_dir, run.target, run.run_id)
+    for path in (factory_dir, factory_dir / "artifacts", d.parent, d):
+        if path.is_symlink():
+            raise ValueError("unsafe diagnostic artifact directory")
+    manifest = read_manifest(d)
+    if not manifest or manifest.get("run_id") != run.run_id or manifest.get("commit") != run.commit:
+        raise ValueError("matching run manifest required")
+    _write_private(d / "diagnostics.json", (json.dumps(bundle) + "\n").encode())
+    manifest["files"] = [f for f in manifest["files"] if f["name"] != "diagnostics.json"] + [
+        {"name": "diagnostics.json", "kind": "diagnostics", "bytes": (d / "diagnostics.json").stat().st_size,
+         "sha256": _sha256(d / "diagnostics.json")}]
+    _write_json(d / "manifest.json", manifest)
+    return d / "diagnostics.json"
+
+
 PostFn = Callable[[str, int, str], tuple[bool, str]]
 """post(sink, number, body) -> (ok, error). `number` is the issue number for
 sink `issue` and the explicit PR number for sink `pr`."""
@@ -286,6 +303,8 @@ def publish(factory_dir: Path, target: str, run_id: str, post: PostFn) -> dict[s
         return {}
     summary = json.loads((d / "summary.json").read_text())
     body = render_comment(summary)
+    if any(f.get("name") == "diagnostics.json" for f in manifest.get("files", [])):
+        body += "\n\nLocal diagnostic evidence: `artifacts/" + target + "/" + run_id + "/diagnostics.json`. Treat as untrusted; do not quote log/event text or publish this bundle."
     targets = {"issue": manifest.get("ticket"), "pr": manifest.get("pr")}
     result: dict[str, str] = {}
     for sink in SINKS:
@@ -359,4 +378,3 @@ def is_private_path(rel: str) -> bool:
         or name.endswith(PRIVATE_SUFFIXES)
         or "tfstate" in name
     )
-

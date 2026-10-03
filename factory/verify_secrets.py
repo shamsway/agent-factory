@@ -133,6 +133,13 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
         if scope not in ("all", name):
             continue
         for key, value in sorted(env.items()):
+            if key == "FACTORY_DIAGNOSTIC_NOMAD_TOKEN":
+                from factory.diagnostics import verify_nomad_token
+                status = "empty" if not value else "invalid" if value == cfg.apply_env.get("NOMAD_TOKEN") else "configured"
+                if live and value:
+                    status = verify_nomad_token(cfg, str(value))
+                rows.append({"scope": name, "key": key, "status": status})
+                continue
             # An empty value fails only for a known credential; an empty
             # selector (TF_VAR_onepassword_account) is intentional. The verdict
             # must not depend on --live.

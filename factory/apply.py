@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from factory import artifacts, config, deploy, dispatch, incidents, tf_plan_check
+from factory import artifacts, config, deploy, diagnostics, dispatch, incidents, tf_plan_check
 from factory.config import Config
 
 cfg: Config
@@ -429,6 +429,9 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         verification = ctx.metadata.get("verification")
 
         completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        from factory import health
+        planned_jobs = [{key: value for key, value in job.items() if key in ("id", "namespace", "region")}
+                        for job in health.nomad_jobs(ctx.metadata.get("plan")) if job.get("id")][:8]
         final_run = deploy.DeployRun(
             run_id=run_id,
             target=target,
@@ -444,6 +447,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             error=artifacts.sanitize(exec_res.error or "", secrets) or None,
             version=deploy.CONTRACT_VERSION,
             verification=artifacts.sanitize_tree(verification, secrets) if verification else None,
+            diagnostic_jobs=artifacts.sanitize_tree(planned_jobs, secrets) if planned_jobs else None,
             queued_at=ticket.get("queued_at"),
         )
 
@@ -457,6 +461,12 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             prefix = "terraform apply" if target_obj.adapter == "terraform" else f"{target_obj.adapter} deploy"
             artifacts.write_run_artifacts(cfg.factory, final_run, log_path=exec_res.log_path,
                                           secrets=secrets, headline=f"`{prefix}`")
+            if not exec_res.ok and target_obj.diagnostics is not None:
+                try:
+                    bundle = diagnostics.collect(final_run, diagnostics.policy(target_obj.diagnostics), ctx.env)
+                    artifacts.write_diagnostics(cfg.factory, final_run, bundle)
+                except Exception as diagnostic_err:
+                    log(f"#{n}: diagnostics unavailable: {type(diagnostic_err).__name__}")
             sinks = artifacts.publish(cfg.factory, target, final_run.run_id, post_comment)
             if any(st == "pending" for st in sinks.values()):
                 log(f"#{n}: publication pending retry ({sinks})")

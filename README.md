@@ -1921,6 +1921,12 @@ evidence, chat, onboarding, metrics, and learning surfaces. `factory/cli.py`
 defines the command surface; `factory/config.py` layers host and repository
 configuration.
 
+## Deployment diagnostic evidence
+
+Opt-in bounded read-only runtime collectors add a sanitized `diagnostics.json`
+artifact for failed runs. See [deployment diagnostics](docs/deployment-diagnostics.md)
+for version correlation, unavailable evidence, budgets and operator configuration.
+
 ## License
 
 MIT
