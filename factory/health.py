@@ -227,7 +227,7 @@ class NomadJob(_Item):
         return (HEALTHY if complete else PENDING), detail
 
     def evidence(self) -> dict:
-        return {"kind": "nomad_job", "id": self.job["id"], "namespace": self.job["namespace"],
+        return {"kind": "nomad_job", "id": self.job["id"], "namespace": self.job["namespace"], "region": self.job.get("region", ""),
                 "address": self.job["address"], "policy": self.policy or "unobserved",
                 "state": self.state, "detail": _clip(self.detail), "polls": self.polls,
                 "observed": self.observed}

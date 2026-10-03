@@ -101,7 +101,7 @@ KNOWN_KEYS = {
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),
-    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify"),
+    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics"),
     "collaboration": ("fallback", "reasons", "components"),
 }
 CHECK_KEYS = ("name", "run", "exclusive", "timeout")
@@ -128,6 +128,7 @@ class DeployTarget:
     backend_key: str = ""
     adapter: str = "terraform"
     verify: VerifyPolicy | None = None
+    diagnostics: dict | None = None
 
 
 @dataclass
@@ -578,6 +579,7 @@ def load(start: Path | None = None) -> Config:
                     backend_key=str(item.get("backend_key", "")),
                     adapter=str(item.get("adapter", default_adapter)),
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
+                    diagnostics=item.get("diagnostics"),
                 )
     elif isinstance(raw_targets, dict):
         for name, item in raw_targets.items():
@@ -589,10 +591,13 @@ def load(start: Path | None = None) -> Config:
                     backend_key=str(item.get("backend_key", "")),
                     adapter=str(item.get("adapter", default_adapter)),
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
+                    diagnostics=item.get("diagnostics"),
                 )
     if targets and "verify" in apply_t:
         raise ConfigError("[apply].verify applies to the implicit default target only; "
                           "with [apply.targets], set verify on each target")
+    if targets and "diagnostics" in apply_t:
+        raise ConfigError("with [apply.targets], set diagnostics on each target")
     if not targets:
         targets["default"] = DeployTarget(
             name="default",
@@ -600,6 +605,10 @@ def load(start: Path | None = None) -> Config:
             enabled=cfg.apply_enabled,
             adapter=default_adapter,
             verify=verify_policy(apply_t.get("verify"), "apply.verify"),
+            diagnostics=apply_t.get("diagnostics"),
         )
+    from factory.diagnostics import policy as diagnostic_policy
+    for target in targets.values():
+        diagnostic_policy(target.diagnostics)
     cfg.targets = targets
     return cfg
