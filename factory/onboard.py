@@ -336,6 +336,23 @@ def _dashboard_port_check(cfg: config.Config, host: str, port: int) -> tuple[boo
     return True, f"owned by {unit} (pid {main_pid})"
 
 
+def checkout_state(cfg: config.Config) -> tuple[bool, str]:
+    """Whether the main checkout is on the main branch with no tracked edits.
+
+    Factory loads its config (targets, gates, verify policy) from this
+    working tree, so a feature branch or local edits silently change what
+    every pass runs with.
+    """
+    branch = sh(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=cfg.root).stdout.strip()
+    edits = [line for line in sh(["git", "status", "--porcelain", "--untracked-files=no"], cwd=cfg.root).stdout.splitlines() if line]
+    problems = []
+    if branch != cfg.main:
+        problems.append(f"on {branch or 'a detached HEAD'}, not {cfg.main}: config is read from this working tree")
+    if edits:
+        problems.append(f"{len(edits)} tracked file(s) modified; move work in progress to another worktree")
+    return (not problems), ("; ".join(problems) if problems else f"on {cfg.main}, clean")
+
+
 def doctor(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory doctor", description="Check tools, auth, remotes, config drift, and the triage model."
@@ -356,6 +373,8 @@ def doctor(argv: list[str]) -> int:
     report(present, f"{CONFIG_NAME} present", "" if present else "run `factory init`")
     tracked = sh(["git", "ls-files", "--error-unmatch", CONFIG_NAME], cwd=cfg.root).returncode == 0
     report(True if tracked else None, f"{CONFIG_NAME} committed", "" if tracked else "commit it so clones see it")
+    ok, detail = checkout_state(cfg)
+    report(True if ok else None, "main checkout", detail)
 
     unknown = config.unknown_keys(cfg.raw_repo)
     report(
