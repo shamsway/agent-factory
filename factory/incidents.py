@@ -38,6 +38,14 @@ class RemoteIncidentUnavailable(ValueError):
     """An existing issue is not visible; never replace it automatically."""
 
 
+class RequestRefused(Exception):
+    """An explicit GitHub 4xx means this request did not create an issue."""
+
+    def __init__(self, status: int):
+        self.status = status
+        super().__init__(f"HTTP{status}")
+
+
 def now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -141,7 +149,12 @@ def enqueue(factory: Path, repo: str, run: deploy.DeployRun, *, root_id: str | N
         # a second root for that child ticket after restart.
         attached = []
         for existing in store.glob("incident-*.json"):
-            prior = read(existing)
+            try:
+                prior = read(existing)
+            except Exception:
+                # Status projection reports bad records; preserve them for the
+                # operator without preventing unrelated roots from being queued.
+                continue
             if prior["repo"] == repo and any(r["run_id"] == run.run_id for r in prior["runs"]):
                 attached.append(prior["id"])
         if len(attached) > 1 or (root_id and attached and attached != [root_id]):
@@ -198,10 +211,9 @@ class GitHub:
             raise ValueError("invalid GitHub repository")
         self.repo = cfg.repo
         self.deadline = time.monotonic() + 60
+        # Same identity resolution as apply.post_comment: the process env/gh
+        # login. Never substitute the install role's token from host config.
         self.env = dict(os.environ)
-        for key in cfg.apply_env:
-            self.env.pop(key, None)
-        self.env.update({k: str(v) for k, v in cfg.install.get("env", {}).items() if k == "GH_TOKEN"})
 
     def api(self, endpoint: str, payload: dict | None = None, method: str = "GET"):
         remaining = self.deadline - time.monotonic()
@@ -212,7 +224,12 @@ class GitHub:
             cmd.extend(["--input", "-"])
         proc = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
                               env=self.env, capture_output=True, text=True, timeout=min(20, remaining))
-        if proc.returncode or len(proc.stdout) > 2 * MAX_RECORD_BYTES:
+        if proc.returncode:
+            status = re.search(r"\(HTTP (4\d\d)\)", proc.stderr or "")
+            if status:
+                raise RequestRefused(int(status[1]))
+            raise RuntimeError("GitHub request failed")
+        if len(proc.stdout) > 2 * MAX_RECORD_BYTES:
             raise RuntimeError("GitHub request failed")
         return json.loads(proc.stdout)
 
@@ -245,7 +262,13 @@ class GitHub:
         if start < 0 or end < 0:
             raise ValueError("incident section changed")
         new = old[:start] + body(row) + old[end + len(END):]
-        self.api(f"repos/{self.repo}/issues/{row['issue']}", {"body": new}, "PATCH")
+        payload = {"body": new}
+        if len(row["runs"]) > row["published_runs"]:
+            # A new failure needs another investigation even if the previous
+            # one has been closed or its investigation label was removed.
+            labels = [r["name"] for r in issue.get("labels", []) if r["name"] != config.LABEL_HUMAN]
+            payload.update(state="open", labels=sorted(set(labels) | {config.LABEL_INVESTIGATE}))
+        self.api(f"repos/{self.repo}/issues/{row['issue']}", payload, "PATCH")
 
 
 def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[dict]:
@@ -254,6 +277,7 @@ def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[d
         results = []
         for path in sorted(store.glob("incident-*.json")):
             row = None
+            side_effect_started = False
             if only and path.stem != only:
                 continue
             try:
@@ -267,8 +291,7 @@ def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[d
                     write(path, row)
                     results.append(metadata(row))
                     continue
-                row.update(attempts=row["attempts"] + 1, last_attempt_at=now(), last_error=None)
-                write(path, row)
+                row.update(last_attempt_at=now(), last_error=None)
                 matches = client.find(row)
                 if len(matches) > 1:
                     row.update(status="failed", last_error="ambiguous_remote_incidents")
@@ -281,6 +304,9 @@ def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[d
                     else:
                         row.update(issue=number, uncertain=False)
                         # Idempotent update also reconciles crash/lost-response after create.
+                        row["attempts"] += 1
+                        write(path, row)
+                        side_effect_started = True
                         client.update(row, matches[0])
                         row.update(status="delivered", published_runs=len(row["runs"]))
                 elif row["issue"]:
@@ -289,16 +315,26 @@ def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[d
                     row.update(status="uncertain", last_error="creation_outcome_unknown")
                 else:
                     # Commit uncertainty BEFORE the API side effect, including a crash before send.
-                    row.update(status="uncertain", uncertain=True)
+                    row.update(status="uncertain", uncertain=True, attempts=row["attempts"] + 1)
                     write(path, row)
-                    number = client.create(row)
+                    side_effect_started = True
+                    try:
+                        number = client.create(row)
+                    except RequestRefused:
+                        row.update(status="pending", uncertain=False)
+                        raise
                     row.update(issue=number, status="delivered", uncertain=False,
                                published_runs=len(row["runs"]))
             except Exception as exc:
                 if row is None:
-                    results.append({"id": path.stem, "status": "unavailable", "last_error": type(exc).__name__})
+                    results.append({"id": path.stem if ID_RE.fullmatch(path.stem) else "invalid_record",
+                                    "status": "unavailable", "last_error": type(exc).__name__})
                     continue
-                row["last_error"] = type(exc).__name__
+                row["last_error"] = f"HTTP{exc.status}" if isinstance(exc, RequestRefused) else type(exc).__name__
+                if isinstance(exc, RequestRefused) and exc.status not in (408, 409, 429):
+                    row["status"] = "failed"
+                if not side_effect_started:
+                    row["lookup_failures"] = row.get("lookup_failures", 0) + 1
             if row["status"] != "delivered" and row["attempts"] >= MAX_ATTEMPTS:
                 row["status"] = "failed"
             row["updated_at"] = now()
@@ -309,15 +345,21 @@ def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[d
 
 def metadata(row: dict) -> dict:
     keys = ("id", "target", "original_ticket", "status", "issue", "attempts", "uncertain",
-            "last_error", "last_attempt_at", "updated_at", "published_runs")
+            "last_error", "last_attempt_at", "updated_at", "published_runs", "lookup_failures")
     return {**{k: row.get(k) for k in keys}, "runs": row["runs"]}
 
 
 def snapshot(factory: Path) -> dict:
     try:
         store = directory(factory)
-        rows = [metadata(read(path)) for path in sorted(store.glob("incident-*.json"))]
-        return {"status": "observed", "incidents": rows,
+        rows, errors = [], []
+        for path in sorted(store.glob("incident-*.json")):
+            try:
+                rows.append(metadata(read(path)))
+            except Exception as exc:
+                errors.append({"id": path.stem if ID_RE.fullmatch(path.stem) else "invalid_record",
+                               "error_type": type(exc).__name__})
+        return {"status": "degraded" if errors else "observed", "incidents": rows, "errors": errors,
                 "pending": sum(r["status"] in {"pending", "uncertain"} for r in rows),
                 "failed": sum(r["status"] == "failed" for r in rows)}
     except Exception as exc:
@@ -347,13 +389,18 @@ def recover(factory: Path, incident_id: str, client: GitHub, *, confirm_not_crea
         write(path, row)
 
 
-def sync_failed(cfg: config.Config) -> None:
+def sync_failed(cfg: config.Config) -> list[dict]:
     """Reconstruct missing outbox entries after a crash, without reopening old failures."""
+    errors = []
     for state in deploy.replay_events(cfg.factory / "events.jsonl").values():
         for ticket in state.unacknowledged_failed_tickets:
             run = state.runs_by_ticket[ticket][-1]
             if run.status == deploy.DeployStatus.FAILED and run.run_id.startswith("deploy-"):
-                enqueue(cfg.factory, cfg.repo, run)
+                try:
+                    enqueue(cfg.factory, cfg.repo, run)
+                except Exception as exc:
+                    errors.append({"run_id": run.run_id, "error_type": type(exc).__name__})
+    return errors
 
 
 def attach_run(cfg: config.Config, run_id: str, root_id: str) -> None:
@@ -375,6 +422,7 @@ def main(argv: list[str]) -> int:
                         help="with --retry: operator has manually confirmed uncertain create never succeeded")
     args = parser.parse_args(argv)
     cfg = config.load()
+    queue_errors = []
     try:
         if args.confirm_not_created and not args.retry:
             raise ValueError("--confirm-not-created requires --retry")
@@ -387,9 +435,11 @@ def main(argv: list[str]) -> int:
         if args.retry:
             recover(cfg.factory, args.retry, GitHub(cfg), confirm_not_created=args.confirm_not_created)
         if args.deliver:
-            sync_failed(cfg)
+            queue_errors = sync_failed(cfg)
             deliver(cfg.factory, GitHub(cfg), only=args.id or args.retry)
         result = snapshot(cfg.factory)
+        if queue_errors:
+            result["queue_errors"] = queue_errors
         if args.id:
             result["incidents"] = [r for r in result["incidents"] if r["id"] == args.id]
             if not result["incidents"] and result["status"] == "observed":

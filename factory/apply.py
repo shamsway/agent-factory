@@ -311,10 +311,11 @@ def apply_escalate(
     dispatch.record("apply-escalate", ticket=n, pr=pr, reason=reason, run_id=run_id, target=target)
     # The terminal deployment is authoritative; outbox failures cannot replace it.
     try:
-        incidents.sync_failed(cfg)
-        incidents.deliver(cfg.factory, incidents.GitHub(cfg))
+        queue_errors = incidents.sync_failed(cfg)
+        if queue_errors:
+            log(f"#{n}: incident queue incomplete: {len(queue_errors)} run(s)")
     except Exception as exc:
-        log(f"#{n}: incident delivery skipped: {type(exc).__name__}")
+        log(f"#{n}: incident queue skipped: {type(exc).__name__}")
     body = f"`factory apply` did not proceed: {reason}."
     try:
         dispatch.run(
@@ -616,11 +617,6 @@ def main(argv: list[str]) -> int:
             log(f"private retention skipped: {type(error).__name__}; inspect with factory prune-private --dry-run")
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
         if not args.dry_run:
-            try:
-                incidents.sync_failed(cfg)
-                incidents.deliver(cfg.factory, incidents.GitHub(cfg))
-            except Exception as exc:
-                log(f"incident delivery skipped: {type(exc).__name__}")
             for rid, sinks in artifacts.retry_pending(cfg.factory, post_comment).items():
                 log(f"retried publication for {rid}: {sinks}")
         all_prs = fetch_all_merged_prs()
@@ -730,6 +726,16 @@ def main(argv: list[str]) -> int:
             return 0
         return 1 if has_errors and not args.dry_run else 0
     finally:
+        # One delivery pass, after all target/backend locks have been released.
+        # Escalation only queues: API latency must not extend a target's lock.
+        if not args.dry_run:
+            try:
+                queue_errors = incidents.sync_failed(cfg)
+                if queue_errors:
+                    log(f"incident queue incomplete: {len(queue_errors)} run(s)")
+                incidents.deliver(cfg.factory, incidents.GitHub(cfg))
+            except Exception as exc:
+                log(f"incident delivery skipped: {type(exc).__name__}")
         deploy.release_lock(lock_fd)
 
 
