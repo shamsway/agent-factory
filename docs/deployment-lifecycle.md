@@ -322,3 +322,46 @@ A direct commit was pushed to `main` bypassing PR review:
    baseline = "abc12345"
    ```
 3. Or revert the unapproved commit on `main`.
+
+
+## Deployment history in Ops
+
+The Deployments panel projects all recorded deployment attempts independently
+of the GitHub issue list, including failures attached to closed tickets. It
+shows target, revision, attempt, state transitions, health evidence and
+publication status. Target and status filters narrow the visible history.
+The newest 200 resolved attempts are displayed alongside every unresolved
+failure and unfinished attempt; counts explicitly report any truncation.
+
+Running records distinguish execution from verification. An unfinished run
+whose target lock is not held is shown as interrupted: this is an ownership
+observation, not proof that every orphaned subprocess is gone. Use `factory
+inspect --live` and the existing reconciliation procedure before recovery.
+Acknowledged and superseded failures retain their original failed outcome.
+Pending records are displayed when present; this view does not infer a pending
+deployment from an arbitrary merged PR or count unrecorded candidates.
+
+Success rate is successful attempts divided by successful plus failed attempts
+in retained deployment history. Skipped, cancelled and unfinished attempts do
+not enter that denominator. Mean execution duration uses only records with a
+duration; it excludes health-observation time. Queue duration is PR merge to
+attempt start, uses only records with a merge timestamp, and is recorded by
+new apply passes. Historical records without timestamps remain unavailable.
+Journal retention bounds these metrics; they are not lifetime totals.
+
+Result and log viewers use only manifest-authorized sanitized artifacts and
+verify their hashes when serving them. Historical journal output is excluded
+from the deployment projection. The generic `/api/file` route refuses both
+`events.jsonl` and rotated segments (also through symlink aliases), as well as
+private plans/state and raw apply logs. No historical journal rewrite is needed.
+The dashboard remains subject to its existing loopback/access restrictions.
+
+Private plans remain in `.factory/private/<run_id>/` for recovery. Automated
+retention is tracked separately by SHA-240; current storage is not pruned.
+Sanitizer coverage for unknown provider-emitted secret formats remains SHA-238.
+
+Validation: `scripts/test-linux.sh`; browser fixture:
+`node scripts/test-deployment-browser.cjs` with Playwright and its Chromium
+browser installed. Set `BROWSER_CHANNEL=chrome` to use an installed Chrome.
+The fixture exercises pending, executing, verifying, failed, interrupted,
+superseded and successful runs, filtering, and safe artifact text display.

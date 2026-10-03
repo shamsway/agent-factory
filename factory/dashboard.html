@@ -419,6 +419,15 @@
 <main id="ops">
   <div id="errors"></div>
   <section class="kpis" id="kpis" aria-label="Key metrics"></section>
+  <section class="panel" aria-label="Deployments">
+    <header><b>Deployments</b> recorded attempts · includes closed tickets</header>
+    <div class="body">
+      <label>Target <select id="deploy-target" aria-label="Deployment target"></select></label>
+      <label>Status <select id="deploy-status" aria-label="Deployment status"><option value="">All</option><option>pending</option><option>executing</option><option>verifying</option><option>failed</option><option>interrupted</option><option>superseded</option><option>succeeded</option><option>acknowledged</option></select></label>
+      <div id="deploy-metrics" role="status"></div>
+      <div id="deployments"></div>
+    </div>
+  </section>
   <section class="panel" aria-label="Worker metrics">
     <header><b>Workers</b> claim labels · first-attempt gate outcomes · all attempts · known cost</header>
     <div class="kpis" id="worker-metrics"></div>
@@ -1309,13 +1318,47 @@ function render() {
     renderRoadmap();
     return;
   }
-  renderStatus(); renderErrors(); renderKpis(); renderPipeline(); renderBoard(); renderFeed(); renderRuns(); renderUpstream(); renderLanes(); renderThroughput(); renderConfig();
+  renderDeployments(); renderStatus(); renderErrors(); renderKpis(); renderPipeline(); renderBoard(); renderFeed(); renderRuns(); renderUpstream(); renderLanes(); renderThroughput(); renderConfig();
   renderInboxHealth();
   renderReviewQueue();
   updateInbox();
   applyView();
   if (S.sel != null && !$('drawer').contains(document.activeElement) && !$('fm-dialog').open) renderDrawer();
 }
+function renderDeployments() {
+  const data = S.snap.deployments;
+  const list = $('deployments'), metric = $('deploy-metrics'), target = $('deploy-target');
+  if (!data) { list.replaceChildren(h('p', {}, 'Deployment history unavailable.')); return; }
+  const selected = target.value;
+  target.replaceChildren(h('option', { value: '' }, 'All targets'), ...data.targets.map(t => h('option', { value: t.target }, t.target)));
+  target.value = selected;
+  target.onchange = renderDeployments;
+  $('deploy-status').onchange = renderDeployments;
+  const m = data.metrics;
+  metric.textContent = `${m.recorded_attempts} recorded attempts · ${m.successes}/${m.success_denominator} completed executions succeeded · mean execution ${m.mean_execution_sec == null ? 'unavailable' : m.mean_execution_sec.toFixed(1) + 's'} (${m.duration_denominator} timed attempts) · mean queue ${m.mean_queue_sec == null ? 'unavailable' : m.mean_queue_sec.toFixed(1) + 's'} (${m.queue_denominator} merge timestamps)`;
+  const runs = data.runs.filter(r => (!target.value || r.target === target.value) && (!$('deploy-status').value || r.status === $('deploy-status').value));
+  list.replaceChildren(...runs.map(r => {
+    const details = h('details', { class: 'deployment-run', 'data-state': r.status },
+      h('summary', {}, `${r.unresolved ? 'Unresolved failure · ' : ''}${r.target} · ${r.status} · #${r.ticket} · ${(r.commit || 'unknown revision').slice(0,12)} · attempt ${r.attempt}`),
+      h('p', {}, `${r.run_id} · started ${r.started_at || 'unknown'} · finished ${r.completed_at || 'not recorded'}`),
+      h('ol', {}, ...r.timeline.map(t => h('li', {}, `${t.at || ''} · ${t.status === 'running' ? t.phase : t.status}`))),
+      h('pre', {}, r.verification ? JSON.stringify(r.verification, null, 2) : 'Health verification not recorded'),
+      h('pre', {}, r.result ? JSON.stringify(r.result, null, 2) : 'Sanitized result unavailable for this historical run'),
+      h('p', {}, `Publication: ${Object.entries(r.publication).map(([k,v]) => k + ': ' + v.status).join(' · ') || 'not recorded'}`));
+    for (const a of r.artifacts) {
+      const output = h('pre', { hidden: true });
+      details.append(h('button', { onclick: async () => {
+        output.hidden = false; output.textContent = 'Loading…';
+        try { const response = await fetch(a.url); if (!response.ok) throw new Error('Artifact unavailable or integrity check failed'); output.textContent = await response.text(); }
+        catch (e) { output.textContent = e.message; }
+      } }, `View ${a.name}`), output);
+    }
+    return details;
+  }));
+  if (!runs.length) list.append(h('p', {}, 'No recorded deployments match this filter.'));
+  if (data.history.truncated) list.append(h('p', {}, `${data.history.shown}/${data.history.total} attempts shown; unresolved runs are retained.`));
+}
+
 function renderStatus() {
   const d = S.snap.dispatcher, stale = S.failed || Date.now() - S.okAt > 180000;
   $('eyebrow').textContent = `${S.snap.repo} · factory`;

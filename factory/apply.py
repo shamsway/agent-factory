@@ -56,7 +56,7 @@ def merged_tickets(limit: int = 100) -> list[dict]:
     prs = dispatch.gh_json(
         [
             "pr", "list", "--repo", cfg.repo, "--state", "merged",
-            "--json", "number,headRefName,mergeCommit,reviewDecision,headRefOid,latestReviews",
+            "--json", "number,headRefName,mergeCommit,mergedAt,reviewDecision,headRefOid,latestReviews",
             "--limit", str(limit),
         ]
     )
@@ -73,6 +73,8 @@ def merged_tickets(limit: int = 100) -> list[dict]:
             else str(pr["mergeCommit"])
         )
         row = {"pr": pr["number"], "ticket": int(m.group(1)), "commit": merge_oid}
+        if pr.get("mergedAt"):
+            row["queued_at"] = pr["mergedAt"]
         if "headRefOid" in pr and pr["headRefOid"] is not None:
             row["head_commit"] = pr["headRefOid"]
         if "reviewDecision" in pr and pr["reviewDecision"] is not None:
@@ -129,6 +131,7 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
       nodes {{
         number
         headRefName
+        mergedAt
         headRefOid
         mergeCommit {{
           oid
@@ -167,7 +170,7 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
                 prs = dispatch.gh_json(
                     [
                         "pr", "list", "--repo", cfg.repo, "--state", "merged",
-                        "--json", "number,headRefName,mergeCommit,reviewDecision,headRefOid,latestReviews",
+                        "--json", "number,headRefName,mergeCommit,mergedAt,reviewDecision,headRefOid,latestReviews",
                         "--limit", str(page_size),
                     ]
                 )
@@ -200,6 +203,8 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
                 "ticket": int(m.group(1)),
                 "commit": merge_oid,
             }
+            if pr.get("mergedAt"):
+                row["queued_at"] = pr["mergedAt"]
             if pr.get("headRefOid"):
                 row["head_commit"] = pr["headRefOid"]
             if pr.get("reviewDecision"):
@@ -395,6 +400,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             ticket=n,
             attempt=attempt,
             status=deploy.DeployStatus.RUNNING,
+            queued_at=ticket.get("queued_at"),
             started_at=now,
             pr=pr,
             version=deploy.CONTRACT_VERSION,
@@ -404,6 +410,8 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         exec_res = adapter.execute(ctx, dry_run=False)
 
         if exec_res.ok:
+            running_run.phase = "verifying"
+            deploy.record_deploy_run(running_run)
             try:
                 v_ok, v_err = adapter.verify(ctx)
             except Exception as verify_err:  # an applied change is never reported healthy by default
@@ -429,6 +437,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             error=artifacts.sanitize(exec_res.error or "", secrets) or None,
             version=deploy.CONTRACT_VERSION,
             verification=artifacts.sanitize_tree(verification, secrets) if verification else None,
+            queued_at=ticket.get("queued_at"),
         )
 
         # Durable disk persistence written BEFORE artifacts and notifications!

@@ -184,11 +184,11 @@ class NomadPolicyTest(unittest.TestCase):
     def test_service_without_deployment_counts_current_allocations(self) -> None:
         self.nomad.on("GET", "/v1/job/web", SERVICE)
         stale = {"JobVersion": 6, "DesiredStatus": "run", "ClientStatus": "running"}
-        cur = {"JobVersion": 7, "DesiredStatus": "run", "ClientStatus": "running"}
+        cur = {"TaskGroup": "web", "JobVersion": 7, "DesiredStatus": "run", "ClientStatus": "running"}
         self.nomad.on("GET", "/v1/job/web/allocations", [stale, cur], [stale, cur, cur])
         ok, reason, ev = self.verify(plan_with(job("web")))
         self.assertTrue(ok, reason)
-        self.assertEqual(ev["items"][0]["observed"]["allocations"], {"running": 2, "wanted": 2, "failed": 0})
+        self.assertEqual(ev["items"][0]["observed"]["allocations"], {"groups": {"web": {"running": 2, "wanted": 2}}, "failed": 0})
 
     def test_service_that_never_converges_times_out(self) -> None:
         self.nomad.on("GET", "/v1/job/web", SERVICE)
@@ -374,3 +374,59 @@ interval = 1
 
 if __name__ == "__main__":
     unittest.main()
+
+class HealthRegressionTest(unittest.TestCase):
+    def test_missing_group_cannot_be_hidden_by_extra_allocations(self):
+        live = {"Type": "service", "Version": 7,
+                "TaskGroups": [{"Name": "web", "Count": 1}, {"Name": "worker", "Count": 1}]}
+        allocs = [{"TaskGroup": "web", "JobVersion": 7, "DesiredStatus": "run", "ClientStatus": "running"}] * 2
+        def api(method, path, params=None):
+            if path.endswith('/deployment'): return None
+            if path.endswith('/allocations'): return allocs
+            return live
+        item = health.NomadJob({"id": "web", "namespace": "default", "region": "", "removed": False}, "registered")
+        state, _ = item.step(api)
+        self.assertEqual(state, health.PENDING)
+        self.assertEqual(item.observed['allocations']['groups']['worker']['running'], 0)
+
+    def test_observation_after_deadline_is_not_healthy(self):
+        now = [0.0]
+        def api(*args):
+            now[0] += 10
+            return PERIODIC
+        ok, _, evidence = health.verify(policy(timeout=1), plan=plan_with(job('collector')),
+            cwd=Path('.'), env={}, api=api, clock=lambda: now[0], sleep=lambda _: None)
+        self.assertFalse(ok)
+        self.assertEqual(evidence['items'][0]['state'], 'timeout')
+
+    def test_deadline_prevents_starting_another_item(self):
+        now = [0.0]
+        calls = []
+        def api(method, path, params=None):
+            calls.append(path)
+            now[0] += 2
+            return PERIODIC
+        ok, _, evidence = health.verify(policy(timeout=1), plan=plan_with(job('one'), job('two')),
+            cwd=Path('.'), env={}, api=api, clock=lambda: now[0], sleep=lambda _: None)
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(evidence['items'][1]['polls'], 0)
+
+    def test_http_timeout_uses_remaining_window(self):
+        with mock.patch.object(health.urllib.request, 'urlopen', side_effect=OSError('down')) as request:
+            api = health.nomad_api('http://nomad', deadline=1.5, clock=lambda: 1.0)
+            with self.assertRaises(health.NomadError): api('GET', '/v1/job/test')
+            self.assertEqual(request.call_args.kwargs['timeout'], 0.5)
+            expired = health.nomad_api('http://nomad', deadline=1, clock=lambda: 2)
+            with self.assertRaises(health.NomadError): expired('GET', '/v1/job/test')
+            self.assertEqual(request.call_count, 1)
+
+    def test_system_job_with_queued_placement_is_not_healthy(self):
+        live={"Type":"system","Version":7,"TaskGroups":[{"Name":"agent","Count":1}]}
+        def api(method,path,params=None):
+            if path.endswith('/deployment'): return None
+            if path.endswith('/allocations'): return [{"TaskGroup":"agent","JobVersion":7,"DesiredStatus":"run","ClientStatus":"running"}]
+            if path.endswith('/summary'): return {"Summary":{"agent":{"Running":1,"Queued":1}}}
+            return live
+        item=health.NomadJob({"id":"agents","namespace":"default","region":"","removed":False},'registered')
+        self.assertEqual(item.step(api)[0],health.PENDING)

@@ -49,7 +49,8 @@ def _clip(text: str) -> str:
     return text if len(text) <= DETAIL_MAX else "..." + text[-(DETAIL_MAX - 3):]
 
 
-def nomad_api(addr: str, token: str = "") -> Callable[..., Any]:
+def nomad_api(addr: str, token: str = "", *, deadline: float | None = None,
+              clock: Callable[[], float] = time.monotonic) -> Callable[..., Any]:
     """`api(method, path, params)` -> decoded JSON, or None for a 404."""
     base = addr if "://" in addr else f"http://{addr}"
     base = base.rstrip("/")
@@ -61,7 +62,10 @@ def nomad_api(addr: str, token: str = "") -> Callable[..., Any]:
         if token:
             req.add_header("X-Nomad-Token", token)
         try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            remaining = HTTP_TIMEOUT if deadline is None else min(HTTP_TIMEOUT, deadline - clock())
+            if remaining <= 0:
+                raise NomadError("verification deadline reached")
+            with urllib.request.urlopen(req, timeout=remaining) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as e:
             e.close()
@@ -200,12 +204,27 @@ class NomadJob(_Item):
         running = [a for a in current if a.get("ClientStatus") == "running"
                    and (a.get("DeploymentStatus") or {}).get("Healthy") is not False]
         failed = [a for a in current if a.get("ClientStatus") in ("failed", "lost")]
-        want = sum(int(tg.get("Count") or 0) for tg in live.get("TaskGroups") or []) \
-            if live.get("Type") == "service" else 1
-        want = max(want, 1)
-        self.observed["allocations"] = {"running": len(running), "wanted": want, "failed": len(failed)}
-        detail = f"{len(running)}/{want} allocation(s) of version {version} running, {len(failed)} failed"
-        return (HEALTHY if len(running) >= want else PENDING), detail
+        groups = live.get("TaskGroups") or []
+        coverage = {}
+        for group in groups:
+            name = group.get("Name", "")
+            have = sum(a.get("TaskGroup") == name for a in running)
+            want = int(group.get("Count") or 0)
+            coverage[name] = {"running": have, "wanted": want}
+        if live.get("Type") == "system":
+            # System placement is determined by the scheduler rather than Count.
+            summary = api("GET", self._path("job", jid, "summary"), self._params()) or {}
+            reported = summary.get("Summary") or {}
+            for name, group in coverage.items():
+                row = reported.get(name)
+                if row is None or row.get("Queued", 0) or row.get("Starting", 0):
+                    return PENDING, f"system placement for {name} is not complete"
+                group["wanted"] = max(1, int(row.get("Running") or 0))
+        self.observed["allocations"] = {"groups": coverage, "failed": len(failed)}
+        detail = "; ".join(f"{name}: {g['running']}/{g['wanted']} allocation(s) running"
+                           for name, g in coverage.items())
+        complete = bool(coverage) and all(g["running"] >= g["wanted"] for g in coverage.values())
+        return (HEALTHY if complete else PENDING), detail
 
     def evidence(self) -> dict:
         return {"kind": "nomad_job", "id": self.job["id"], "namespace": self.job["namespace"],
@@ -222,7 +241,9 @@ class Check(_Item):
         self.exit: int | None = None
 
     def step(self, remaining: float) -> tuple[str, str]:
-        limit = max(1.0, min(float(self.check.timeout or remaining), remaining))
+        limit = min(float(self.check.timeout or remaining), remaining)
+        if limit <= 0:
+            return PENDING, "verification deadline reached"
         env = {**os.environ, **self.env}
         try:
             proc = subprocess.Popen(self.check.run, cwd=self.cwd, env=env, stdin=subprocess.DEVNULL,
@@ -255,6 +276,8 @@ def verify(policy: Any, *, plan: dict | None, cwd: Path, env: dict[str, str],
     Returns (ok, one-line reason, evidence). Never raises for target trouble:
     an unreachable API is an item that stays pending until the deadline.
     """
+    start = clock()
+    deadline = start + policy.timeout
     items: list[_Item] = []
     if policy.nomad:
         if plan is None:
@@ -266,15 +289,15 @@ def verify(policy: Any, *, plan: dict | None, cwd: Path, env: dict[str, str],
             items += [NomadJob(j, policy.periodic) for j in nomad_jobs(plan)]
         addr = policy.nomad_addr or env.get("NOMAD_ADDR", "")
         if api is None and addr:
-            api = nomad_api(addr, env.get("NOMAD_TOKEN", ""))
+            api = nomad_api(addr, env.get("NOMAD_TOKEN", ""), deadline=deadline, clock=clock)
     items += [Check(c, cwd, env) for c in policy.checks]
 
-    start = clock()
-    deadline = start + policy.timeout
     while True:
         for item in items:
             if item.state != PENDING:
                 continue
+            if clock() >= deadline:
+                break
             item.polls += 1
             try:
                 if isinstance(item, NomadJob):
@@ -283,11 +306,13 @@ def verify(policy: Any, *, plan: dict | None, cwd: Path, env: dict[str, str],
                         continue
                     item.state, item.detail = item.step(api)
                 else:
-                    item.state, item.detail = item.step(max(1.0, deadline - clock()))
+                    item.state, item.detail = item.step(deadline - clock())
             except NomadError as e:
                 item.state, item.detail = PENDING, f"Nomad API unavailable: {e}"
             except Exception as e:  # noqa: BLE001 -- a verifier bug must fail the run, not crash it
                 item.state, item.detail = UNHEALTHY, f"verification error: {type(e).__name__}: {e}"
+            if clock() >= deadline and item.state == HEALTHY:
+                item.state, item.detail = PENDING, "observation arrived after verification deadline"
         failed = any(i.state == UNHEALTHY for i in items)
         if failed or all(i.state != PENDING for i in items) or clock() >= deadline:
             break

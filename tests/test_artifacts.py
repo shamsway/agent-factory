@@ -230,6 +230,9 @@ class LookupAndServingTest(unittest.TestCase):
             (f / "apply-checkout").mkdir()
             (f / "apply-checkout" / "terraform.tfstate").write_text(f"state {SECRET}")
             (f / "logs" / "worker-1.log").write_text("worker ok")
+            (f / "events.jsonl").write_text("pre-contract unsanitized output")
+            (f / "events.jsonl.1.gz").write_bytes(b"pre-contract rotated output")
+            (f / "journal-alias").symlink_to(f / "events.jsonl")
             with mock.patch.object(dashboard, "FACTORY", f, create=True):
                 srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
                 threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -251,6 +254,7 @@ class LookupAndServingTest(unittest.TestCase):
                     self.assertEqual(get("/api/artifacts/default/..%2f..%2fevents.jsonl")[0], 404)
                     self.assertEqual(get("/api/file?path=logs/worker-1.log"), (200, "worker ok"))
                     for private in (
+                        "events.jsonl", "events.jsonl.1.gz", "journal-alias",
                         "apply-checkout/terraform.tfstate",
                         f"private/{rid}/plan",
                         f"artifacts/default/{rid}/manifest.json",
