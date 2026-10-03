@@ -386,7 +386,9 @@ every failed run not explicitly acknowledged or superseded. A later successful
 attempt does not by itself acknowledge an older failed run. Directories absent
 from retained journal history, ambiguous ownership and symlink directories are
 kept for operator inspection. No plan contents are read, posted or served.
-Unreadable history aborts pruning. Failed deletions are reported and retried
+Unreadable history aborts pruning. Apply logs a metadata-only retention warning
+and continues deployment when retention raises; the standalone prune-private
+command fails loudly. Failed deletions are reported and retried
 on a later pass; this does not rewrite deployment outcomes.
 
 Preview with `factory prune-private --dry-run`. This CLI is serialized with
@@ -449,3 +451,7 @@ rejects missing/incomplete evidence before a model can approve. The reviewer
 checks the summary against the diff; the syntax gate does not prove a plan
 actually ran. Software-only workflows are unaffected. Update the description
 when revisions change the plan; never paste secrets or the raw plan.
+
+PR-description publication and review allow up to ten seconds for GitHub to
+report the pushed head before rejecting a mismatch. Only the matching gated
+revision is accepted; polling never approves a different revision.

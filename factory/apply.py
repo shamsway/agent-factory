@@ -601,8 +601,13 @@ def main(argv: list[str]) -> int:
         return 0
     try:
         from factory import retention
-        private = retention.prune(cfg.factory, dry_run=args.dry_run)
-        log(f"private retention: {'would prune' if args.dry_run else 'pruned'} {len(private['removed'])} runs; {len(private['retained'])} retained; {len(private['errors'])} errors")
+        try:
+            private = retention.prune(cfg.factory, dry_run=args.dry_run)
+            log(f"private retention: {'would prune' if args.dry_run else 'pruned'} {len(private['removed'])} runs; {len(private['retained'])} retained; {len(private['errors'])} errors")
+        except Exception as error:
+            # Optional housekeeping must not become a deployment prerequisite.
+            # Exception text may contain private paths or malformed raw rows.
+            log(f"private retention skipped: {type(error).__name__}; inspect with factory prune-private --dry-run")
         dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root)
         if not args.dry_run:
             for rid, sinks in artifacts.retry_pending(cfg.factory, post_comment).items():
