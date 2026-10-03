@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from factory import artifacts, config, deploy, dispatch, incidents, tf_plan_check
+from factory import artifacts, config, deploy, diagnostics, dispatch, incidents, tf_plan_check
 from factory.config import Config
 
 cfg: Config
@@ -457,6 +457,12 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             prefix = "terraform apply" if target_obj.adapter == "terraform" else f"{target_obj.adapter} deploy"
             artifacts.write_run_artifacts(cfg.factory, final_run, log_path=exec_res.log_path,
                                           secrets=secrets, headline=f"`{prefix}`")
+            if not exec_res.ok and target_obj.diagnostics is not None:
+                try:
+                    bundle = diagnostics.collect(final_run, diagnostics.policy(target_obj.diagnostics), ctx.env)
+                    artifacts.write_diagnostics(cfg.factory, final_run, bundle)
+                except Exception as diagnostic_err:
+                    log(f"#{n}: diagnostics unavailable: {type(diagnostic_err).__name__}")
             sinks = artifacts.publish(cfg.factory, target, final_run.run_id, post_comment)
             if any(st == "pending" for st in sinks.values()):
                 log(f"#{n}: publication pending retry ({sinks})")
