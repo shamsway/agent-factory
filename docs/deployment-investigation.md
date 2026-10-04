@@ -2,8 +2,8 @@
 
 SHA-201 begins with two trusted security components. They are library code for
 review, not an activated worker route. Diagnostics remain off on live targets.
-The legacy `ready-for-investigation` worker is not fenced by these libraries;
-no raw bundle may be handed to it. No model process, broker endpoint, GitHub
+The legacy `ready-for-investigation` worker is refused for deployment roots by
+the routing fence described below; no raw bundle may be handed to it. No model process, broker endpoint, GitHub
 sender, target enablement or production repair is installed by this change.
 
 ## Trusted evidence reader
@@ -121,6 +121,17 @@ metadata and requires a delivered, unambiguous root issue in the configured repo
 If the incident routing itself is missing/unsafe, posting is refused; the future
 outbox must preserve an operator-visible local failure. No posting transport is
 installed by these functions.
+
+Deployment roots are refused before legacy worker admission, including forced
+execution or a changed label. Both frontier and freshly queried issue bodies
+are checked for the incident marker; local incident issue mappings independently
+block marker removal. All legacy investigation jobs are disabled in repositories
+with a private incident store. The free-form findings publisher independently
+checks fresh routing and refuses before reading its handoff or making a write.
+Unsafe/unavailable routing fails closed. Unrelated software implementation tickets
+remain schedulable. This is a routing fence, not process/file/network isolation:
+an isolated replacement investigator and its trusted delivery remain outstanding.
+Keep diagnostics disabled until that replacement is installed and accepted.
 
 Nomad 2.0.4 [deployment states](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/deployment.go)
 include pending, initializing and unblocking; these are allowlisted. Unknown state
