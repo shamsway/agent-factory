@@ -161,8 +161,8 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
         p = policy(cfg.investigation)
         if p["key"] or p["enabled"] or scope == "investigation":
             status = credential_status(cfg)
-            if live and status == "configured":
-                status = "not_checked"  # Never spend/export evidence for an auth probe.
+            if live and status in {"configured", "configured_shared"}:
+                status = "not_checked_shared" if status == "configured_shared" else "not_checked"  # Never spend/export evidence for an auth probe.
             rows.append({"scope": "investigation", "key": KEY_NAME, "status": status})
     return rows
 

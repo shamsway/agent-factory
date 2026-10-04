@@ -50,11 +50,11 @@ class ModelRefused(ValueError):
 def policy(raw):
     defaults = {"enabled": False, "allow_export": False, "url": "", "model": "", "key": "",
                 "allow_loopback_http": False, "max_input_bytes": 16384,
-                "max_output_tokens": 1024, "token_budget": 32768, "timeout": 30, "max_requests": 2, "send_store_false": False}
+                "max_output_tokens": 1024, "token_budget": 32768, "timeout": 30, "max_requests": 2, "send_store_false": False, "allow_shared_model_key": False}
     if not isinstance(raw, dict) or set(raw) - set(defaults):
         raise config.ConfigError("invalid investigation settings")
     p = {**defaults, **raw}
-    for name in ("enabled", "allow_export", "allow_loopback_http", "send_store_false"):
+    for name in ("enabled", "allow_export", "allow_loopback_http", "send_store_false", "allow_shared_model_key"):
         if type(p[name]) is not bool:
             raise config.ConfigError("invalid investigation flag")
     for name, lower, upper in (("max_input_bytes", 1024, evidence.MAX_PROJECTION),
@@ -91,10 +91,17 @@ def credential_status(cfg):
     key = p["key"]
     if not key:
         return "empty" if p["enabled"] else "not_configured"
-    others = [cfg.llm_key, *cfg.apply_env.values(), *cfg.install["env"].values()]
-    if any(key == str(value) for value in others if value):
+    model_names = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LITELLM_API_KEY"}
+    # Operator-approved model sharing never permits apply or control-plane keys.
+    forbidden = [*cfg.apply_env.values(), *(value for name, value in cfg.install["env"].items()
+                                           if name not in model_names)]
+    if any(key == str(value) for value in forbidden if value):
         return "invalid"
+    shared = [cfg.llm_key, *(value for name, value in cfg.install["env"].items() if name in model_names)]
+    if any(key == str(value) for value in shared if value):
+        return "configured_shared" if p["allow_shared_model_key"] else "invalid"
     return "configured"
+
 
 
 # Executed as fixed trusted code in a clean subprocess. Parent wall timeout also
@@ -271,7 +278,7 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
     p = policy(cfg.investigation)
     if not p["enabled"] or not p["allow_export"]:
         raise ModelRefused("model_export_disabled")
-    if credential_status(cfg) != "configured":
+    if credential_status(cfg) not in {"configured", "configured_shared"}:
         raise ModelRefused("model_credential_invalid")
     projection = evidence.read_evidence(cfg.factory, incident_id, run_id, now=now)
     if projection.repository != cfg.repo:
@@ -371,7 +378,7 @@ def reset(cfg, incident_id, run_id, *, reason, acknowledge_uncertain=False, dry_
     if reason not in RESET_REASONS or type(acknowledge_uncertain) is not bool:
         raise ModelRefused("invalid_reset")
     p = policy(cfg.investigation)
-    if not p["enabled"] or not p["allow_export"] or credential_status(cfg) != "configured":
+    if not p["enabled"] or not p["allow_export"] or credential_status(cfg) not in {"configured", "configured_shared"}:
         raise ModelRefused("model_export_disabled")
     projection = evidence.read_evidence(cfg.factory, incident_id, run_id, now=now)
     if projection.repository != cfg.repo:
