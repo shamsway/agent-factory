@@ -194,3 +194,20 @@ relabel it for the legacy investigator. Another comment on every relabel/pass
 is intentionally avoided. Comment-author binding remains a follow-up alongside
 the dedicated publisher identity; current marker adoption is a deduplication
 hint, never permission to run a worker or deploy. Labels use config.LABEL_*.
+
+### Unactivated OS boundary
+
+`investigation_isolation.run` is a Linux-only, fail-closed primitive, not an
+active investigator. It runs trusted worker code with projection bytes on stdin
+in strict user, PID, network, IPC and UTS namespaces. Root is read-only; only
+system binaries/libraries, a private proc/dev and a bounded temporary filesystem
+are mounted. Home, repository, Factory store, host sockets and configuration are
+absent. Environment and inherited descriptors are cleared. Sealed anonymous
+files carry input/code; wall time, address space, CPU, file size, descriptor count
+and combined output have limits. Raw returned bytes still require the trusted
+publisher's validation. No credential or network delegation is implemented.
+
+This shares the host kernel and is not a VM. Aggregate process/memory controls,
+seccomp policy, model broker integration and accepted live investigation remain
+work before activation. There is no fallback when bubblewrap is unavailable.
+See [bubblewrap's upstream manual](https://github.com/containers/bubblewrap/blob/main/bwrap.xml).
