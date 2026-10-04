@@ -77,6 +77,10 @@ class RoutingTests(unittest.TestCase):
         worker.assert_not_called()
         worktree.assert_not_called()
 
+    def test_inaccessible_routing_is_not_mistaken_for_absent_store(self):
+        with mock.patch.object(Path, "lstat", side_effect=PermissionError("private path")):
+            self.assertEqual(investigation_routing.blocked(self.factory, self.issue), "incident_routing_unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()
