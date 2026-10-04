@@ -192,6 +192,17 @@ class RoutingTests(unittest.TestCase):
             investigation_routing.handoff(dispatch.cfg, 11, remote=remote)
         remote.api.assert_not_called()
 
+    def test_concurrent_handoff_lock_prevents_second_publisher(self):
+        self.handoff_patch.stop()
+        import fcntl
+        root = self.factory / "routing-handoffs"
+        root.mkdir()
+        with (root / "11.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            remote = mock.Mock()
+            self.assertFalse(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
+            remote.api.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,7 +60,7 @@ def handoff(cfg, number, *, remote=None):
 
     Reconcile by REST marker listing after a lost response. A missing marker
     after uncertainty is not proof that GitHub did not accept the comment.
-    Label edits are idempotent and retryable after the comment is confirmed.
+    Label edits are idempotent and retryable even if comment delivery is uncertain.
     """
     import fcntl
     from .investigation_evidence import read_json
