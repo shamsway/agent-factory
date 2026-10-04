@@ -464,3 +464,24 @@ and [workspace controls](https://support.claude.com/en/articles/9796807-creating
 
 Use a workspace-scoped key. Multi-workspace personal/service-account keys need
 an anthropic-workspace-id header, which this first-cut broker does not configure.
+
+### Operator-approved reuse of an existing model credential
+
+A dedicated key remains the default. An operator who already has provider budget
+controls may explicitly enable host-only allow_shared_model_key to reuse an
+existing triage key or install-role ANTHROPIC_API_KEY / OPENAI_API_KEY /
+LITELLM_API_KEY. Verification reports configured_shared (not_checked_shared with
+--live), never claims dedicated credential isolation, and still makes no API call.
+Apply credential values and non-model install credentials remain forbidden even
+with this setting. Existing provider budget controls and same-user credential
+access limitations apply; no new key, cap or OS boundary is implied. This option
+does not add any key to unit/worker environments or change installed services.
+
+The trusted model endpoint remains interchangeable. After commercial synthetic
+acceptance, test a separately pinned Lemonade model against the same evidence,
+usage/output/refusal gates. Primary/local and commercial backup routing needs a
+separate acceptance decision: no automatic fallback after an unknown outcome and
+no combined-budget reset when changing providers. Existing LiteLLM may supply
+such routes, but its own retries and logging must be reviewed before live evidence
+is routed through it. First reuse acceptance can call Anthropic directly to keep
+Factory's one-request/one-invocation boundary observable.

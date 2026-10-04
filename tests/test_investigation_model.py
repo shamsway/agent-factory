@@ -354,6 +354,23 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(state["code"], "connection_refused")
         self.assertEqual(state["request_count"], 1)
 
+    def test_explicit_shared_model_key_preserves_apply_boundary(self):
+        self.cfg.install = copy.deepcopy(self.cfg.install)
+        key = self.cfg.investigation["key"]
+        self.cfg.install["env"]["ANTHROPIC_API_KEY"] = key
+        self.assertEqual(model.credential_status(self.cfg), "invalid")
+        self.cfg.investigation["allow_shared_model_key"] = True
+        self.assertEqual(model.credential_status(self.cfg), "configured_shared")
+        self.assertEqual(verify_secrets.credential_rows(self.cfg, "investigation", False)[0]["status"], "configured_shared")
+        self.assertEqual(verify_secrets.credential_rows(self.cfg, "investigation", True)[0]["status"], "not_checked_shared")
+        self.assertEqual(self.call(client=self.client)["state"], "complete")
+        for name in ("GH_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"):
+            self.cfg.install["env"][name] = key
+            self.assertEqual(model.credential_status(self.cfg), "invalid")
+            del self.cfg.install["env"][name]
+        self.cfg.apply_env["ANTHROPIC_API_KEY"] = key
+        self.assertEqual(model.credential_status(self.cfg), "invalid")
+
     def test_verify_secrets_separate_role_and_no_live_export(self):
         rows = verify_secrets.credential_rows(self.cfg, "all", False)
         self.assertIn({"scope": "investigation", "key": model.KEY_NAME, "status": "configured"}, rows)
