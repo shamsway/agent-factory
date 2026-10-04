@@ -164,7 +164,7 @@ def prepare_for_incident(factory, repository: str, incident_id: str, run_id: str
     The sender must deduplicate this key, persist delivery and use its own role.
     """
     projection = read_evidence(factory, incident_id, run_id, now=now)
-    require(projection.repository == repository and projection.issue is not None,
+    require(projection.repository == repository and projection.issue is not None and projection.deliverable,
             "publication_destination_unavailable")
     body = render(projection, raw_result)
     key = "investigation-" + projection.sha256
