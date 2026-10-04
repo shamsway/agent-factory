@@ -302,16 +302,23 @@ class BoundaryTests(unittest.TestCase):
 
     def test_refusal_escalation_needs_no_bundle_or_projection(self):
         self.delivered()
-        for key, value in (("logs_enabled", True), ("dropped_observations", 1)):
+        original = copy.deepcopy(self.bundle)
+        for key, value, code in (("logs_enabled", True, "logs_not_allowed"),
+                                 ("dropped_observations", 1, "partial_evidence"),
+                                 ("commit", "f" * 40, "bundle_identity_mismatch")):
+            self.bundle = copy.deepcopy(original)
             self.bundle[key] = value
             self.write_bundle()
             try:
                 self.read()
             except evidence.EvidenceRefused as exc:
+                self.assertEqual(str(exc), code)
                 envelope = publication.prepare_refusal(self.factory, "acme/widgets", self.root_id, str(exc))
                 self.assertEqual(envelope.issue, 11)
                 self.assertIn("No diagnosis", envelope.body)
                 self.assertNotIn(SECRET, envelope.body)
+            else:
+                self.fail("evidence must be refused")
         (self.path / "diagnostics.json").unlink()
         envelope = publication.prepare_refusal(self.factory, "acme/widgets", self.root_id, "unsafe_or_missing_file")
         self.assertEqual(envelope.issue, 11)
