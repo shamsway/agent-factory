@@ -38,7 +38,7 @@ ALLOC_STATES = frozenset({"pending", "running", "complete", "failed", "lost", "u
 EVAL_STATES = frozenset({"pending", "complete", "failed", "blocked", "canceled"})
 DEPLOY_STATES = frozenset({"running", "paused", "successful", "failed", "cancelled", "blocked"})
 EVENT_TYPES = frozenset({"Received", "Task Setup", "Driver", "Started", "Terminated", "Restarting",
-    "Not Restarting", "Killing", "Killed", "OOM Killed", "Sibling Task Failed", "Failed Validation"})
+    "Not Restarting", "Killing", "Killed", "Sibling Task Failed", "Failed Validation"})
 
 
 class EvidenceRefused(ValueError):
@@ -281,10 +281,16 @@ def project(bundle, run, now):
                 require(isinstance(failed, dict) and len(failed) <= 50)
                 for metric in failed.values():
                     require(isinstance(metric, dict))
-                    for key, out in (("NodesAvailable", "nodes_available"), ("NodesExhausted", "resources_exhausted")):
-                        if key in metric:
-                            require(number(metric[key]))
-                            metrics[out] += metric[key]
+                    # Nomad exposes NodesAvailable by datacenter, not a scalar.
+                    # Retain only its total; arbitrary datacenter names stay private.
+                    available = metric.get("NodesAvailable") or {}
+                    require(isinstance(available, dict) and len(available) <= 128)
+                    for count in available.values():
+                        require(number(count))
+                        metrics["nodes_available"] += count
+                    if "NodesExhausted" in metric:
+                        require(number(metric["NodesExhausted"]))
+                        metrics["resources_exhausted"] += metric["NodesExhausted"]
                     dimensions = metric.get("DimensionExhausted") or {}
                     require(isinstance(dimensions, dict) and len(dimensions) <= 128)
                     for dimension in ("cpu", "memory", "disk"):
@@ -338,6 +344,9 @@ def project(bundle, run, now):
                         event_type = "Other"
                     fields = {**scope, "allocation": alias("allocation", aid), "task": alias("task", name),
                         "state": task["State"], "event_type": event_type, "event_time": utc(et / 1e9), "relation": "recorded_health_version"}
+                    if "OOMKilled" in event:
+                        require(type(event["OOMKilled"]) is bool)
+                        fields["oom_killed"] = event["OOMKilled"]
                     for key in ("ExitCode", "Signal"):
                         if key in event:
                             require(type(event[key]) is int and 0 <= event[key] <= 65535)

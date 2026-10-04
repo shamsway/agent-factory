@@ -45,13 +45,13 @@ class BoundaryTests(unittest.TestCase):
                     "Status": "running", "Env": {"password": SECRET}}),
                 row("nomad/job/worker/evaluations", [{"ID": EID, "JobID": "worker", "Namespace": "infra",
                     "Status": "blocked", "ModifyTime": (NOW - 30) * 10**9, "StatusDescription": SECRET,
-                    "FailedTGAllocs": {SECRET: {"NodesAvailable": 3, "NodesExhausted": 2,
+                    "FailedTGAllocs": {SECRET: {"NodesAvailable": {SECRET: 3}, "NodesExhausted": 2,
                         "ConstraintFiltered": {SECRET: 2}, "DimensionExhausted": {"cpu": 2, "memory": 1, SECRET: 5}}}}]),
                 row("nomad/job/worker/allocations", [{"ID": AID, "JobID": "worker", "Namespace": "infra",
                     "JobVersion": 2, "ClientStatus": "failed", "DesiredStatus": SECRET,
                     "CreateTime": (NOW - 40) * 10**9, "ModifyTime": (NOW - 10) * 10**9}]),
                 row("nomad/allocation/" + AID, {"ID": AID, "JobID": "worker", "Namespace": "infra", "tasks": {
-                    SECRET: {"State": "dead", "Failed": True, "Events": [{"Type": "OOM Killed",
+                    SECRET: {"State": "dead", "Failed": True, "Events": [{"Type": "Terminated", "OOMKilled": True,
                         "Time": (NOW - 20) * 10**9, "ExitCode": 137, "DisplayMessage": SECRET}]}}},
                     {"allocation": AID}),
                 row("nomad/allocation/" + AID + "/main/stdout", {"text": SECRET}),
@@ -186,8 +186,9 @@ class BoundaryTests(unittest.TestCase):
 
     def test_unknown_event_type_exit_137_and_current_state_never_prove_oom(self):
         event = self.bundle["observations"][3]["data"]["tasks"][SECRET]["Events"][0]
-        for event_type in ("Terminated", SECRET):
+        for event_type, oom in (("Terminated", False), (SECRET, True)):
             event["Type"] = event_type
+            event["OOMKilled"] = oom
             self.write_bundle()
             projection = self.read()
             with self.assertRaises(evidence.EvidenceRefused):
@@ -221,7 +222,7 @@ class BoundaryTests(unittest.TestCase):
         body = publication.render_for_incident(self.factory, self.root_id, self.run.run_id,
                                               self.result(projection), now=NOW + 2)
         self.assertIn("explicit OOM event", body)
-        self.bundle["observations"][1]["data"][0]["FailedTGAllocs"][SECRET]["NodesAvailable"] = 4
+        self.bundle["observations"][1]["data"][0]["FailedTGAllocs"][SECRET]["NodesAvailable"] = {SECRET: 4}
         self.write_bundle()
         with self.assertRaises(evidence.EvidenceRefused):
             publication.render_for_incident(self.factory, self.root_id, self.run.run_id,

@@ -56,8 +56,10 @@ free-form prose, destination changes, unsupported claims and stale hashes are
 refused. Escalations also use fixed reason codes and templates.
 
 A placement/resource finding requires a blocked/failed evaluation and its
-supporting numeric counter. OOM requires an explicit allowed OOM task event on
-recorded version lineage. Templates describe observed symptoms and review steps,
+supporting numeric counter. OOM requires a Terminated task event with an explicit
+normalized OOMKilled=true on recorded version lineage. The collector accepts
+only Details["oom_killed"] equal to the literal "true" or "false" and emits a
+boolean; it never retains the arbitrary Details map. Templates describe observed symptoms and review steps,
 including uncertainty, validation, risks and rollback. They never assert that an
 exit code establishes a cause, nor generate concrete edits or file scope. The
 later investigation logic must validate repository scope before a fix proposal.
@@ -98,3 +100,5 @@ log-assisted publication require a separate explicit secret-review gate outside
 this first cut; paraphrasing does not make unknown workload secrets safe.
 Phase order stays 1 → 2 → 4 → 3 → 5. PR #3's accepted follow-up can ship with the
 first SHA-201 runtime release. No merge/apply authority comes from findings.
+
+API shape checked against Nomad 2.0.4: [allocation metrics](https://github.com/hashicorp/nomad/blob/v2.0.4/api/allocations.go) expose NodesAvailable as a datacenter map, and [task event OOM signal](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/structs.go) is set in Details["oom_killed"]. Datacenter names are omitted and counts summed; arbitrary event Details stay excluded.

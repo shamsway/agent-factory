@@ -43,7 +43,7 @@ def supports(code, row):
     if row.get("status") != "observed":
         return False
     if code == "OOM_EVENT":
-        return (row.get("kind") == "task_event" and row.get("event_type") == "OOM Killed"
+        return (row.get("kind") == "task_event" and row.get("event_type") == "Terminated" and row.get("oom_killed") is True
                 and row.get("relation") == "recorded_health_version")
     if row.get("kind") != "evaluation" or row.get("state") not in ("blocked", "failed"):
         return False
