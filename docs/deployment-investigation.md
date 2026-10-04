@@ -160,3 +160,37 @@ New and reopened SHA-199 deployment incidents are also labelled ready-for-human
 until the isolated investigator is accepted. Repeated failure delivery therefore
 does not put a handed-off root back into the legacy lane. The incident body
 explicitly states this temporary handoff policy.
+
+## Routing observability and retained incident identities
+
+`factory inspect` includes incident_routing: current scan health/count, explicit
+not_pruned retention, last repository-wide availability transition/audit state,
+and per-issue handoff comment state. `factory doctor` fails for unavailable
+routing/receipt observation and warns on uncertain/failed comments or an
+uncertain journal audit attempt. Metadata uses fixed codes, statuses, validated
+IDs/timestamps and HTTP status codes only; raw error text/paths are omitted.
+
+Dispatch records incident-routing-unavailable once per outage and
+incident-routing-recovered once when a non-incident identity scan succeeds.
+A durable repository receipt deduplicates transitions across tickets/passes and
+restart. Persist intent before the journal attempt; an interrupted attempt is
+reported as audit=uncertain and is not blindly repeated. This receipt remains
+observable even when the journal write fails. Repair/reconcile the invalid store
+or scan constraint, then let the next successful dispatch scan record recovery.
+
+Incident JSON records are not pruned: they retain outbox/deduplication and root
+identity history. The old 256-record hard cap is removed. Directory enumeration
+is streamed under the existing two-second scan budget; a 301-record regression
+stays routable. Larger stores can still exhaust the time budget, now reported
+explicitly rather than producing a silent stop. A scalable durable issue index
+or reviewed archival policy remains follow-up work; do not delete incident
+records casually to restore scheduling.
+
+Handoff journal records include comment_state. Definite HTTP request rejections
+are reported as failed/HTTPxxx, distinct from uncertain transport outcomes;
+humans are still notified by labels, and neither state is automatically reposted.
+A completed handoff's existing fixed comment explains a later manual attempt to
+relabel it for the legacy investigator. Another comment on every relabel/pass
+is intentionally avoided. Comment-author binding remains a follow-up alongside
+the dedicated publisher identity; current marker adoption is a deduplication
+hint, never permission to run a worker or deploy. Labels use config.LABEL_*.

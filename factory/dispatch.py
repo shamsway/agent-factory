@@ -968,12 +968,20 @@ def pr_comment(n: int, text: str) -> None:
 
 def refuse_investigation_route(n, reason, *, dry_run=False):
     log(f"#{n}: refused ({reason})")
-    if dry_run or reason != "deployment_incident_requires_isolated_route":
+    if dry_run:
         return
     from factory import investigation_routing
+    if reason == "incident_routing_unavailable":
+        try:
+            investigation_routing.note_availability(cfg, False, record)
+        except Exception as exc:
+            log(f"routing audit unavailable ({type(exc).__name__})")
+        return
     try:
         if investigation_routing.handoff(cfg, n):
-            record("investigation-route-refused", ticket=n, reason=reason, handed_to_human=True)
+            receipt = investigation_routing.snapshot(FACTORY)
+            comment = next((r["comment"] for r in receipt["handoffs"] if r["issue"] == n), "unavailable")
+            record("investigation-route-refused", ticket=n, reason=reason, handed_to_human=True, comment_state=comment)
     except Exception as exc:
         log(f"#{n}: routing handoff pending ({type(exc).__name__})")
 
@@ -984,7 +992,7 @@ def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
     from factory import investigation_routing
     try:
         fresh = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "body"])
-        refusal = investigation_routing.blocked(FACTORY, {**fresh, "number": n}, legacy_investigation=True)
+        refusal = investigation_routing.blocked(FACTORY, {**fresh, "number": n})
     except Exception:
         refusal = "incident_routing_unavailable"
     if refusal:
@@ -1828,10 +1836,15 @@ def process_ticket(
     investigation = LABEL_INVESTIGATE in labels
     lane_label = LABEL_INVESTIGATE if investigation else LABEL_AGENT
     from factory import investigation_routing
-    refusal = investigation_routing.blocked(FACTORY, issue, legacy_investigation=investigation)
+    refusal = investigation_routing.blocked(FACTORY, issue)
     if refusal:
         refuse_investigation_route(n, refusal, dry_run=dry_run)
         return
+    if not dry_run:
+        try:
+            investigation_routing.note_availability(cfg, True, record)
+        except Exception as exc:
+            log(f"routing recovery audit unavailable ({type(exc).__name__})")
     wt = FACTORY / f"wt-{n}"
     worker = cfg.worker(labels, wt / ".factory-prompt.md", wt)[0]
 
@@ -1897,8 +1910,7 @@ def process_ticket(
                     "state,labels,assignees,title,body,comments",
                 ]
             )
-            refusal = investigation_routing.blocked(FACTORY, {**fresh, "number": n},
-                                                       legacy_investigation=investigation)
+            refusal = investigation_routing.blocked(FACTORY, {**fresh, "number": n})
             if refusal:
                 refuse_investigation_route(n, refusal)
                 execution.outcome = "not_admitted"
