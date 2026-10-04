@@ -6,6 +6,7 @@ A label change, forced ticket, or stale frontier body cannot bypass this fence.
 from __future__ import annotations
 
 import os
+import stat
 import time
 
 from . import incidents
@@ -21,8 +22,14 @@ def blocked(factory, issue, *, legacy_investigation=False):
     # Infrastructure repositories may still have unrelated software tickets,
     # but no legacy investigation may start while they own a private store.
     store = factory / "incidents"
-    if not store.exists() and not store.is_symlink():
+    try:
+        metadata = store.lstat()
+    except FileNotFoundError:
         return None
+    except OSError:
+        return "incident_routing_unavailable"
+    if not stat.S_ISDIR(metadata.st_mode):
+        return "incident_routing_unavailable"
     if legacy_investigation:
         return "deployment_incident_requires_isolated_route"
     try:
