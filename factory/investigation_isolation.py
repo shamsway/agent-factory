@@ -14,12 +14,52 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
+import math
 
 from .investigation_evidence import MAX_PROJECTION, Projection
 
 MAX_CODE = 64 * 1024
 MAX_OUTPUT = 8192
 MAX_SECONDS = 30
+MAX_TASKS = 32
+MAX_MEMORY = 256 * 1024 * 1024
+
+# Trusted bootstrap runs inside the scope before any worker starts. Read actual
+# kernel limits, not just systemd properties: missing controllers fail closed.
+CGROUP_CHECK = """import os,sys
+from pathlib import Path
+try:
+    rows=Path('/proc/self/cgroup').read_text().splitlines()
+    rows=[r[3:] for r in rows if r.startswith('0::')]
+    assert len(rows)==1 and Path(rows[0]).name==sys.argv[1]
+    root=Path('/sys/fs/cgroup') / rows[0].lstrip('/')
+    for name,limit in [('pids.max',32),('memory.max',268435456),('memory.swap.max',0)]:
+        actual=int((root/name).read_text().strip())
+        assert 0 <= actual <= limit
+    quota,period=(root/'cpu.max').read_text().split()
+    assert 0 < int(quota) <= int(period)
+except Exception:
+    sys.exit(125)
+os.execv(sys.argv[2],sys.argv[2:])
+"""
+
+
+def scope_command(code_fd: int, unit: str, timeout: float) -> list[str]:
+    return ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect",
+            "--no-ask-password", "--expand-environment=no", "--unit=" + unit,
+            "--property=TasksMax=" + str(MAX_TASKS),
+            "--property=MemoryMax=" + str(MAX_MEMORY), "--property=MemorySwapMax=0",
+            "--property=CPUQuota=100%", "--property=RuntimeMaxSec=" + str(math.ceil(timeout)),
+            "/usr/bin/python3", "-I", "-S", "-c", CGROUP_CHECK, unit, *command(code_fd)]
+
+
+def scope_environment() -> dict[str, str]:
+    # Only the fixed local user-manager bus is reachable by the trusted launcher.
+    # bubblewrap clears this again; the worker never sees the socket or variables.
+    runtime = "/run/user/" + str(os.getuid())
+    return {"XDG_RUNTIME_DIR": runtime,
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + runtime + "/bus"}
 
 
 class IsolationRefused(RuntimeError):
@@ -69,7 +109,7 @@ def run(projection: Projection, code: bytes, *, timeout: float = MAX_SECONDS) ->
         raise IsolationRefused("invalid_timeout")
     if sys.platform != "linux" or not hasattr(os, "memfd_create"):
         raise IsolationRefused("isolation_unavailable")
-    for name in ("bwrap", "python3", "prlimit"):
+    for name in ("bwrap", "python3", "prlimit", "systemd-run", "systemctl"):
         try:
             info = Path("/usr/bin", name).stat()
             if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
@@ -78,11 +118,14 @@ def run(projection: Projection, code: bytes, *, timeout: float = MAX_SECONDS) ->
             raise IsolationRefused("isolation_unavailable") from None
     data_fd = code_fd = None
     child = None
+    unit = "factory-investigation-" + uuid.uuid4().hex + ".scope"
+    environment = scope_environment()
     try:
         data_fd = _sealed(projection.payload)
         code_fd = _sealed(code)
-        child = subprocess.Popen(command(code_fd), stdin=data_fd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, env={}, close_fds=True,
+        child = subprocess.Popen(scope_command(code_fd, unit, timeout), stdin=data_fd,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=environment, close_fds=True,
                                  pass_fds=(code_fd,), start_new_session=True)
         deadline = time.monotonic() + timeout
         result = bytearray()
@@ -109,6 +152,8 @@ def run(projection: Projection, code: bytes, *, timeout: float = MAX_SECONDS) ->
                 status = child.wait(timeout=max(0.001, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 raise IsolationRefused("worker_timeout") from None
+        if status == 125:
+            raise IsolationRefused("cgroup_unavailable")
         if status:
             raise IsolationRefused("worker_failed")
         return bytes(result)
@@ -123,6 +168,16 @@ def run(projection: Projection, code: bytes, *, timeout: float = MAX_SECONDS) ->
             except ProcessLookupError:
                 pass
             child.wait()
+            # Scope lifetime outlives the launcher if descendants remain. Stop
+            # this generated unit only; never kill by user or command pattern.
+            try:
+                subprocess.run(["/usr/bin/systemctl", "--user", "stop", unit],
+                               env=environment, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=5, check=False)
+            except (OSError, subprocess.TimeoutExpired):
+                # RuntimeMaxSec still bounds cleanup if the manager is unreachable.
+                pass
             child.stdout.close()
             child.stderr.close()
         for fd in (data_fd, code_fd):
