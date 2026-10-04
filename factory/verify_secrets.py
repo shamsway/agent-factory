@@ -156,6 +156,14 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
             elif live and key not in LIVE_CHECKS and value:
                 status = "not_checked"
             rows.append({"scope": name, "key": key, "status": status})
+    if scope in ("all", "investigation"):
+        from .investigation_model import credential_status, KEY_NAME, policy
+        p = policy(cfg.investigation)
+        if p["key"] or p["enabled"] or scope == "investigation":
+            status = credential_status(cfg)
+            if live and status == "configured":
+                status = "not_checked"  # Never spend/export evidence for an auth probe.
+            rows.append({"scope": "investigation", "key": KEY_NAME, "status": status})
     return rows
 
 
@@ -165,7 +173,7 @@ def main(argv: list[str]) -> int:
         description="Compare installed unit credentials and optionally validate scoped credentials; values are never printed.",
     )
     parser.add_argument("--live", action="store_true", help="validate configured GH/1Password credentials in isolated subprocesses")
-    parser.add_argument("--scope", choices=("install", "apply", "all"), default="install")
+    parser.add_argument("--scope", choices=("install", "apply", "investigation", "all"), default="install")
     parser.add_argument("--json", action="store_true", help="emit names/statuses as JSON")
     args = parser.parse_args(argv)
     try:
@@ -174,7 +182,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"ok": False, "error": "configuration_unavailable"}))
         return 1
     try:
-        rows = sync_rows(cfg) if args.scope != "apply" else []
+        rows = sync_rows(cfg) if args.scope not in ("apply", "investigation") else []
         sync_error = None
     except (OSError, subprocess.SubprocessError):
         rows, sync_error = [], "unit_inspection_unavailable"

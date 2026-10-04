@@ -113,7 +113,8 @@ blind retries. No free-text response, tool call, endpoint override or invented
 reference can trigger code, diagnostics, publication, merge or apply. Reject
 invalid responses and use the fixed human-escalation path. Public delivery has
 its own durable receipt and identity; returning model JSON is not authority.
-These transport/budget/outbox components remain unimplemented and unactivated.
+The transport and private budget/result receipts are implemented below; trusted
+public outbox/delivery and route activation remain unimplemented.
 
 The first cut does **not** invoke `investigation_isolation.run`. That primitive
 is retained for a separately reviewed future deterministic/code-tool use. It
@@ -272,3 +273,98 @@ repaired outage can remain the latest transition until a successful non-incident
 admission scan records recovery; doctor/inspect's current scan is authoritative.
 Concurrent availability writers use a nonblocking lock and can log harmless
 audit contention without duplicating transition records.
+
+## Bounded model transport and private receipts
+
+`investigation_model.investigate` is a trusted library entrypoint, unactivated
+in dispatch. It reloads authenticated evidence itself; neither a model nor a
+worker supplies a projection, destination, endpoint or credential. No sandbox,
+agent CLI, tools or generated code runs. Job/task/namespace/target/run identifiers
+were already hashed aliases; now aliased identifiers must first match
+`[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. Group/datacenter names remain omitted. This
+prevents raw workload strings from becoming prompt instructions. Structured
+versions, counts, timestamps, commit hashes and correlation aliases still leave
+the host when export is explicitly enabled; aliases are not anonymity guarantees.
+
+All `[investigation]` settings are **host-only**; a committed table is rejected.
+Example within the protected host configuration, never a consumer repo:
+
+```toml
+[repo."owner/name".investigation]
+enabled = false
+allow_export = false
+url = "https://approved-provider.example/v1/chat/completions"
+model = "operator-pinned-model-id"
+# key = <dedicated credential stored only in protected host configuration>
+max_input_bytes = 16384
+max_output_tokens = 1024
+token_budget = 32768
+timeout = 30
+```
+
+The operator must deliberately approve endpoint/model and the metadata export,
+then provide a dedicated key before enabling a controlled call. No fallback to
+triage settings, general agent commands, apply/install environment or shell keys.
+`verify-secrets --scope all` (or `--scope investigation`) reports the logical
+FACTORY_INVESTIGATION_MODEL_KEY role using names/statuses only and rejects a
+value reused by triage/apply/install. The key is not added to systemd unit or
+worker environments, and apply-isolation checks are unchanged. `--live` reports
+this key as not_checked: verification never spends a request or exports evidence
+as an authentication probe. A separately authorized provider call is needed to
+prove real authentication and compatibility.
+
+The adapter uses the OpenAI-compatible chat-completions shape, a fixed model,
+`max_completion_tokens`, `tool_choice=none`, no streaming and no provider storage
+request. It requires an exact returned model ID, finish_reason=stop, complete
+integer token usage and a valid closed-schema result. Providers must support and
+honor these fields; no compatibility fallback is automatic. The request shape is
+based on the [official client schema](https://github.com/openai/openai-python/blob/main/src/openai/types/chat/completion_create_params.py).
+
+TLS is required; explicitly configured numeric loopback HTTP is available only
+for local fixtures (`allow_loopback_http=true`). Redirects and environment proxies
+are disabled. A clean trusted HTTP subprocess receives the model key on stdin,
+never argv/environment. Its parent bounds wall time including DNS/slow responses;
+HTTP bodies are capped at 64 KiB, model result at 8 KiB. No provider error body,
+raw response, secret-bearing exception or unrestricted model prose is logged or
+persisted. Only publisher-validated enum/reference JSON and numeric usage survive.
+
+Before network access, an atomic/fsynced private receipt in
+`.factory/investigations/` stores incident/run/repo identity, projection/policy/
+prompt/request hashes, one request reservation, token/time/input/response budgets
+and state=uncertain. A per-run nonblocking lock serializes callers. All ancestors,
+locks and JSON reads refuse symlinks; duplicate keys and oversized state refuse.
+After response, persist complete/failed/uncertain and sanitized result/usage.
+Every existing receipt suppresses automatic retry, including HTTP rejection,
+timeout, transport failure, crash and changed policy/evidence; no attempt is
+silently refunded. Human reconciliation is required before any new request.
+
+Input-token accounting reserves UTF-8 message bytes plus 1024 tokens of protocol
+overhead; this is a conservative operational allowance, **not exact tokenization
+or a universal tokenizer proof**. Reserve the configured maximum completion
+allowance too; refuse requests above token_budget before export. Provider-reported
+prompt/completion/total usage must fit the reservations and sum consistently.
+Provider output cap enforcement and usage truthfulness still need acceptance
+against the operator's chosen provider; local fixtures do not prove billing or
+real inference behavior.
+
+`factory inspect` reports only configuration/export flags and counts of receipt
+states. Doctor warns on unavailable state observation or uncertain requests.
+`investigation_model.prepare` reloads evidence and prepares the trusted root-issue
+fixed publication; it does not post. Failed/uncertain calls produce fixed human
+escalation, and refused evidence can use the existing refusal renderer without a
+model call. Changed projections cannot publish an old proposal.
+
+Acceptance fixtures exercise successful correlated placement/resource/OOM
+proposals, unsupported escalation, hostile/unknown-secret output, invalid refs,
+stale evidence, tools/usage/model/size refusal, disabled export, credential reuse,
+reservation-before-call, interrupted writes, crash/timeout replay and local HTTP
+redirect/proxy/body/time limits. No external provider or production incident was
+used. Remaining SHA-201 gates: genuine provider acceptance, explicit activation,
+durable public outbox/delivery, validated concrete repository scope/proposals and
+controlled end-to-end acceptance. Diagnostics/logs remain off; PRs #3/#4 stay
+draft. Sandbox code is frozen; its exit-125 classification ambiguity is a known
+low-priority limitation for any future separate activation review.
+
+No model-receipt reset/retry command is implemented in this slice. Preserve the
+receipt and its consumed budget while reviewing an uncertain or failed outcome;
+do not delete it to manufacture another automatic request.

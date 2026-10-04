@@ -79,7 +79,7 @@ DASHBOARD_ALLOW_REMOTE_VAR = "FACTORY_DASHBOARD_ALLOW_REMOTE"
 # must run the same gate, so gate checks, leak scan and upstream never come
 # from here. Everything else in the host file is left for other tools (District).
 # `worker_wrap` is host-only: a committed `[worker_wrap]` is refused, never merged.
-HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "review", "manager", "install"})
+HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "review", "manager", "install", "investigation"})
 # `apply.env` is credential-shaped like `install.env` -- host-owned so it
 # never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
 # are policy about this repo (does merging it trigger terraform apply, and
@@ -98,6 +98,8 @@ KNOWN_KEYS = {
     "gate": ("timeout", "lock", "check"),
     "leak_scan": ("pattern", "exclude"),
     "triage": ("url", "model", "key"),
+    "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
+                      "max_input_bytes", "max_output_tokens", "token_budget", "timeout"),
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),
@@ -249,6 +251,7 @@ class Config:
     llm_url: str = DEFAULT_LLM_URL
     llm_model: str = DEFAULT_LLM_MODEL
     llm_key: str = ""  # bearer token for a gated endpoint (e.g. LiteLLM); host config only, never committed
+    investigation: dict = field(default_factory=dict, repr=False)  # host-only model role
     manager_model: str | None = None  # dashboard's no-tools OMP briefing; never a command
     dashboard_port: int = 8765
     dashboard_theme: Path | None = None  # CSS file served after the built-in stylesheet
@@ -471,6 +474,8 @@ def load(start: Path | None = None) -> Config:
     slug = raw.get("repo", {}).get("slug") or remote_slug(root, "origin")
     host = host_config()
     for section in (host.get("defaults", {}), host.get("repo", {}).get(slug, {})):
+        if "investigation" in section and not isinstance(section["investigation"], dict):
+            raise ConfigError("host investigation must be a table")
         if "worker_wrap" in section and not isinstance(section["worker_wrap"], dict):
             raise ConfigError(f"{host_config_path()}: worker_wrap must be a table")
     layered = merge(host_filter(host.get("defaults", {})), host_filter(host.get("repo", {}).get(slug, {})))
@@ -478,7 +483,11 @@ def load(start: Path | None = None) -> Config:
     repo_t, dispatch, workers = raw.get("repo", {}), raw.get("dispatch", {}), raw.get("workers", {})
     gate, leak, triage, dash = raw.get("gate", {}), raw.get("leak_scan", {}), raw.get("triage", {}), raw.get("dashboard", {})
     manager = raw.get("manager", {})
+    if "investigation" in raw_repo:
+        raise ConfigError("[investigation] is host-only")
     cfg = Config(root=root, repo=slug, raw_repo=raw_repo)
+    from .investigation_model import policy
+    cfg.investigation = policy(raw.get("investigation", {}))
     cfg.upstream = repo_t.get("upstream") or None
     cfg.main = repo_t.get("main", cfg.main)
     cfg.max_active = int(dispatch.get("max_active", cfg.max_active))
