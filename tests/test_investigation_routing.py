@@ -21,6 +21,9 @@ class RoutingTests(unittest.TestCase):
         row = incidents.read(path)
         row.update(issue=11, status="delivered", uncertain=False)
         incidents.write(path, row)
+        self.handoff_patch = mock.patch.object(investigation_routing, "handoff", return_value=False)
+        self.handoff_mock = self.handoff_patch.start()
+        self.addCleanup(self.handoff_patch.stop)
         self.issue = {"number": 11, "title": "incident", "body": "", "labels": [{"name": config.LABEL_AGENT}]}
 
     def tearDown(self):
@@ -40,12 +43,12 @@ class RoutingTests(unittest.TestCase):
             dispatch.finish_investigation(12, self.factory / "missing-worktree", None)
         public.assert_not_called()
 
-    def test_legacy_lane_blocked_for_any_ticket_with_private_incident_store(self):
+    def test_nonincident_investigation_allowed_with_private_store(self):
         issue = {**self.issue, "number": 12, "labels": [{"name": config.LABEL_INVESTIGATE}]}
-        with mock.patch.object(dispatch, "run_worker") as worker:
+        self.assertIsNone(investigation_routing.blocked(self.factory, issue, legacy_investigation=True))
+        with mock.patch.object(dispatch, "initiative_kind", return_value=False), mock.patch.object(dispatch, "log") as log:
             dispatch.process_ticket(issue, 1, True)
-        worker.assert_not_called()
-        self.assertIsNone(investigation_routing.blocked(self.factory, {**issue, "number": 13}))
+        self.assertIn("run investigation worker", str(log.call_args_list))
 
     def test_unknown_or_symlink_routing_fails_closed(self):
         store = self.factory / "incidents"
@@ -80,6 +83,76 @@ class RoutingTests(unittest.TestCase):
     def test_inaccessible_routing_is_not_mistaken_for_absent_store(self):
         with mock.patch.object(Path, "lstat", side_effect=PermissionError("private path")):
             self.assertEqual(investigation_routing.blocked(self.factory, self.issue), "incident_routing_unavailable")
+
+    def test_handoff_once_and_restart_then_no_legacy_findings(self):
+        self.handoff_patch.stop()
+        class Remote:
+            def __init__(self):
+                self.comments = []
+                self.labels = [{"name": config.LABEL_INVESTIGATE}, {"name": "other"}]
+                self.posts = self.edits = 0
+                self.lost = False
+            def api(remote, endpoint, payload=None, method="GET"):
+                if method == "POST":
+                    remote.posts += 1
+                    remote.comments.append(payload)
+                    if remote.lost:
+                        remote.lost = False
+                        raise TimeoutError()
+                    return {"id": 123}
+                if method == "PATCH":
+                    remote.edits += 1
+                    remote.labels = [{"name": x} for x in payload["labels"]]
+                    return {}
+                if "/comments?" in endpoint:
+                    return remote.comments
+                return {"labels": remote.labels}
+        remote = Remote()
+        with mock.patch.object(incidents, "GitHub", return_value=remote):
+            for _ in range(3):
+                dispatch.process_ticket(self.issue, 1, False, forced=True)
+            self.assertEqual(remote.posts, 1)
+            self.assertEqual(remote.edits, 1)
+            self.assertIn({"name": config.LABEL_HUMAN}, remote.labels)
+            self.assertNotIn({"name": config.LABEL_INVESTIGATE}, remote.labels)
+            self.assertIn({"name": "other"}, remote.labels)
+            events = [__import__("json").loads(x) for x in dispatch.EVENTS.read_text().splitlines()]
+            self.assertEqual(sum(x.get("event") == "investigation-route-refused" for x in events), 1)
+        # Lost response is adopted after restart, never a second comment.
+        (self.factory / "routing-handoffs" / "11.json").unlink()
+        remote.comments = []
+        remote.posts = remote.edits = 0
+        remote.lost = True
+        self.assertTrue(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
+        self.assertFalse(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
+        self.assertEqual(remote.posts, 1)
+        self.assertEqual(remote.edits, 1)
+
+    def test_uncertain_missing_comment_never_reposted(self):
+        self.handoff_patch.stop()
+        class Remote:
+            posts = 0
+            def api(remote, endpoint, payload=None, method="GET"):
+                if method == "POST":
+                    remote.posts += 1
+                    raise TimeoutError()
+                if method == "PATCH":
+                    return {}
+                if "/comments?" in endpoint:
+                    return []
+                return {"labels": []}
+        remote = Remote()
+        self.assertTrue(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
+        self.assertFalse(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
+        self.assertEqual(remote.posts, 1)
+
+    def test_inflight_nonincident_findings_survive_store_creation(self):
+        wt = self.factory / "wt-12"
+        (wt / ".factory").mkdir(parents=True)
+        (wt / ".factory" / "handoff-12.md").write_text("ordinary software findings")
+        with mock.patch.object(dispatch, "gh_json", return_value={"body": ""}), mock.patch.object(dispatch, "run") as public:
+            dispatch.finish_investigation(12, wt, None)
+        self.assertTrue(any("ordinary software findings" in str(call) for call in public.call_args_list))
 
 
 if __name__ == "__main__":
