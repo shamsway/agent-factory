@@ -353,6 +353,17 @@ def checkout_state(cfg: config.Config) -> tuple[bool, str]:
     return (not problems), ("; ".join(problems) if problems else f"on {cfg.main}, clean")
 
 
+def _incident_routing_checks(cfg, report):
+    from . import investigation_routing
+    routing = investigation_routing.snapshot(cfg.factory)
+    report(routing["status"] == "observed" and routing["receipt_status"] == "observed",
+           "incident routing", routing["reason"] or routing["receipt_status"])
+    unresolved = sum(r["comment"] in {"uncertain", "failed"} for r in routing["handoffs"])
+    report(None if unresolved else True, "incident handoff comments", f"{unresolved} uncertain/failed; see factory inspect")
+    if (routing.get("last_transition") or {}).get("audit") == "uncertain":
+        report(None, "incident routing audit", "journal attempt uncertain; inspect local routing receipt")
+
+
 def doctor(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory doctor", description="Check tools, auth, remotes, config drift, and the triage model."
@@ -513,6 +524,8 @@ def doctor(argv: list[str]) -> int:
             f"already set here, would leak into anything installed from this shell: {', '.join(leaked)}"
             if leaked else "clean",
         )
+
+    _incident_routing_checks(cfg, report)
 
     fails = sum(r["status"] == "FAIL" for r in rows)
     if args.json:

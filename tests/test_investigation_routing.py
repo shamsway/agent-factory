@@ -45,7 +45,7 @@ class RoutingTests(unittest.TestCase):
 
     def test_nonincident_investigation_allowed_with_private_store(self):
         issue = {**self.issue, "number": 12, "labels": [{"name": config.LABEL_INVESTIGATE}]}
-        self.assertIsNone(investigation_routing.blocked(self.factory, issue, legacy_investigation=True))
+        self.assertIsNone(investigation_routing.blocked(self.factory, issue))
         with mock.patch.object(dispatch, "initiative_kind", return_value=False), mock.patch.object(dispatch, "log") as log:
             dispatch.process_ticket(issue, 1, True)
         self.assertIn("run investigation worker", str(log.call_args_list))
@@ -202,6 +202,88 @@ class RoutingTests(unittest.TestCase):
             remote = mock.Mock()
             self.assertFalse(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
             remote.api.assert_not_called()
+
+    def test_unavailable_once_recovery_and_recurrence_reported(self):
+        import json
+        broken = self.factory / "incidents" / "broken.json"
+        broken.write_text("{}")
+        with mock.patch.object(dispatch, "run_worker") as worker:
+            for number in (12, 13, 12):
+                dispatch.process_ticket({**self.issue, "number": number}, 1, False)
+        worker.assert_not_called()
+        events = [json.loads(x) for x in dispatch.EVENTS.read_text().splitlines()]
+        self.assertEqual(sum(e.get("event") == "incident-routing-unavailable" for e in events), 1)
+        result = investigation_routing.snapshot(self.factory)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(result["last_transition"]["active"])
+        broken.unlink()
+        self.assertIsNone(investigation_routing.blocked(self.factory, {**self.issue, "number": 12}))
+        investigation_routing.note_availability(dispatch.cfg, True, dispatch.record)
+        investigation_routing.note_availability(dispatch.cfg, True, dispatch.record)
+        broken.write_text("{}")
+        dispatch.process_ticket({**self.issue, "number": 12}, 1, False)
+        events = [json.loads(x) for x in dispatch.EVENTS.read_text().splitlines()]
+        self.assertEqual(sum(e.get("event") == "incident-routing-unavailable" for e in events), 2)
+        self.assertEqual(sum(e.get("event") == "incident-routing-recovered" for e in events), 1)
+
+    def test_more_than_256_retained_incidents_do_not_disable_repo(self):
+        import json
+        original = json.loads((self.factory / "incidents" / (self.root + ".json")).read_text())
+        for ticket in range(100, 400):
+            row = dict(original, original_ticket=ticket)
+            row["id"] = incidents.identity(dispatch.REPO, "default", ticket)
+            (self.factory / "incidents" / (row["id"] + ".json")).write_text(json.dumps(row))
+        result = investigation_routing.snapshot(self.factory)
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["incident_count"], 301)
+        self.assertEqual(result["retention"], "not_pruned")
+        self.assertIsNone(investigation_routing.blocked(self.factory, {**self.issue, "number": 12}))
+
+    def test_scan_timeout_observed_without_mutation(self):
+        with mock.patch.object(investigation_routing.time, "monotonic", side_effect=[0, 3]):
+            result = investigation_routing.inventory(self.factory)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["reason"], "scan_timeout")
+        self.assertFalse((self.factory / "routing-handoffs").exists())
+
+    def test_uncertain_audit_visible_after_failed_journal_attempt(self):
+        with self.assertRaises(RuntimeError):
+            investigation_routing.note_availability(dispatch.cfg, False, mock.Mock(side_effect=RuntimeError()))
+        writer = mock.Mock()
+        self.assertFalse(investigation_routing.note_availability(dispatch.cfg, False, writer))
+        writer.assert_not_called()
+        self.assertEqual(investigation_routing.snapshot(self.factory)["last_transition"]["audit"], "uncertain")
+
+    def test_definite_comment_rejection_is_visible_as_failed(self):
+        self.handoff_patch.stop()
+        class Remote:
+            def api(remote, endpoint, payload=None, method="GET"):
+                if method == "POST":
+                    raise incidents.RequestRefused(403)
+                if method == "PATCH":
+                    return {}
+                if "/comments?" in endpoint:
+                    return []
+                return {"labels": []}
+        self.assertTrue(investigation_routing.handoff(dispatch.cfg, 11, remote=Remote()))
+        receipt = investigation_routing.snapshot(self.factory)["handoffs"][0]
+        self.assertEqual((receipt["comment"], receipt["last_error"]), ("failed", "HTTP403"))
+
+    def test_inspect_includes_routing_and_receipt_health(self):
+        from factory import inspection
+        investigation_routing.note_availability(dispatch.cfg, False, dispatch.record)
+        (self.factory / "incidents" / "broken.json").write_text("{}")
+        result = inspection.inspect(dispatch.cfg)
+        self.assertEqual(result["incident_routing"]["status"], "unavailable")
+        self.assertFalse(result["complete"])
+        self.assertFalse(result["ok"])
+
+    def test_doctor_reports_routing_failure_and_comment_attention(self):
+        from factory import onboard
+        (self.factory / "incidents" / "broken.json").write_text("{}")
+        rows = []
+        onboard._incident_routing_checks(dispatch.cfg, lambda ok, label, detail: rows.append((ok, label, detail)))
+        self.assertIn((False, "incident routing", "identity_scan_unavailable"), rows)
 
 
 if __name__ == "__main__":
