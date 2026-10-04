@@ -251,7 +251,8 @@ def _read(fd, name):
     for attempt in state["attempts"]:
         if (not isinstance(attempt, dict) or attempt.get("state") not in {"uncertain", "complete", "failed", "retryable"}
                 or any(type(attempt.get(k)) is not int or attempt[k] < 0 for k in
-                       ("reserved_input_tokens", "reserved_output_tokens", "time_budget_sec"))):
+                       ("reserved_input_tokens", "reserved_output_tokens", "time_budget_sec"))
+                or ("validation_reason" in attempt and attempt["validation_reason"] not in VALIDATION_REASONS)):
             raise ModelRefused("invalid_state")
     for total, per_attempt in (("reserved_input_tokens", "reserved_input_tokens"),
                                ("reserved_output_tokens", "reserved_output_tokens"),
@@ -261,33 +262,88 @@ def _read(fd, name):
     return state
 
 
+VALIDATION_REASONS = {
+    "validated", "wire_shape", "response_budget", "body_not_json", "model_shape",
+    "choices_shape", "finish_reason", "message_shape", "content_shape", "fenced",
+    "content_not_json", "usage_shape", "usage_budget", "usage_total", "hash_mismatch",
+    "schema", "refs", "result_budget", "projection", "validation_unavailable",
+}
+
+
+class ResponseRefused(ModelRefused):
+    def __init__(self, reason):
+        self.reason = reason if reason in VALIDATION_REASONS else "validation_unavailable"
+        super().__init__("invalid_response")
+
+
 def _response(wire, p, projection, reserved):
-    if not isinstance(wire, dict) or wire.get("status") != "ok" or not isinstance(wire.get("body"), str):
-        raise ModelRefused("invalid_response")
-    if len(wire["body"].encode()) > MAX_HTTP:
-        raise ModelRefused("response_budget")
+    # Only fixed stage codes escape this parser. Provider text stays in memory.
+    reason = "wire_shape"
     try:
-        body = json.loads(wire["body"], object_pairs_hook=evidence.unique_pairs)
-        choices = body["choices"]
-        if (not isinstance(body["model"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", body["model"])
-                or len(choices) != 1 or choices[0]["finish_reason"] != "stop"):
+        if not isinstance(wire, dict) or wire.get("status") != "ok" or not isinstance(wire.get("body"), str):
             raise ValueError
+        reason = "response_budget"
+        if len(wire["body"].encode()) > MAX_HTTP:
+            raise ValueError
+        reason = "body_not_json"
+        body = json.loads(wire["body"], object_pairs_hook=evidence.unique_pairs)
+        reason = "model_shape"
+        if not isinstance(body["model"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}", body["model"]):
+            raise ValueError
+        reason = "choices_shape"
+        choices = body["choices"]
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise ValueError
+        reason = "finish_reason"
+        if choices[0]["finish_reason"] != "stop":
+            raise ValueError
+        reason = "message_shape"
         message = choices[0]["message"]
         if message.get("role") != "assistant" or message.get("tool_calls") or message.get("function_call"):
             raise ValueError
-        raw = message["content"].encode()
+        reason = "content_shape"
+        content = message["content"]
+        if not isinstance(content, str):
+            raise ValueError
+        # Accept one whole-content Markdown wrapper only. Never extract JSON
+        # from prose, nested/multiple fences, or an arbitrary language block.
+        content = content.strip()
+        if content.startswith("```"):
+            reason = "fenced"
+            match = re.fullmatch(r"```(?:json)?\r?\n(.*?)\r?\n```", content, re.DOTALL)
+            if match is None or "```" in match[1]:
+                raise ValueError
+            content = match[1]
+        raw = content.encode()
+        reason = "result_budget"
+        if len(raw) > publication.MAX_RESULT:
+            raise ValueError
+        reason = "content_not_json"
+        result = json.loads(raw, object_pairs_hook=evidence.unique_pairs)
+        reason = "usage_shape"
         usage = body["usage"]
+        keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+        if not isinstance(usage, dict) or any(type(usage.get(k)) is not int or usage[k] < 0 for k in keys):
+            raise ValueError
+        reason = "usage_budget"
         for key, limit in (("prompt_tokens", reserved), ("completion_tokens", p["max_output_tokens"]),
                            ("total_tokens", p["token_budget"])):
-            if type(usage[key]) is not int or not 0 <= usage[key] <= limit:
+            if usage[key] > limit:
                 raise ValueError
+        reason = "usage_total"
         if usage["total_tokens"] != usage["prompt_tokens"] + usage["completion_tokens"]:
             raise ValueError
-        publication.render(projection, raw)  # Includes size, schema, hash and reference proof.
-        return json.loads(raw, object_pairs_hook=evidence.unique_pairs), {k: usage[k] for k in
-                                        ("prompt_tokens", "completion_tokens", "total_tokens")}, body["model"]
+        reason = "schema"
+        try:
+            publication.render(projection, raw)  # Same closed schema and reference proof.
+        except evidence.EvidenceRefused as error:
+            reason = {"stale_result": "hash_mismatch", "unsupported_finding": "refs",
+                      "unsupported_proposal": "refs", "result_budget_exhausted": "result_budget",
+                      "invalid_projection": "projection"}.get(str(error), "schema")
+            raise ValueError from None
+        return result, {k: usage[k] for k in keys}, body["model"]
     except Exception:
-        raise ModelRefused("invalid_response") from None
+        raise ResponseRefused(reason) from None
 
 
 def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
@@ -344,6 +400,7 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
                        "request_sha256": evidence.digest(evidence.encoded(payload)),
                        "input_token_accounting": "utf8_bytes_plus_1024", "reserved_input_tokens": reserved,
                        "reserved_output_tokens": p["max_output_tokens"], "time_budget_sec": p["timeout"],
+                       "validation_reason": "validation_unavailable",
                        "input_bytes": len(content.encode()), "response_budget_bytes": MAX_HTTP,
                        "result_budget_bytes": publication.MAX_RESULT}
             state["attempts"].append(attempt)
@@ -368,7 +425,9 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
                 else:
                     result, usage, reported_model = _response(wire, p, projection, reserved)
                     attempt.update(state="complete", code="validated", result=result, usage=usage,
-                                   reported_model=reported_model)
+                                   reported_model=reported_model, validation_reason="validated")
+            except ResponseRefused as error:
+                attempt.update(state="failed", code="invalid_response", validation_reason=error.reason)
             except ModelRefused:
                 attempt.update(state="failed", code="invalid_response")
             except Exception:
@@ -617,7 +676,8 @@ def accept_main(argv=None):
             result.update(ok=state["state"] == "complete" and supported, provider_called=bool(calls),
                           state=state["state"], code=state["code"], request_count=state["request_count"],
                           publication_prepared=bool(envelope and envelope.body), public_write=False,
-                          reported_model=state.get("reported_model"), usage=state.get("usage"))
+                          reported_model=state.get("reported_model"), usage=state.get("usage"),
+                          validation_reason=state["attempts"][-1].get("validation_reason", "validation_unavailable"))
         print(json.dumps(result))
         return 0 if result["ok"] else 1
     except (ModelRefused, evidence.EvidenceRefused, config.ConfigError) as error:
