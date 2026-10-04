@@ -513,3 +513,55 @@ a separate compatibility review before activation. Lemonade route design must
 verify its actual path, TLS/private-network policy and usage-accounting contract.
 One cumulative budget must span primary/fallback routes, with no automatic
 fallback after an uncertain outcome.
+
+
+### Inactive trusted outbox and source scope
+
+`investigation_outbox.enqueue` accepts only incident/run identity, reloads evidence
+and model state, and persists a fixed envelope binding (destination/key/body hash),
+never arbitrary text. `deliver` requires an explicitly supplied trusted publisher
+transport and login; there is no default GitHub client, CLI, dispatch hook or
+production enablement. First POST revalidates evidence/destination. Durable intent
+precedes POST; confirmed sends deduplicate, unknown outcomes only reconcile by
+exact marker/body and publisher author, and definite rejections stay failed.
+Changed evidence/destination blocks. The sender must be reviewed separately with
+a dedicated identity, bounded HTTP/deadlines and credentials before activation.
+
+`investigation_scope.prepare` takes an operator-reviewed `ScopePolicy` binding
+hashed job/namespace to allowlisted repository paths at the failed exact revision.
+The model cannot select paths. Referenced evidence identities must all be mapped;
+missing/ambiguous bindings refuse instead of guessing ownership. Only tracked
+regular Terraform/Nomad blobs (up to eight, 1 MiB each) are accepted; symlinks,
+secret paths, traversal, missing files and mismatched revisions refuse. It returns
+blob identities, supported action, validation/risk/rollback enums. It generates
+no patch and grants no production authority. Operator scope-policy installation,
+publisher integration, concrete edit validation and end-to-end acceptance remain
+separate gates; these source libraries do not close SHA-201.
+
+### Proposed Lemonade route contract (not enabled)
+
+Keep the broker on Barlow and use an explicitly configured numeric loopback URL
+rather than relaxing plain HTTP for arbitrary private LAN hosts. Review an exact
+`/api/v1/chat/completions` path option for the installed Lemonade version; current
+upstream sources document that path, while the OpenAI API documentation also
+shows `/v1/chat/completions`. Verify the installed version before implementation.
+References: https://github.com/lemonade-sdk/lemonade/blob/main/docs/dev/getting-started.md
+and https://lemonade-server.ai/docs/api/openai/ . A remote route still needs TLS
+or a separately reviewed network exception. No path/network relaxation is made
+in this slice.
+
+Do not silently drop the usage check. A future operator-selected local accounting
+mode may reserve input UTF-8 bytes plus protocol overhead and cap output UTF-8
+bytes by the full reserved output allowance when provider usage is absent. No
+refunds; request/time/body/result limits and closed-schema validation still apply.
+Valid provider usage should remain recorded; malformed usage must get a fixed
+reason code rather than being guessed or silently accepted. Test this contract
+against Lemonade's actual nonstreaming responses and hostile/unknown-secret
+fixtures before enabling it.
+
+Primary/fallback routes must be pinned operator configuration bound into the
+receipt, with one original request/token/time ceiling and a route ID on each
+attempt. Definite failures can permit a later explicitly budgeted alternate
+route; unknown delivery/spend never automatically falls back. Disable/assess any
+server-side routing retries/offload that would multiply requests beyond this
+ledger. Native commercial structured-output transport remains a separate review.
