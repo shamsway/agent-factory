@@ -153,6 +153,12 @@ class ModelTests(unittest.TestCase):
                 calls.append(payload)
                 return {"status": "retryable", "code": code} if len(calls) == 1 else self.wire(payload)
             state = self.call(client=provider)
+            self.assertEqual(state["state"], "retryable")
+            self.assertEqual(state["request_count"], 1)
+            self.assertEqual(len(calls), 1)
+            with self.assertRaisesRegex(model.ModelRefused, "model_retry_pending"):
+                model.prepare(self.cfg, self.fixture.root_id, self.fixture.run.run_id, now=NOW + 2)
+            state = self.call(client=provider)
             self.assertEqual(state["state"], "complete")
             self.assertEqual(state["request_count"], 2)
             self.assertEqual(len(state["attempts"]), 2)
@@ -160,6 +166,8 @@ class ModelTests(unittest.TestCase):
             self.assertLessEqual(state["reserved_input_tokens"] + state["reserved_output_tokens"], state["token_budget"])
             self.call(client=lambda *_: self.fail("already complete"))
             for path in (self.cfg.factory / "investigations").glob("*.json"): path.unlink()
+        state = self.call(client=lambda *_: {"status": "retryable", "code": "rate_limited"})
+        self.assertEqual(state["request_count"], 1)
         state = self.call(client=lambda *_: {"status": "retryable", "code": "rate_limited"})
         self.assertEqual(state["request_count"], 2)
         self.call(client=lambda *_: self.fail("request ceiling"))
@@ -268,6 +276,36 @@ class ModelTests(unittest.TestCase):
                         self.assertEqual(model.accept_main(argv + ["--resume"]), 0)
                     self.assertFalse(json.loads(output.getvalue())["provider_called"])
 
+    def test_synthetic_rate_limit_waits_for_resume_and_history_survives_age(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve() / "synthetic"
+            argv = ["--output-dir", str(root), "--live-provider", "--confirm-provider-spend-cap"]
+            with mock.patch.object(config, "load", return_value=self.cfg):
+                with mock.patch.object(model, "http_call", return_value={"status": "retryable", "code": "rate_limited"}) as provider:
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(model.accept_main(argv), 1)
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(provider.call_count, 1)
+                    self.assertEqual(result["state"], "retryable")
+                    self.assertEqual(result["request_count"], 1)
+                    self.assertFalse(result["publication_prepared"])
+                def accepted(p, payload):
+                    result = {"projection_sha256": json.loads(payload["messages"][1]["content"])["projection_sha256"],
+                              "outcome": "proposal", "findings": [{"code": "OOM_EVENT", "refs": ["e0002"]}],
+                              "action": "REVIEW_OOM"}
+                    return self.wire(payload, result)
+                later = time.time() + 7200
+                with mock.patch.object(model.time, "time", return_value=later), mock.patch.object(model, "http_call", side_effect=accepted) as provider:
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(model.accept_main(argv + ["--resume"]), 0, output.getvalue())
+                    self.assertEqual(provider.call_count, 1)
+                    resumed = json.loads(output.getvalue())
+                    self.assertEqual(resumed["projection_sha256"], result["projection_sha256"])
+                    self.assertEqual(resumed["request_count"], 2)
+
     def test_token_budget_and_receipt_tampering(self):
         state = self.call(client=lambda *_: {"status": "failed", "code": "http_rejected"})
         path = next((self.cfg.factory / "investigations").glob("*.json"))
@@ -283,6 +321,8 @@ class ModelTests(unittest.TestCase):
             return {"status": "retryable", "code": "rate_limited"}
         state = self.call(client=rejected)
         self.assertEqual(state["request_count"], 1)
+        self.assertEqual(state["code"], "rate_limited")
+        state = self.call(client=rejected)
         self.assertEqual(state["code"], "request_budget")
         self.assertEqual(len(calls), 1)
 
@@ -312,7 +352,7 @@ class ModelTests(unittest.TestCase):
         state = self.call()
         self.assertEqual(state["state"], "retryable")
         self.assertEqual(state["code"], "connection_refused")
-        self.assertEqual(state["request_count"], 2)
+        self.assertEqual(state["request_count"], 1)
 
     def test_verify_secrets_separate_role_and_no_live_export(self):
         rows = verify_secrets.credential_rows(self.cfg, "all", False)
@@ -426,8 +466,8 @@ class ModelTests(unittest.TestCase):
                 server.mode = mode
                 state = self.call()
                 self.assertEqual(state["state"], "retryable")
-                self.assertEqual(state["request_count"], 2)
-            self.assertEqual(len(self.calls), 9)
+                self.assertEqual(state["request_count"], 1)
+            self.assertEqual(len(self.calls), 7)
             server.shutdown()
 
 
