@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from factory import artifacts, deploy, diagnostics, incidents
+from factory import artifacts, deploy, diagnostics, incidents, lifecycle
 from factory import investigation_evidence as evidence
 from factory import investigation_publication as publication
 
@@ -142,8 +142,9 @@ class BoundaryTests(unittest.TestCase):
     def test_unsafe_references_stale_future_unknown_time_and_logs_refused(self):
         with self.assertRaises(evidence.EvidenceRefused):
             evidence.read_evidence(self.factory, self.root_id, "../private", now=NOW + 2)
-        with self.assertRaises(evidence.EvidenceRefused):
-            self.read(now=NOW + 3601)
+        old = self.read(now=NOW + 7200)
+        self.assertEqual(old.data()["rows"][0]["status"], "stale")
+        self.assertIn("explicit OOM event", publication.render(old, self.result(old)))
         original = copy.deepcopy(self.bundle)
         for key, value in (("logs_enabled", True), ("collected_at", diagnostics.utc(NOW + 10)), ("dropped_observations", 1)):
             self.bundle = copy.deepcopy(original)
@@ -167,7 +168,7 @@ class BoundaryTests(unittest.TestCase):
         with mock.patch.object(evidence, "MAX_FILE", 32):
             with self.assertRaises(evidence.EvidenceRefused):
                 self.read()
-        for limit in ("MAX_JOURNAL", "MAX_ROWS", "MAX_PROJECTION"):
+        for limit in ("MAX_ROWS", "MAX_PROJECTION"):
             with self.subTest(limit=limit), mock.patch.object(evidence, limit, 1):
                 with self.assertRaises(evidence.EvidenceRefused):
                     self.read()
@@ -292,6 +293,96 @@ class BoundaryTests(unittest.TestCase):
         with mock.patch.object(publication, "MAX_PUBLIC", 1):
             with self.assertRaises(evidence.EvidenceRefused):
                 publication.render(projection, self.result(projection))
+
+    def delivered(self):
+        path = self.factory / "incidents" / (self.root_id + ".json")
+        row = json.loads(path.read_text())
+        row.update(issue=11, status="delivered", uncertain=False)
+        path.write_text(json.dumps(row))
+
+    def test_refusal_escalation_needs_no_bundle_or_projection(self):
+        self.delivered()
+        for key, value in (("logs_enabled", True), ("dropped_observations", 1)):
+            self.bundle[key] = value
+            self.write_bundle()
+            try:
+                self.read()
+            except evidence.EvidenceRefused as exc:
+                envelope = publication.prepare_refusal(self.factory, "acme/widgets", self.root_id, str(exc))
+                self.assertEqual(envelope.issue, 11)
+                self.assertIn("No diagnosis", envelope.body)
+                self.assertNotIn(SECRET, envelope.body)
+        (self.path / "diagnostics.json").unlink()
+        envelope = publication.prepare_refusal(self.factory, "acme/widgets", self.root_id, "unsafe_or_missing_file")
+        self.assertEqual(envelope.issue, 11)
+        with self.assertRaises(evidence.EvidenceRefused):
+            publication.render_refusal(self.root_id, SECRET)
+        with self.assertRaises(evidence.EvidenceRefused):
+            publication.prepare_refusal(self.factory, "wrong/repo", self.root_id, "partial_evidence")
+
+    def test_unknown_states_minimized_known_multiregion_states_retained(self):
+        row = copy.deepcopy(self.bundle["observations"][2])
+        row["source"] = "nomad/job/worker/deployments"
+        row["data"][0]["Status"] = SECRET
+        self.bundle["observations"].append(row)
+        for value in (SECRET, "pending", "initializing", "unblocking", {"private": SECRET}):
+            row["data"][0]["Status"] = value
+            self.write_bundle()
+            projection = self.read()
+            state = projection.data()["rows"][-1]["state"]
+            self.assertEqual(state, value if isinstance(value, str) and value in evidence.DEPLOY_STATES else "unknown")
+            self.assertNotIn(SECRET, projection.payload.decode())
+
+    def test_later_success_matches_incident_replay_resolution(self):
+        later = copy.deepcopy(self.run)
+        later.run_id = "deploy-default-01234567-2"
+        later.attempt = 2
+        later.status = deploy.DeployStatus.SUCCEEDED
+        deploy.record_deploy_run(later, self.factory / "events.jsonl")
+        state = deploy.replay_events(self.factory / "events.jsonl")["default"]
+        self.assertNotIn(self.run.ticket, state.unacknowledged_failed_tickets)
+        with self.assertRaisesRegex(evidence.EvidenceRefused, "run_already_resolved"):
+            self.read()
+
+    def test_large_journal_live_first_and_rotated_resolution(self):
+        import gzip
+        journal = self.factory / "events.jsonl"
+        original = journal.read_bytes()
+        # Over the old aggregate limit; realistic unrelated rows, not sparse data.
+        line = json.dumps({"event": "heartbeat", "ticket": 900, "text": "x" * 950}).encode() + b"\n"
+        with journal.open("wb") as out:
+            for _ in range((65 * 1024 * 1024) // len(line) + 1):
+                out.write(line)
+            out.write(original)
+        with gzip.open(self.factory / "events.jsonl.1.gz", "wb") as out:
+            out.write(b"not a relevant journal\n")
+        # Configured larger threshold, and no decompression when live contains run.
+        with mock.patch.object(lifecycle, "MAX_BYTES", 80 * 1024 * 1024), mock.patch.object(evidence.gzip, "GzipFile", side_effect=AssertionError("archive unnecessary")):
+            self.read()
+        with mock.patch.object(lifecycle, "MAX_BYTES", 32 * 1024 * 1024):
+            with self.assertRaisesRegex(evidence.EvidenceRefused, "journal_budget_exhausted"):
+                self.read()
+        # Aggregate exceeds 64 MiB: both files fit the configured per-file
+        # limit. The live lookup is absent, so the large archive is opened.
+        with journal.open("rb") as incoming, gzip.open(self.factory / "events.jsonl.1.gz", "wb") as out:
+            import shutil
+            shutil.copyfileobj(incoming, out)
+        with journal.open("wb") as out:
+            for _ in range((37 * 1024 * 1024) // len(line) + 1):
+                out.write(line)
+        with mock.patch.object(lifecycle, "MAX_BYTES", 80 * 1024 * 1024):
+            self.read()
+        # Run in archive; later live success must win after chronological replay.
+        with gzip.open(self.factory / "events.jsonl.1.gz", "wb") as out:
+            out.write(original)
+        journal.write_bytes(b"")
+        self.read()
+        later = copy.deepcopy(self.run)
+        later.run_id = "deploy-default-01234567-2"
+        later.status = deploy.DeployStatus.SUCCEEDED
+        deploy.record_deploy_run(later, journal)
+        with self.assertRaisesRegex(evidence.EvidenceRefused, "run_already_resolved"):
+            self.read()
 
 
 if __name__ == "__main__":
