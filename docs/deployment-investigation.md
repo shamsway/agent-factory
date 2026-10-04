@@ -155,3 +155,8 @@ handoff completes, repeated stale/forced dispatch calls do not write another
 refusal event. Missing/unsafe identity lookup remains a local safe refusal,
 without publishing arbitrary findings to an unconfirmed incident destination.
 This source change makes no live GitHub writes or diagnostic enablement.
+
+New and reopened SHA-199 deployment incidents are also labelled ready-for-human
+until the isolated investigator is accepted. Repeated failure delivery therefore
+does not put a handed-off root back into the legacy lane. The incident body
+explicitly states this temporary handoff policy.

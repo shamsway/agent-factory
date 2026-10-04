@@ -154,6 +154,32 @@ class RoutingTests(unittest.TestCase):
             dispatch.finish_investigation(12, wt, None)
         self.assertTrue(any("ordinary software findings" in str(call) for call in public.call_args_list))
 
+    def test_label_failure_retry_adopts_comment_without_duplicate(self):
+        self.handoff_patch.stop()
+        class Remote:
+            def __init__(remote):
+                remote.comments = []
+                remote.posts = remote.edits = 0
+            def api(remote, endpoint, payload=None, method="GET"):
+                if method == "POST":
+                    remote.posts += 1
+                    remote.comments.append(payload)
+                    return {"id": 1}
+                if method == "PATCH":
+                    remote.edits += 1
+                    if remote.edits == 1:
+                        raise RuntimeError("lost label response")
+                    return {}
+                if "/comments?" in endpoint:
+                    return remote.comments
+                return {"labels": []}
+        remote = Remote()
+        with self.assertRaises(RuntimeError):
+            investigation_routing.handoff(dispatch.cfg, 11, remote=remote)
+        self.assertTrue(investigation_routing.handoff(dispatch.cfg, 11, remote=remote))
+        self.assertEqual(remote.posts, 1)
+        self.assertEqual(remote.edits, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
