@@ -33,6 +33,7 @@ ACTIONS = {
     "REVIEW_OOM": ("OOM_EVENT", "Review memory limits and usage in a gated repository change; verify task stability and headroom before seeking approval."),
 }
 REASONS = {
+    "MODEL_FAILED": "The model request failed or returned an invalid answer; human investigation is needed.",
     "INSUFFICIENT": "Evidence is insufficient for a supported proposal.",
     "UNSUPPORTED": "This failure class needs human investigation.",
     "CONTRADICTORY": "Evidence is contradictory and needs human reconciliation.",

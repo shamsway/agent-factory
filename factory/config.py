@@ -99,7 +99,7 @@ KNOWN_KEYS = {
     "leak_scan": ("pattern", "exclude"),
     "triage": ("url", "model", "key"),
     "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
-                      "max_input_bytes", "max_output_tokens", "token_budget", "timeout"),
+                      "max_input_bytes", "max_output_tokens", "token_budget", "timeout", "max_requests", "send_store_false"),
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),

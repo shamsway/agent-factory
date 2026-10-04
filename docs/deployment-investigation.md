@@ -280,9 +280,9 @@ audit contention without duplicating transition records.
 in dispatch. It reloads authenticated evidence itself; neither a model nor a
 worker supplies a projection, destination, endpoint or credential. No sandbox,
 agent CLI, tools or generated code runs. Job/task/namespace/target/run identifiers
-were already hashed aliases; now aliased identifiers must first match
-`[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. Group/datacenter names remain omitted. This
-prevents raw workload strings from becoming prompt instructions. Structured
+are hashed aliases. Alias inputs accept any nonempty string up to 256 characters;
+raw path/incident identities retain their separate restrictions. Group/datacenter
+names remain omitted. Raw workload strings never enter the prompt. Structured
 versions, counts, timestamps, commit hashes and correlation aliases still leave
 the host when export is explicitly enabled; aliases are not anonymity guarantees.
 
@@ -300,6 +300,8 @@ max_input_bytes = 16384
 max_output_tokens = 1024
 token_budget = 32768
 timeout = 30
+max_requests = 2 # allowed: 1–3; cumulative reservations must fit token_budget
+send_store_false = false # opt in only for an endpoint known to support store
 ```
 
 The operator must deliberately approve endpoint/model and the metadata export,
@@ -314,10 +316,13 @@ as an authentication probe. A separately authorized provider call is needed to
 prove real authentication and compatibility.
 
 The adapter uses the OpenAI-compatible chat-completions shape, a fixed model,
-`max_completion_tokens`, `tool_choice=none`, no streaming and no provider storage
-request. It requires an exact returned model ID, finish_reason=stop, complete
-integer token usage and a valid closed-schema result. Providers must support and
-honor these fields; no compatibility fallback is automatic. The request shape is
+`max_completion_tokens`, no tools and no streaming. `tool_choice` is omitted.
+`store` is omitted unless the operator enables `send_store_false`, which sends
+`store=false` only for a compatible endpoint. The provider-reported model ID is
+recorded as bounded metadata; aliases resolving to versioned IDs are accepted.
+This does not prove which model executed. Require finish_reason=stop, complete
+integer token usage and a valid closed-schema result. Provider retention/billing
+policy must be reviewed independently; omitted store is no promise of non-storage. The request shape is
 based on the [official client schema](https://github.com/openai/openai-python/blob/main/src/openai/types/chat/completion_create_params.py).
 
 TLS is required; explicitly configured numeric loopback HTTP is available only
@@ -330,13 +335,19 @@ persisted. Only publisher-validated enum/reference JSON and numeric usage surviv
 
 Before network access, an atomic/fsynced private receipt in
 `.factory/investigations/` stores incident/run/repo identity, projection/policy/
-prompt/request hashes, one request reservation, token/time/input/response budgets
+prompt/request hashes, each attempt reservation, token/time/input/response budgets
 and state=uncertain. A per-run nonblocking lock serializes callers. All ancestors,
 locks and JSON reads refuse symlinks; duplicate keys and oversized state refuse.
-After response, persist complete/failed/uncertain and sanitized result/usage.
-Every existing receipt suppresses automatic retry, including HTTP rejection,
-timeout, transport failure, crash and changed policy/evidence; no attempt is
-silently refunded. Human reconciliation is required before any new request.
+After response, persist complete/failed/uncertain/retryable and sanitized result/usage.
+The original max_requests (default 2, at most 3), cumulative token_budget and
+aggregate time reservation (timeout × original max_requests) bound all attempts.
+Each attempt reserves its full timeout and input/output allowance without refunds.
+Automatic retries are limited to connection refused, HTTP 429 and HTTP 503;
+other HTTP failures, invalid answers, timeouts, crashes, redirects and unknown
+outcomes never automatically retry. Request identity/policy changes require an
+operator reset. Lowered config ceilings apply too; raising config never raises
+an existing receipt's ceilings. Version-1 receipts retain their original consumed
+one-request ceiling. Never delete receipts to manufacture a new budget.
 
 Input-token accounting reserves UTF-8 message bytes plus 1024 tokens of protocol
 overhead; this is a conservative operational allowance, **not exact tokenization
@@ -350,13 +361,13 @@ real inference behavior.
 `factory inspect` reports only configuration/export flags and counts of receipt
 states. Doctor warns on unavailable state observation or uncertain requests.
 `investigation_model.prepare` reloads evidence and prepares the trusted root-issue
-fixed publication; it does not post. Failed/uncertain calls produce fixed human
-escalation, and refused evidence can use the existing refusal renderer without a
+fixed publication; it does not post. Failed model calls use the fixed MODEL_FAILED escalation instead of implying
+insufficient evidence; exhausted/uncertain budgets use fixed human escalation, and refused evidence can use the existing refusal renderer without a
 model call. Changed projections cannot publish an old proposal.
 
 Acceptance fixtures exercise successful correlated placement/resource/OOM
 proposals, unsupported escalation, hostile/unknown-secret output, invalid refs,
-stale evidence, tools/usage/model/size refusal, disabled export, credential reuse,
+stale evidence, tools/usage/size refusal and versioned-model acceptance, disabled export, credential reuse,
 reservation-before-call, interrupted writes, crash/timeout replay and local HTTP
 redirect/proxy/body/time limits. No external provider or production incident was
 used. Remaining SHA-201 gates: genuine provider acceptance, explicit activation,
@@ -365,6 +376,56 @@ controlled end-to-end acceptance. Diagnostics/logs remain off; PRs #3/#4 stay
 draft. Sandbox code is frozen; its exit-125 classification ambiguity is a known
 low-priority limitation for any future separate activation review.
 
-No model-receipt reset/retry command is implemented in this slice. Preserve the
-receipt and its consumed budget while reviewing an uncertain or failed outcome;
-do not delete it to manufacture another automatic request.
+### Audited recovery and synthetic provider acceptance
+
+A provider-side spend cap on the dedicated key is a prerequisite for real-provider
+acceptance. Same-user legacy workers can still read host secrets; omission from
+worker environments is not OS credential separation. The cap limits spend even
+if a legacy worker bypasses broker budgets. Factory cannot verify that cap.
+
+Review the receipt using operator metadata. Then preview a reset:
+
+```sh
+factory investigation-reset --incident INCIDENT --run RUN --reason provider_configuration --dry-run
+```
+
+Allowed fixed reasons: provider_configuration, provider_recovered, invalid_answer,
+operator_review. For an uncertain outcome, additionally pass
+`--acknowledge-uncertain-spend` to acknowledge possible duplicate billing/export.
+Repeat without `--dry-run` to record the operator UID, timestamp, reason, previous
+state and old/new policy/projection hashes. A reset preserves every attempt and
+reservation, grants no larger ceiling, and performs no model call. It marks the
+receipt ready for the trusted broker. Completed runs cannot reset. Exhausted
+budgets require human investigation; deleting receipts is not recovery.
+
+First test the chosen provider against synthetic evidence, not a production incident.
+After adding protected host settings, use `factory verify-secrets --scope investigation`
+without reading or printing host config. This verifies role separation, not provider
+credentials. Preview a wholly new synthetic fixture directory:
+
+```sh
+factory investigation-accept --output-dir /absolute/new/private/synthetic-preview
+```
+
+After approving endpoint/model/export and setting a dedicated provider-capped key:
+
+```sh
+factory investigation-accept --output-dir /absolute/new/private/synthetic-provider \
+  --live-provider --confirm-provider-spend-cap
+```
+
+The two explicit flags authorize only this synthetic call and attest to the manually
+configured cap. The command constructs a fresh failed run, manifest, diagnostics
+bundle and incident locally; it never reads the production journal/artifacts,
+queries Nomad or posts to GitHub. Private receipts persist at the output directory.
+Success requires a validated supported proposal plus local fixed-publication
+preparation; refusal/escalation is not supported-proposal acceptance. Output is
+metadata and numeric usage only, never raw provider content. Preserve the directory
+for audit. This is not production activation or proof of all failure classes.
+
+For synthetic recovery, pass `--synthetic-dir /absolute/private/synthetic-provider`
+to `investigation-reset` with the incident/run printed by acceptance. Correct
+host endpoint/model settings, preview and audit the reset, then resume the same
+fixture using `investigation-accept --output-dir /absolute/private/synthetic-provider
+--resume --live-provider --confirm-provider-spend-cap`. Resume preserves the
+original receipts and ceilings; it never silently creates a replacement fixture.

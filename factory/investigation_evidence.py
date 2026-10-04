@@ -29,7 +29,6 @@ MAX_PROJECTION = 128 * 1024
 MAX_AGE = 3600
 UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 HEX = re.compile(r"[0-9a-f]{40}")
-NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 STATUSES = frozenset({"observed", "disabled", "not_configured", "lineage_unavailable",
     "version_unavailable", "window_unavailable", "permission_denied", "absent_or_expired",
     "expired", "budget_expired", "transport_unavailable", "response_too_large"})
@@ -77,7 +76,7 @@ def number(value) -> bool:
 
 
 def alias(kind: str, value: str) -> str:
-    require(isinstance(value, str) and NAME.fullmatch(value) is not None)
+    require(isinstance(value, str) and 0 < len(value) <= 256)
     return kind + "-" + digest(value.encode())[:24]
 
 
@@ -264,7 +263,7 @@ def jobs_for(run):
                 for j in run.get("diagnostic_jobs") or []]
     require(len(jobs) <= 8)
     for jid, ns, region, version in jobs:
-        require(all(isinstance(v, str) and (NAME.fullmatch(v) or not v) for v in (jid, ns, region)))
+        require(all(isinstance(v, str) and len(v) <= 256 for v in (jid, ns, region)))
         require(bool(jid) and bool(ns) and (version is None or type(version) is int and 0 <= version <= 2**63 - 1))
     return jobs
 
