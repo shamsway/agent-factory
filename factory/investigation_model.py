@@ -304,7 +304,9 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
                      "request_count": 0, "max_requests": p["max_requests"], "attempts": [], "resets": [],
                      "reserved_input_tokens": 0, "reserved_output_tokens": 0, "reserved_seconds": 0,
                      "token_budget": p["token_budget"], "time_budget_sec": p["timeout"] * p["max_requests"]}
-        while state["request_count"] < min(state["max_requests"], p["max_requests"]):
+        # One request per invocation. Retryable delivery waits for a later pass
+        # or an explicit synthetic --resume, never an immediate second call.
+        if state["request_count"] < min(state["max_requests"], p["max_requests"]):
             if (state["reserved_input_tokens"] + state["reserved_output_tokens"] + reserved + p["max_output_tokens"] > min(state["token_budget"], p["token_budget"])
                     or state["reserved_seconds"] + p["timeout"] > state["time_budget_sec"]):
                 if not state["request_count"]:
@@ -352,8 +354,7 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
             if attempt["state"] == "complete":
                 state.update(result=attempt["result"], usage=attempt["usage"], reported_model=attempt["reported_model"])
             _write(fd, name, state)
-            if state["state"] != "retryable":
-                return state
+            return state
         return state
 
 
@@ -444,6 +445,8 @@ def _prepare(cfg, incident_id, run_id, *, now=None):
         state = _read(fd, name)
         if state is None or state.get("repository") != cfg.repo or state.get("incident") != incident_id or state.get("run") != run_id:
             raise ModelRefused("result_unavailable")
+        if state["state"] == "ready" or (state["state"] == "retryable" and state["request_count"] < state["max_requests"]):
+            raise ModelRefused("model_retry_pending")
         result = state.get("result") if state["state"] == "complete" else {
             "projection_sha256": projection.sha256, "outcome": "escalate",
             "reason": "BUDGET" if state["state"] in {"uncertain", "retryable", "ready"} or state["code"] == "request_budget" else "MODEL_FAILED"}
@@ -577,11 +580,12 @@ def accept_main(argv=None):
                 calls.append(True)
                 return http_call(p, payload)
             state = investigate(synthetic, identity, run_id, now=now, client=provider)
-            envelope = prepare(synthetic, identity, run_id, now=now)
+            pending = state["state"] == "retryable" and state["request_count"] < state["max_requests"]
+            envelope = None if pending else prepare(synthetic, identity, run_id, now=now)
             supported = state.get("result", {}).get("outcome") == "proposal"
             result.update(ok=state["state"] == "complete" and supported, provider_called=bool(calls),
                           state=state["state"], code=state["code"], request_count=state["request_count"],
-                          publication_prepared=bool(envelope.body), public_write=False,
+                          publication_prepared=bool(envelope and envelope.body), public_write=False,
                           reported_model=state.get("reported_model"), usage=state.get("usage"))
         print(json.dumps(result))
         return 0 if result["ok"] else 1

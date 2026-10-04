@@ -342,8 +342,12 @@ After response, persist complete/failed/uncertain/retryable and sanitized result
 The original max_requests (default 2, at most 3), cumulative token_budget and
 aggregate time reservation (timeout × original max_requests) bound all attempts.
 Each attempt reserves its full timeout and input/output allowance without refunds.
-Automatic retries are limited to connection refused, HTTP 429 and HTTP 503;
-other HTTP failures, invalid answers, timeouts, crashes, redirects and unknown
+Each invocation makes at most one provider request. Connection refused, HTTP429
+and HTTP503 remain retryable, but only a later broker invocation or explicit
+synthetic --resume sends the next attempt; there is no tight retry loop. Pending
+retryable/ready receipts cannot render a premature budget escalation. Synthetic
+acceptance reports publication_prepared=false while a retry remains pending.
+Other HTTP failures, invalid answers, timeouts, crashes, redirects and unknown
 outcomes never automatically retry. Request identity/policy changes require an
 operator reset. Lowered config ceilings apply too; raising config never raises
 an existing receipt's ceilings. Version-1 receipts retain their original consumed
@@ -429,3 +433,34 @@ host endpoint/model settings, preview and audit the reset, then resume the same
 fixture using `investigation-accept --output-dir /absolute/private/synthetic-provider
 --resume --live-provider --confirm-provider-spend-cap`. Resume preserves the
 original receipts and ceilings; it never silently creates a replacement fixture.
+
+### Acceptance host and service boundary
+
+Run acceptance on whichever host holds the dedicated protected investigation
+settings, using a throwaway virtual environment installed from the reviewed PR
+commit. If that host is Barlow, leave its existing service runtime, symlinks and
+units untouched. Do not run factory install or restart services for acceptance.
+Use the throwaway environment's absolute interpreter (`python -P -m factory`)
+from the consumer checkout, so its normal host-only configuration loader selects
+the intended repo. The same-user key-access caveat applies on that host.
+
+Resume promptly, preferably within the hour. Resume re-reads evidence with the
+current clock; any age-dependent current-state rows may disappear and change the
+projection hash after a long gap. In that case inspect the fixed refusal, preview
+and audit a reset before another call. The current synthetic OOM fixture contains
+historical version-bound rows only; it does not freeze time or bypass the reader's
+age/identity checks. A retryable response consumes one reservation and waits for
+an explicit later invocation; choose a sensible delay before --resume.
+
+For initial synthetic acceptance, Anthropic's OpenAI-compatible endpoint and
+`claude-haiku-4-5-20251001` are the operator-selected candidate. Leave
+send_store_false off. Anthropic documents max_completion_tokens, n=1, bearer
+authorization and usage fields as supported, but describes this compatibility
+layer as intended for evaluation rather than a long-term production solution.
+Revisit native transport before activation. Use a dedicated Console workspace
+and key with an operator-chosen monthly spend limit; Factory does not independently
+verify enforcement. See [compatibility documentation](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk)
+and [workspace controls](https://support.claude.com/en/articles/9796807-creating-and-managing-workspaces-in-the-claude-console).
+
+Use a workspace-scoped key. Multi-workspace personal/service-account keys need
+an anthropic-workspace-id header, which this first-cut broker does not configure.
