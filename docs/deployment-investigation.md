@@ -87,6 +87,40 @@ Example worker result for insufficient evidence:
 {"projection_sha256":"<trusted projection hash>","outcome":"escalate","reason":"INSUFFICIENT"}
 ```
 
+## Model execution decision: trusted API call, no agent CLI
+
+For SHA-201's first cut, the trusted broker calls an operator-configured model
+API with the authenticated projection and fixed instructions. The model has no
+tools, credentials for Factory/GitHub/Nomad/Consul, host files, forwarded socket,
+repository checkout or generated-code execution. The API client owns only the
+model endpoint credential; it must not reuse a general agent command or silently
+inherit the triage transport. Endpoint/auth settings belong to the operator,
+never to the incident, model response or diagnostic payload.
+
+```mermaid
+flowchart LR
+    Evidence["Private evidence"] --> Broker["Trusted broker validates projection"]
+    Broker --> API["Bounded model API call · no tools"]
+    API --> Result["Untrusted enum/reference result"]
+    Result --> Publisher["Reload evidence · validate · fixed templates"]
+    Publisher --> Outbox["Trusted root-issue delivery"]
+```
+
+Before the call, persist its incident/run/projection hash and finite request,
+time, input and response budgets. Enforce HTTP and response limits as well as
+provider output limits. Treat unknown outcomes as durable uncertainty, without
+blind retries. No free-text response, tool call, endpoint override or invented
+reference can trigger code, diagnostics, publication, merge or apply. Reject
+invalid responses and use the fixed human-escalation path. Public delivery has
+its own durable receipt and identity; returning model JSON is not authority.
+These transport/budget/outbox components remain unimplemented and unactivated.
+
+The first cut does **not** invoke `investigation_isolation.run`. That primitive
+is retained for a separately reviewed future deterministic/code-tool use. It
+must remain credentialless and offline; adding an agent CLI or model-forwarding
+socket would require a new boundary review. Namespace/cgroup tests protect the
+primitive, but they are not proof that a complete investigator is accepted.
+
 ## Review gates before investigation logic and enablement
 
 Review these two modules and adversarial fixtures first. Remaining SHA-201 work:
@@ -207,7 +241,34 @@ files carry input/code; wall time, address space, CPU, file size, descriptor cou
 and combined output have limits. Raw returned bytes still require the trusted
 publisher's validation. No credential or network delegation is implemented.
 
-This shares the host kernel and is not a VM. Aggregate process/memory controls,
-seccomp policy, model broker integration and accepted live investigation remain
-work before activation. There is no fallback when bubblewrap is unavailable.
+A transient `systemd-run --user --scope` contains the launcher and every
+worker descendant: TasksMax=32, MemoryMax=256 MiB, MemorySwapMax=0,
+CPUQuota=100% and RuntimeMaxSec bounded by the requested wall time (at most 30s).
+The trusted bootstrap checks actual cgroup-v2 pids/memory/swap/CPU limits and
+scope identity before executing bubblewrap; missing/unlimited controllers refuse
+the run. Cleanup stops only the generated scope. Per-process prlimit is retained
+as an additional limit, not aggregate protection. No Factory service property,
+host policy or production runtime is changed by this library.
+
+CI installs bubblewrap, prepares an ephemeral user manager and enables user
+namespaces on the disposable runner. FACTORY_REQUIRE_ISOLATION=1 turns absent
+prerequisites into test failures. Real fixtures test private file/environment/
+network boundaries, timeout/output limits, finite forks and a memory allocation
+above memory.max, then a clean follow-up run. Ordinary macOS/container suite
+runs can skip these three Linux-only tests and are not sandbox evidence.
+`scripts/test-linux.sh` does not prepare systemd/cgroup delegation; the required
+host CI and scoped Barlow fixtures provide this acceptance layer instead.
+
+This shares the host kernel and is not a VM. A reviewed syscall policy and
+accepted future code-tool integration remain gates before activating this
+primitive. The no-tools first-cut model route does not activate it. There is no
+fallback when bubblewrap, the user manager or kernel controllers are unavailable.
+See [systemd scope execution](https://github.com/systemd/systemd/blob/main/man/systemd-run.xml)
+and [aggregate resource controls](https://github.com/systemd/systemd/blob/main/man/systemd.resource-control.xml).
 See [bubblewrap's upstream manual](https://github.com/containers/bubblewrap/blob/main/bwrap.xml).
+
+`last_transition` is dispatch audit history, not a current health verdict. A
+repaired outage can remain the latest transition until a successful non-incident
+admission scan records recovery; doctor/inspect's current scan is authoritative.
+Concurrent availability writers use a nonblocking lock and can log harmless
+audit contention without duplicating transition records.
