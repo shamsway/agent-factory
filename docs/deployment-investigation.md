@@ -494,3 +494,22 @@ These bind the already-loaded key to a temporary in-memory model role only; no
 secret is accepted in argv or copied into another file. Endpoint/model arguments
 are allowed only with explicit existing-key reuse and still pass the fixed policy
 validator. No dispatcher or production evidence path is activated by this command.
+
+
+### Response compatibility and failure visibility
+
+The trusted transport accepts plain JSON or exactly one whole-content code fence
+(with an empty or `json` language tag). It never extracts JSON from prose or
+multiple/nested blocks. The unchanged publisher validates hash, closed schema,
+enums and supporting references after unwrapping. Each attempt records only a
+fixed `validation_reason` stage code, never provider text or exception messages;
+older receipts report `validation_unavailable`. Synthetic acceptance displays
+this code so a rejected response can be diagnosed without another provider call.
+
+Shared model credentials are explicitly authorized for synthetic testing. Before
+activation, revisit the shared worker spend cap and same-user visibility; shared
+mode is not dedicated credential isolation. Native provider structured output is
+a separate compatibility review before activation. Lemonade route design must
+verify its actual path, TLS/private-network policy and usage-accounting contract.
+One cumulative budget must span primary/fallback routes, with no automatic
+fallback after an uncertain outcome.

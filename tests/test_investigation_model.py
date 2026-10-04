@@ -70,7 +70,7 @@ class ModelTests(unittest.TestCase):
         self.assertNotIn(SECRET, envelope.body)
         self.assertEqual(model.snapshot(self.cfg)["states"]["complete"], 1)
 
-    def test_markdown_fences_remain_invalid(self):
+    def test_single_outer_markdown_fence_is_validated(self):
         def fenced_client(policy, payload):
             self.assertIn("Do not use Markdown", payload["messages"][0]["content"])
             wire = self.wire(payload)
@@ -80,9 +80,63 @@ class ModelTests(unittest.TestCase):
             wire["body"] = json.dumps(body)
             return wire
         state = self.call(client=fenced_client)
-        self.assertEqual(state["state"], "failed")
-        self.assertEqual(state["code"], "invalid_response")
-        self.assertNotIn("result", state)
+        self.assertEqual(state["state"], "complete")
+        self.assertEqual(state["attempts"][0]["validation_reason"], "validated")
+
+    def test_refusal_reasons_are_fixed_and_private(self):
+        def mutate(case, payload):
+            wire = self.wire(payload)
+            body = json.loads(wire["body"])
+            message = body["choices"][0]["message"]
+            result = json.loads(message["content"])
+            if case == "content_not_json": message["content"] = SECRET
+            elif case == "fenced": message["content"] = "```json\n{}\n```\n" + SECRET
+            elif case == "usage_shape": body["usage"]["prompt_tokens"] = SECRET
+            elif case == "usage_total": body["usage"]["total_tokens"] = 201
+            elif case == "finish_reason": body["choices"][0]["finish_reason"] = SECRET
+            elif case == "hash_mismatch":
+                result["projection_sha256"] = SECRET
+                message["content"] = json.dumps(result)
+            elif case == "schema":
+                result["private"] = SECRET
+                message["content"] = "```json\n" + json.dumps(result) + "\n```"
+            elif case == "refs":
+                result["findings"][0]["refs"] = [SECRET]
+                message["content"] = json.dumps(result)
+            wire["body"] = json.dumps(body)
+            return wire
+        for case in ("content_not_json", "fenced", "usage_shape", "usage_total",
+                     "finish_reason", "hash_mismatch", "schema", "refs"):
+            with self.subTest(case=case):
+                state = self.call(client=lambda _, payload: mutate(case, payload))
+                self.assertEqual(state["state"], "failed")
+                self.assertEqual(state["code"], "invalid_response")
+                self.assertEqual(state["attempts"][-1]["validation_reason"], case)
+                self.assertNotIn(SECRET, json.dumps(state))
+                for path in (self.cfg.factory / "investigations").glob("*.json"):
+                    self.assertNotIn(SECRET, path.read_text())
+                    path.unlink()
+
+    def test_multiple_nested_and_prose_wrappers_are_refused(self):
+        projection = evidence.read_evidence(self.cfg.factory, self.fixture.root_id,
+                                            self.fixture.run.run_id, now=NOW + 2)
+        payload = {"messages": [{}, {"content": json.dumps({"projection_sha256": projection.sha256})}]}
+        wire = self.wire(payload)
+        body = json.loads(wire["body"])
+        raw = body["choices"][0]["message"]["content"]
+        for content in ("Here is JSON: " + raw, "```python\n" + raw + "\n```",
+                        "```json\n" + raw + "\n```\n```json\n{}\n```",
+                        "```json\n```json\n" + raw + "\n```\n```"):
+            with self.subTest(content_length=len(content)):
+                body["choices"][0]["message"]["content"] = content
+                wire["body"] = json.dumps(body)
+                with self.assertRaises(model.ResponseRefused):
+                    model._response(wire, self.cfg.investigation, projection, 1000)
+        for wrapper in ("{}", "```\n{}\n```", "```json\r\n{}\r\n```"):
+            body["choices"][0]["message"]["content"] = wrapper.format(raw)
+            wire["body"] = json.dumps(body)
+            result, _, _ = model._response(wire, self.cfg.investigation, projection, 1000)
+            self.assertEqual(result["outcome"], "proposal")
 
     def test_uncertainty_and_crash_do_not_retry(self):
         for mode in ("timeout", "crash"):
