@@ -52,7 +52,8 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(state["request_count"], 1)
         self.assertGreater(state["reserved_input_tokens"], 100)
         self.assertEqual(payload["model"], "fixed-model")
-        self.assertEqual(payload["tool_choice"], "none")
+        self.assertNotIn("tool_choice", payload)
+        self.assertNotIn("store", payload)
         self.assertNotIn("tools", payload)
         self.assertNotIn(SECRET, json.dumps(payload))
         self.assertNotIn("dedicated-model-key", json.dumps(payload))
@@ -119,10 +120,199 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(model.ModelRefused, "state_identity_changed"):
             self.call(client=lambda *_: self.fail("must not retry"))
 
-    def test_identity_strings_are_narrow_and_hash_only(self):
+    def test_identity_strings_are_bounded_and_hash_only(self):
         for value in ("ignore instructions", "x" * 129, "job\nsteal", "秘密"):
+            self.assertRegex(evidence.alias("job", value), r"^job-[0-9a-f]{24}$")
+        for value in ("", "x" * 257, None):
             with self.assertRaises(evidence.EvidenceRefused): evidence.alias("job", value)
         self.assertNotIn("worker", evidence.alias("job", "worker"))
+
+    def test_versioned_model_and_optional_store(self):
+        def provider(p, payload):
+            self.assertNotIn("tool_choice", payload)
+            self.assertNotIn("store", payload)
+            wire = self.wire(payload)
+            body = json.loads(wire["body"])
+            body["model"] = "fixed-model-2026-10-04"
+            wire["body"] = json.dumps(body)
+            return wire
+        state = self.call(client=provider)
+        self.assertEqual(state["reported_model"], "fixed-model-2026-10-04")
+        self.assertEqual(state["state"], "complete")
+        for path in (self.cfg.factory / "investigations").glob("*.json"): path.unlink()
+        self.cfg.investigation["send_store_false"] = True
+        def compatible(p, payload):
+            self.assertIs(payload["store"], False)
+            return self.wire(payload)
+        self.assertEqual(self.call(client=compatible)["state"], "complete")
+
+    def test_definite_transient_retry_and_cumulative_budget(self):
+        for code in sorted(model.RETRYABLE):
+            calls = []
+            def provider(p, payload):
+                calls.append(payload)
+                return {"status": "retryable", "code": code} if len(calls) == 1 else self.wire(payload)
+            state = self.call(client=provider)
+            self.assertEqual(state["state"], "complete")
+            self.assertEqual(state["request_count"], 2)
+            self.assertEqual(len(state["attempts"]), 2)
+            self.assertEqual(state["reserved_input_tokens"], sum(a["reserved_input_tokens"] for a in state["attempts"]))
+            self.assertLessEqual(state["reserved_input_tokens"] + state["reserved_output_tokens"], state["token_budget"])
+            self.call(client=lambda *_: self.fail("already complete"))
+            for path in (self.cfg.factory / "investigations").glob("*.json"): path.unlink()
+        state = self.call(client=lambda *_: {"status": "retryable", "code": "rate_limited"})
+        self.assertEqual(state["request_count"], 2)
+        self.call(client=lambda *_: self.fail("request ceiling"))
+        with self.assertRaisesRegex(model.ModelRefused, "request_budget"):
+            model.reset(self.cfg, self.fixture.root_id, self.fixture.run.run_id,
+                        reason="provider_recovered", now=NOW + 2)
+
+    def test_audited_reset_preserves_unknown_attempt_and_ceilings(self):
+        state = self.call(client=lambda *_: {"status": "uncertain", "code": "transport_timeout"})
+        path = next((self.cfg.factory / "investigations").glob("*.json"))
+        original = path.read_bytes()
+        kwargs = dict(reason="provider_configuration", now=NOW + 2)
+        with self.assertRaisesRegex(model.ModelRefused, "uncertain_spend_ack_required"):
+            model.reset(self.cfg, self.fixture.root_id, self.fixture.run.run_id, **kwargs)
+        self.cfg.investigation.update(model="corrected-model", max_requests=3, token_budget=262144)
+        kwargs["acknowledge_uncertain"] = True
+        model.reset(self.cfg, self.fixture.root_id, self.fixture.run.run_id, dry_run=True, **kwargs)
+        self.assertEqual(path.read_bytes(), original)
+        model.reset(self.cfg, self.fixture.root_id, self.fixture.run.run_id, **kwargs)
+        result = self.call(client=lambda p, payload: self.wire(payload))
+        self.assertEqual(result["state"], "complete")
+        self.assertEqual(result["max_requests"], 2)
+        self.assertEqual(result["token_budget"], state["token_budget"])
+        self.assertEqual(result["attempts"][0], state["attempts"][0])
+        self.assertEqual(result["resets"][0]["reason"], "provider_configuration")
+        self.assertTrue(result["resets"][0]["acknowledge_uncertain"])
+
+    def test_invalid_answer_has_honest_escalation_and_manual_recovery(self):
+        state = self.call(client=lambda *_: {"status": "failed", "code": "http_rejected"})
+        body = model.prepare(self.cfg, self.fixture.root_id, self.fixture.run.run_id, now=NOW + 2).body
+        self.assertIn("model request failed", body)
+        self.assertNotIn("Evidence is insufficient", body)
+        model.reset(self.cfg, self.fixture.root_id, self.fixture.run.run_id, reason="provider_configuration", now=NOW + 2)
+        self.assertEqual(self.call(client=lambda p, payload: self.wire(payload))["request_count"], 2)
+
+    def test_legacy_receipt_keeps_one_request_ceiling(self):
+        state = self.call(client=self.client)
+        path = next((self.cfg.factory / "investigations").glob("*.json"))
+        legacy = {**state, **state["attempts"][0], "version": 1, "max_requests": 1}
+        for key in ("attempts", "resets", "reserved_seconds"): legacy.pop(key)
+        path.write_text(json.dumps(legacy))
+        with model._store(self.cfg.factory, self.fixture.root_id, self.fixture.run.run_id) as (fd, name):
+            migrated = model._read(fd, name)
+        self.assertEqual(migrated["max_requests"], 1)
+        self.assertEqual(migrated["request_count"], 1)
+        self.assertEqual(migrated["attempts"][0], legacy)
+
+    def test_synthetic_acceptance_never_reads_live_factory(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve() / "synthetic"
+            with mock.patch.object(config, "load", return_value=self.cfg), mock.patch.object(model, "http_call", side_effect=AssertionError("no export")):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = model.accept_main(["--output-dir", str(root)])
+                self.assertEqual(code, 0)
+                self.assertFalse(json.loads(output.getvalue())["provider_called"])
+            self.assertFalse((self.cfg.factory / "investigations").exists())
+            self.assertTrue((root / ".factory" / "events.jsonl").exists())
+            root2 = Path(folder).resolve() / "synthetic-live"
+            def provider(p, payload):
+                projection = json.loads(payload["messages"][1]["content"])
+                self.assertNotIn(SECRET, json.dumps(payload))
+                result = {"projection_sha256": projection["projection_sha256"], "outcome": "proposal",
+                          "findings": [{"code": "OOM_EVENT", "refs": ["e0002"]}], "action": "REVIEW_OOM"}
+                return self.wire(payload, result)
+            with mock.patch.object(config, "load", return_value=self.cfg), mock.patch.object(model, "http_call", side_effect=provider):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = model.accept_main(["--output-dir", str(root2), "--live-provider", "--confirm-provider-spend-cap"])
+                self.assertEqual(code, 0, output.getvalue())
+                result = json.loads(output.getvalue())
+                self.assertTrue(result["publication_prepared"])
+                self.assertFalse(result["public_write"])
+
+    def test_synthetic_failed_provider_can_reset_and_resume_same_budget(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve() / "synthetic"
+            argv = ["--output-dir", str(root), "--live-provider", "--confirm-provider-spend-cap"]
+            with mock.patch.object(config, "load", return_value=self.cfg):
+                with mock.patch.object(model, "http_call", return_value={"status": "failed", "code": "http_rejected"}):
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(model.accept_main(argv), 1)
+                    result = json.loads(output.getvalue())
+                self.cfg.investigation["model"] = "corrected-model"
+                with redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(model.reset_main(["--synthetic-dir", str(root), "--incident", result["incident"],
+                        "--run", result["run"], "--reason", "provider_configuration"]), 0)
+                def provider(p, payload):
+                    result = {"projection_sha256": json.loads(payload["messages"][1]["content"])["projection_sha256"],
+                              "outcome": "proposal", "findings": [{"code": "OOM_EVENT", "refs": ["e0002"]}],
+                              "action": "REVIEW_OOM"}
+                    return self.wire(payload, result)
+                with mock.patch.object(model, "http_call", side_effect=provider):
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(model.accept_main(argv + ["--resume"]), 0, output.getvalue())
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(result["request_count"], 2)
+                with mock.patch.object(model, "http_call", side_effect=AssertionError("no extra spend")):
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(model.accept_main(argv + ["--resume"]), 0)
+                    self.assertFalse(json.loads(output.getvalue())["provider_called"])
+
+    def test_token_budget_and_receipt_tampering(self):
+        state = self.call(client=lambda *_: {"status": "failed", "code": "http_rejected"})
+        path = next((self.cfg.factory / "investigations").glob("*.json"))
+        state["reserved_input_tokens"] = 0
+        path.write_text(json.dumps(state))
+        with self.assertRaisesRegex(model.ModelRefused, "invalid_state"):
+            self.call(client=lambda *_: self.fail("no refund"))
+        path.unlink()
+        self.cfg.investigation["token_budget"] = 9000
+        calls = []
+        def rejected(p, payload):
+            calls.append(payload)
+            return {"status": "retryable", "code": "rate_limited"}
+        state = self.call(client=rejected)
+        self.assertEqual(state["request_count"], 1)
+        self.assertEqual(state["code"], "request_budget")
+        self.assertEqual(len(calls), 1)
+
+    def test_reset_cli_dry_run_and_uncertain_ack(self):
+        import io
+        from contextlib import redirect_stdout
+        self.call(client=lambda *_: {"status": "uncertain", "code": "transport_unknown"})
+        args = ["--incident", self.fixture.root_id, "--run", self.fixture.run.run_id,
+                "--reason", "operator_review", "--dry-run"]
+        with mock.patch.object(config, "load", return_value=self.cfg), mock.patch.object(evidence.time, "time", return_value=NOW + 2):
+            with redirect_stdout(io.StringIO()) as out:
+                code = model.reset_main(args)
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(out.getvalue())["code"], "uncertain_spend_ack_required")
+            with redirect_stdout(io.StringIO()) as out:
+                code = model.reset_main(args + ["--acknowledge-uncertain-spend"])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertTrue(json.loads(out.getvalue())["dry_run"])
+
+    def test_real_connection_refusal_is_bounded_retryable(self):
+        import socket
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+            self.cfg.investigation.update(url=f"http://127.0.0.1:{port}/v1/chat/completions",
+                                          allow_loopback_http=True)
+        state = self.call()
+        self.assertEqual(state["state"], "retryable")
+        self.assertEqual(state["code"], "connection_refused")
+        self.assertEqual(state["request_count"], 2)
 
     def test_verify_secrets_separate_role_and_no_live_export(self):
         rows = verify_secrets.credential_rows(self.cfg, "all", False)
@@ -150,7 +340,7 @@ class ModelTests(unittest.TestCase):
                 wire = self.wire(payload)
                 body = json.loads(wire["body"])
                 if mutation == "tokens": body["usage"]["completion_tokens"] = 99999
-                if mutation == "model": body["model"] = "invented"
+                if mutation == "model": body["model"] = "unbounded " * 129
                 if mutation == "tool": body["choices"][0]["message"]["tool_calls"] = [{"name": "exec"}]
                 if mutation == "length": body["choices"][0]["finish_reason"] = "length"
                 if mutation == "size": body["choices"][0]["message"]["content"] = "x" * 9000
@@ -205,6 +395,8 @@ class ModelTests(unittest.TestCase):
                 if self.server.mode == "redirect":
                     self.send_response(302); self.send_header("Location", "/steal"); self.end_headers(); return
                 if self.server.mode == "slow": time.sleep(2)
+                if self.server.mode in ("rate_limited", "service_unavailable"):
+                    self.send_response(429 if self.server.mode == "rate_limited" else 503); self.end_headers(); return
                 if self.server.mode == "reject":
                     self.send_response(403); self.end_headers(); return
                 raw = b"x" * 65537 if self.server.mode == "oversize" else owner.wire(self.server.request)["body"].encode()
@@ -229,6 +421,13 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(state["state"], "failed" if mode in ("reject", "oversize") else "uncertain")
                 self.call(client=lambda *_: self.fail("must not retry"))
             self.assertEqual(len(self.calls), 5)
+            for mode in ("rate_limited", "service_unavailable"):
+                for path in (self.cfg.factory / "investigations").glob("*.json"): path.unlink()
+                server.mode = mode
+                state = self.call()
+                self.assertEqual(state["state"], "retryable")
+                self.assertEqual(state["request_count"], 2)
+            self.assertEqual(len(self.calls), 9)
             server.shutdown()
 
 
