@@ -334,8 +334,18 @@ def nomad(ctx: Context):
                 for name, task in list((value.get("TaskStates") or {}).items())[:8]:
                     tasks[name] = pick(task, "State Failed StartedAt FinishedAt")
                     fields = "Type Time ExitCode Signal FailsTask" + (" DisplayMessage Message RestartReason" if ctx.p.logs else "")
-                    tasks[name]["Events"] = [pick(e, fields)
-                        for e in task.get("Events", []) if seconds(e.get("Time")) is not None and ctx.start <= seconds(e["Time"]) <= ctx.end][-50:]
+                    events = []
+                    for event in task.get("Events", []):
+                        if seconds(event.get("Time")) is None or not ctx.start <= seconds(event["Time"]) <= ctx.end:
+                            continue
+                        projected = pick(event, fields)
+                        # Nomad 2.x records this explicit driver signal in Details.
+                        # Never retain the arbitrary Details map or infer from 137.
+                        oom = (event.get("Details") or {}).get("oom_killed")
+                        if oom in ("true", "false"):
+                            projected["OOMKilled"] = oom == "true"
+                        events.append(projected)
+                    tasks[name]["Events"] = events[-50:]
                 return {**pick(value, "ID JobID Namespace EvalID DeploymentID PreviousAllocation NextAllocation ClientStatus DesiredStatus"), "tasks": tasks}
             details = ctx.observe(f"nomad/allocation/{aid}", allocation, lineage=alloc_lineage)
             if not ctx.p.logs:
