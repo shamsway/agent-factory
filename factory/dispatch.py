@@ -966,6 +966,18 @@ def pr_comment(n: int, text: str) -> None:
     )
 
 
+def refuse_investigation_route(n, reason, *, dry_run=False):
+    log(f"#{n}: refused ({reason})")
+    if dry_run or reason != "deployment_incident_requires_isolated_route":
+        return
+    from factory import investigation_routing
+    try:
+        if investigation_routing.handoff(cfg, n):
+            record("investigation-route-refused", ticket=n, reason=reason, handed_to_human=True)
+    except Exception as exc:
+        log(f"#{n}: routing handoff pending ({type(exc).__name__})")
+
+
 def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
     """Terminal state for a ready-for-investigation ticket: no diff, no PR --
     post the findings and route to a human to decide what happens next."""
@@ -976,8 +988,7 @@ def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
     except Exception:
         refusal = "incident_routing_unavailable"
     if refusal:
-        record("investigation-route-refused", ticket=n, reason=refusal)
-        log(f"#{n}: refused ({refusal})")
+        refuse_investigation_route(n, refusal)
         return
     handoff = wt / ".factory" / f"handoff-{n}.md"
     if not handoff.exists() or not handoff.read_text().strip():
@@ -1819,9 +1830,7 @@ def process_ticket(
     from factory import investigation_routing
     refusal = investigation_routing.blocked(FACTORY, issue, legacy_investigation=investigation)
     if refusal:
-        log(f"#{n}: refused ({refusal})")
-        if not dry_run:
-            record("investigation-route-refused", ticket=n, reason=refusal)
+        refuse_investigation_route(n, refusal, dry_run=dry_run)
         return
     wt = FACTORY / f"wt-{n}"
     worker = cfg.worker(labels, wt / ".factory-prompt.md", wt)[0]
@@ -1891,7 +1900,7 @@ def process_ticket(
             refusal = investigation_routing.blocked(FACTORY, {**fresh, "number": n},
                                                        legacy_investigation=investigation)
             if refusal:
-                log(f"#{n}: refused ({refusal})")
+                refuse_investigation_route(n, refusal)
                 execution.outcome = "not_admitted"
                 execution.reason = refusal
                 return

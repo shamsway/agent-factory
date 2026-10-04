@@ -125,10 +125,11 @@ installed by these functions.
 Deployment roots are refused before legacy worker admission, including forced
 execution or a changed label. Both frontier and freshly queried issue bodies
 are checked for the incident marker; local incident issue mappings independently
-block marker removal. All legacy investigation jobs are disabled in repositories
-with a private incident store. The free-form findings publisher independently
-checks fresh routing and refuses before reading its handoff or making a write.
-Unsafe/unavailable routing fails closed. Unrelated software implementation tickets
+block marker removal. A private incident store does not disable unrelated software investigations,
+including findings already in flight. The free-form findings publisher independently
+checks fresh routing and refuses before reading its handoff. Confirmed deployment
+incidents instead receive a fixed human handoff.
+Unsafe/unavailable routing fails closed. Unrelated software tickets
 remain schedulable. This is a routing fence, not process/file/network isolation:
 an isolated replacement investigator and its trusted delivery remain outstanding.
 Keep diagnostics disabled until that replacement is installed and accepted.
@@ -136,3 +137,21 @@ Keep diagnostics disabled until that replacement is installed and accepted.
 Nomad 2.0.4 [deployment states](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/deployment.go)
 include pending, initializing and unblocking; these are allowlisted. Unknown state
 strings remain minimized, never reflected publicly and never prove a diagnosis.
+
+### Temporary human handoff until the isolated investigator is accepted
+
+A refused deployment root receives one fixed comment and an idempotent label
+change: remove ready-for-investigation/ready-for-agent, add ready-for-human,
+retain unrelated labels. No legacy findings are read or included. A per-issue
+lock and durable routing-handoffs receipt prevent concurrent/restarted duplicate
+comment creation and repeated journal refusal events. REST comment-marker lookup
+can adopt a prior comment after a crash; search-index lag is not used. Persist
+uncertain intent before POST. An unknown create outcome is never automatically
+repeated; still route to ready-for-human and retain comment=uncertain in the local
+receipt for operator reconciliation. Exactly-once remote creation cannot be
+promised under an uncertain response. A failed label edit is retried with the
+existing confirmed/uncertain comment state, without posting again. Once the
+handoff completes, repeated stale/forced dispatch calls do not write another
+refusal event. Missing/unsafe identity lookup remains a local safe refusal,
+without publishing arbitrary findings to an unconfirmed incident destination.
+This source change makes no live GitHub writes or diagnostic enablement.
