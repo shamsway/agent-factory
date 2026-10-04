@@ -74,8 +74,10 @@ def handoff(cfg, number, *, remote=None):
         except FileExistsError:
             pass
     with directory(root) as fd:
-        lock = os.open(f"{number}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        lock = os.open(f"{number}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=fd)
         try:
+            if not stat.S_ISREG(os.fstat(lock).st_mode):
+                raise ValueError("unsafe routing lock")
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:

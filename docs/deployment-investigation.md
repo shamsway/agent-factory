@@ -3,7 +3,7 @@
 SHA-201 begins with two trusted security components. They are library code for
 review, not an activated worker route. Diagnostics remain off on live targets.
 The legacy `ready-for-investigation` worker is refused for deployment roots by
-the routing fence described below; no raw bundle may be handed to it. No model process, broker endpoint, GitHub
+the routing fence described below; no raw bundle may be handed to it. No model process, broker endpoint, investigator-findings
 sender, target enablement or production repair is installed by this change.
 
 ## Trusted evidence reader
@@ -154,7 +154,7 @@ existing confirmed/uncertain comment state, without posting again. Once the
 handoff completes, repeated stale/forced dispatch calls do not write another
 refusal event. Missing/unsafe identity lookup remains a local safe refusal,
 without publishing arbitrary findings to an unconfirmed incident destination.
-This source change makes no live GitHub writes or diagnostic enablement.
+Implementation and tests make no live incident comment/label writes or diagnostic enablement.
 
 New and reopened SHA-199 deployment incidents are also labelled ready-for-human
 until the isolated investigator is accepted. Repeated failure delivery therefore

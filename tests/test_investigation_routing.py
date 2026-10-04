@@ -180,6 +180,18 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(remote.posts, 1)
         self.assertEqual(remote.edits, 2)
 
+    def test_symlink_handoff_lock_refuses_before_remote_requests(self):
+        self.handoff_patch.stop()
+        root = self.factory / "routing-handoffs"
+        root.mkdir()
+        destination = root / "other"
+        destination.write_text("")
+        (root / "11.lock").symlink_to(destination)
+        remote = mock.Mock()
+        with self.assertRaises(Exception):
+            investigation_routing.handoff(dispatch.cfg, 11, remote=remote)
+        remote.api.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
