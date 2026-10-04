@@ -175,9 +175,16 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--live", action="store_true", help="validate configured GH/1Password credentials in isolated subprocesses")
     parser.add_argument("--scope", choices=("install", "apply", "investigation", "all"), default="install")
     parser.add_argument("--json", action="store_true", help="emit names/statuses as JSON")
+    parser.add_argument("--reuse-install-model-key", choices=("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LITELLM_API_KEY"),
+                        help="explicit temporary shared model role; only with --scope investigation")
     args = parser.parse_args(argv)
+    if args.reuse_install_model_key and args.scope != "investigation":
+        parser.error("existing model key verification requires --scope investigation")
     try:
         cfg = config.load()
+        if args.reuse_install_model_key:
+            from .investigation_model import reuse_install_model_key
+            reuse_install_model_key(cfg, args.reuse_install_model_key)
     except (config.ConfigError, OSError, ValueError):
         print(json.dumps({"ok": False, "error": "configuration_unavailable"}))
         return 1

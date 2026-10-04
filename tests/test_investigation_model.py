@@ -371,6 +371,27 @@ class ModelTests(unittest.TestCase):
         self.cfg.apply_env["ANTHROPIC_API_KEY"] = key
         self.assertEqual(model.credential_status(self.cfg), "invalid")
 
+    def test_existing_key_cli_verification_and_synthetic_preview(self):
+        import io
+        import tempfile
+        from contextlib import redirect_stdout
+        self.cfg.install = copy.deepcopy(self.cfg.install)
+        self.cfg.install["env"]["ANTHROPIC_API_KEY"] = "existing-model-key"
+        with mock.patch.object(config, "load", return_value=self.cfg):
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(verify_secrets.main(["--scope", "investigation", "--reuse-install-model-key", "ANTHROPIC_API_KEY", "--json"]), 0)
+            self.assertNotIn("existing-model-key", output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["credentials"][0]["status"], "configured_shared")
+            with tempfile.TemporaryDirectory() as folder:
+                argv = ["--output-dir", str(Path(folder).resolve() / "synthetic"),
+                        "--reuse-install-model-key", "ANTHROPIC_API_KEY",
+                        "--url", "https://api.anthropic.com/v1/chat/completions", "--model", "fixed-model"]
+                with mock.patch.object(model, "http_call", side_effect=AssertionError("preview must not call")):
+                    with redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(model.accept_main(argv), 0, output.getvalue())
+                    self.assertFalse(json.loads(output.getvalue())["provider_called"])
+                    self.assertNotIn("existing-model-key", output.getvalue())
+
     def test_verify_secrets_separate_role_and_no_live_export(self):
         rows = verify_secrets.credential_rows(self.cfg, "all", False)
         self.assertIn({"scope": "investigation", "key": model.KEY_NAME, "status": "configured"}, rows)

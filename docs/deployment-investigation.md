@@ -485,3 +485,12 @@ no combined-budget reset when changing providers. Existing LiteLLM may supply
 such routes, but its own retries and logging must be reviewed before live evidence
 is routed through it. First reuse acceptance can call Anthropic directly to keep
 Factory's one-request/one-invocation boundary observable.
+
+For synthetic reuse without changing protected configuration or services, the
+operator may use verify-secrets --scope investigation --reuse-install-model-key
+ANTHROPIC_API_KEY. Then pass the same reuse flag plus --url and --model to
+investigation-accept (first preview, then the usual live-provider/spend-cap flags).
+These bind the already-loaded key to a temporary in-memory model role only; no
+secret is accepted in argv or copied into another file. Endpoint/model arguments
+are allowed only with explicit existing-key reuse and still pass the fixed policy
+validator. No dispatcher or production evidence path is activated by this command.
