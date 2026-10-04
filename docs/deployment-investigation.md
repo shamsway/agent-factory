@@ -67,7 +67,8 @@ later investigation logic must validate repository scope before a fix proposal.
 `prepare_for_incident(...)` prepares an immutable envelope for a future trusted
 outbox sender. The destination is the locally recorded root issue, checked
 against the configured repository, not the original failed ticket or a
-worker-selected endpoint. It carries a stable projection-based idempotency key.
+worker-selected endpoint. An incident still pending delivery or marked uncertain
+is not a publication destination, even when its issue number is populated. It carries a stable projection-based idempotency key.
 It does not post. The future sender must persist/deduplicate delivery, validate
 root routing and use its own role; the worker receives no GitHub credential.
 Result limit is 8 KiB; rendered public output is at most 16 KiB. Neither a worker

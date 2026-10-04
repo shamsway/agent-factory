@@ -258,6 +258,13 @@ class BoundaryTests(unittest.TestCase):
         incident_path = self.factory / "incidents" / (self.root_id + ".json")
         incident = json.loads(incident_path.read_text())
         incident["issue"] = 11
+        for status, uncertain in (("pending", False), ("delivered", True)):
+            incident.update(status=status, uncertain=uncertain)
+            incident_path.write_text(json.dumps(incident))
+            with self.assertRaises(evidence.EvidenceRefused):
+                publication.prepare_for_incident(self.factory, "acme/widgets", self.root_id,
+                                                 self.run.run_id, self.result(projection), now=NOW + 2)
+        incident.update(status="delivered", uncertain=False)
         incident_path.write_text(json.dumps(incident))
         envelope = publication.prepare_for_incident(self.factory, "acme/widgets", self.root_id,
                                                     self.run.run_id, self.result(projection), now=NOW + 2)

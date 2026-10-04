@@ -196,6 +196,7 @@ class Projection:
     payload: bytes
     repository: str = ""  # trusted routing metadata; never supplied by the model
     issue: int | None = None
+    deliverable: bool = False
 
     @property
     def sha256(self):
@@ -405,7 +406,8 @@ def read_evidence(factory: Path, incident_id: str, run_id: str, *, now=None) -> 
             require(len(payload) <= MAX_PROJECTION, "projection_budget_exhausted")
             issue = incident.get("issue")
             require(issue is None or type(issue) is int and issue > 0, "invalid_publication_destination")
-            return Projection(payload, repo, issue)
+            return Projection(payload, repo, issue, incident.get("status") == "delivered"
+                              and incident.get("uncertain") is False)
     except EvidenceRefused:
         raise
     except Exception:
