@@ -20,11 +20,10 @@ import stat
 import time
 import urllib.parse
 
-from . import artifacts, incidents
+from . import artifacts, deploy, incidents, lifecycle
 
 POLICY_VERSION = 1
 MAX_FILE = 1024 * 1024
-MAX_JOURNAL = 64 * MAX_FILE
 MAX_ROWS = 256
 MAX_PROJECTION = 128 * 1024
 MAX_AGE = 3600
@@ -36,7 +35,7 @@ STATUSES = frozenset({"observed", "disabled", "not_configured", "lineage_unavail
 JOB_STATES = frozenset({"pending", "running", "dead"})
 ALLOC_STATES = frozenset({"pending", "running", "complete", "failed", "lost", "unknown"})
 EVAL_STATES = frozenset({"pending", "complete", "failed", "blocked", "canceled"})
-DEPLOY_STATES = frozenset({"running", "paused", "successful", "failed", "cancelled", "blocked"})
+DEPLOY_STATES = frozenset({"running", "paused", "successful", "failed", "cancelled", "blocked", "pending", "initializing", "unblocking"})
 EVENT_TYPES = frozenset({"Received", "Task Setup", "Driver", "Started", "Terminated", "Restarting",
     "Not Restarting", "Killing", "Killed", "Sibling Task Failed", "Failed Validation"})
 
@@ -144,49 +143,73 @@ def read_json(fd, parts):
     return obj, raw
 
 
-def durable_run(fd, run_id, target, deadline):
-    """Read committed modern rows under the journal lock; bounded gzip segments."""
+def durable_run(fd, run_id, target, ticket, deadline):
+    """Live first, then newest segments until identity is found.
+
+    Filter bytes before decoding, but replay relevant committed events through
+    the same resolution rules as incident sync. Budget each file separately:
+    rotation may overshoot its configured threshold by one bounded journal row.
+    """
+    require(type(ticket) is int and ticket > 0)
     names = [n for n in os.listdir(fd) if re.fullmatch(r"events\.jsonl\.[1-9][0-9]*\.gz", n)]
-    require(len(names) <= 8, "journal_budget_exhausted")
-    names.sort(key=lambda n: int(n.split(".")[-2]), reverse=True)
-    latest, used = None, 0
+    require(len(names) <= lifecycle.RETENTION, "journal_budget_exhausted")
+    names.sort(key=lambda n: int(n.split(".")[-2]))
+    token = run_id.encode()
+    ticket_token = re.compile(rb'"ticket"\s*:\s*' + str(ticket).encode() + rb'(?=[,}\s])')
+    chunks = []
+    row_count = 0
+    def scan(handle):
+        nonlocal row_count
+        rows, used = [], 0
+        while True:
+            require(time.monotonic() < deadline, "reader_timeout")
+            line = handle.readline(MAX_FILE + 1)
+            if not line:
+                break
+            used += len(line)
+            require(used <= lifecycle.MAX_BYTES + MAX_FILE and len(line) <= MAX_FILE,
+                    "journal_budget_exhausted")
+            if not line.endswith(b"\n") or not (token in line or ticket_token.search(line)):
+                continue
+            try:
+                row = json.loads(line, object_pairs_hook=unique_pairs)
+            except EvidenceRefused:
+                raise
+            except (ValueError, UnicodeError, RecursionError):
+                continue
+            if not isinstance(row, dict) or row.get("event") not in deploy.REPLAY_EVENTS:
+                continue
+            if row.get("run_id") == run_id:
+                require(row.get("target", "default") == target, "run_identity_mismatch")
+            if row.get("target", "default") == target and (row.get("run_id") == run_id or row.get("ticket") == ticket):
+                row_count += 1
+                require(row_count <= 4096, "journal_budget_exhausted")
+                rows.append(row)
+        return rows
     with file_at(fd, ("events.jsonl",)) as live:
         try:
             fcntl.flock(live, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             raise EvidenceRefused("journal_busy") from None
-        def scan(handle):
-            nonlocal latest, used
-            while True:
-                require(time.monotonic() < deadline, "reader_timeout")
-                line = handle.readline(MAX_FILE + 1)
-                if not line:
-                    break
-                used += len(line)
-                require(used <= MAX_JOURNAL and len(line) <= MAX_FILE, "journal_budget_exhausted")
-                if not line.endswith(b"\n"):
-                    continue
-                try:
-                    row = json.loads(line)
-                except (ValueError, UnicodeError, RecursionError):
-                    continue
-                if isinstance(row, dict) and row.get("event") in ("deploy_acknowledged", "deploy_superseded"):
-                    if row.get("target") == target and (row.get("run_id") == run_id or latest and row.get("ticket") == latest.get("ticket")):
-                        raise EvidenceRefused("run_already_resolved")
-                if isinstance(row, dict) and row.get("event") == "deploy_run" and row.get("run_id") == run_id:
-                    require(row.get("target") == target, "run_identity_mismatch")
-                    # Apply emits complete modern rows. Never use compatibility
-                    # notifications or reconstruct a partial modern identity.
-                    latest = row
         try:
+            chunks.append(scan(live))
             for name in names:
+                if any(r.get("event") == "deploy_run" and r.get("run_id") == run_id
+                       for chunk in chunks for r in chunk):
+                    break
                 with file_at(fd, (name,)) as archived:
                     with gzip.GzipFile(fileobj=archived) as handle:
-                        scan(handle)
-            scan(live)
+                        chunks.append(scan(handle))
         except (OSError, EOFError):
             raise EvidenceRefused("journal_unavailable") from None
-    require(latest is not None, "run_unavailable")
+    rows = [row for chunk in reversed(chunks) for row in chunk]
+    matches = [r for r in rows if r.get("event") == "deploy_run" and r.get("run_id") == run_id]
+    require(bool(matches), "run_unavailable")
+    latest = matches[-1]
+    require(latest.get("ticket") == ticket, "run_identity_mismatch")
+    state = deploy.replay_rows(rows).get(target)
+    require(state is not None and ticket in state.unacknowledged_failed_tickets
+            and run_id not in state.acknowledged_failures, "run_already_resolved")
     return latest
 
 
@@ -204,6 +227,29 @@ class Projection:
 
     def data(self):
         return json.loads(self.payload)
+
+
+def known_state(value, allowed):
+    return value if isinstance(value, str) and value in allowed else "unknown"
+
+
+def read_incident(factory, incident_id):
+    """Trusted routing only; independent of journal and diagnostics availability."""
+    require(isinstance(incident_id, str) and incidents.ID_RE.fullmatch(incident_id), "invalid_reference")
+    try:
+        with directory(factory) as fd:
+            row, _ = read_json(fd, ("incidents", incident_id + ".json"))
+        require(row.get("version") == 1 and row.get("id") == incident_id, "incident_identity_mismatch")
+        repo, target, ticket = row.get("repo"), row.get("target"), row.get("original_ticket")
+        require(isinstance(repo, str) and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
+                and isinstance(target, str) and artifacts.TARGET_RE.fullmatch(target)
+                and type(ticket) is int and ticket > 0, "incident_identity_mismatch")
+        require(incident_id == incidents.identity(repo, target, ticket), "incident_identity_mismatch")
+        return row
+    except EvidenceRefused:
+        raise
+    except Exception:
+        raise EvidenceRefused("invalid_evidence") from None
 
 
 def jobs_for(run):
@@ -230,7 +276,7 @@ def project(bundle, run, now):
     completed, began = timestamp(run.get("completed_at")), timestamp(run.get("started_at"))
     collected = timestamp(bundle.get("collected_at"))
     require(began <= start <= end <= completed and end == completed and end - start <= MAX_AGE)
-    require(end <= collected <= now and now - end <= MAX_AGE, "stale_evidence")
+    require(end <= collected <= now, "stale_evidence")
     require(type(bundle.get("dropped_observations")) is int and bundle["dropped_observations"] == 0, "partial_evidence")
     jobs = jobs_for(run)
     observations = bundle.get("observations")
@@ -244,7 +290,7 @@ def project(bundle, run, now):
     for row in observations:
         require(isinstance(row, dict))
         status = row.get("status")
-        if status not in STATUSES:
+        if not isinstance(status, str) or status not in STATUSES:
             status = "unavailable"
         observed = timestamp(row.get("observed_at"))
         require(end <= observed <= collected, "invalid_observation_time")
@@ -262,8 +308,11 @@ def project(bundle, run, now):
             if status == "observed":
                 require(isinstance(data, dict) and data.get("ID") == jid and data.get("Namespace", "default") == ns)
                 require(type(data.get("Version")) is int and data["Version"] >= 0)
-                require(data.get("Status") in JOB_STATES)
-                add("current_job", status, observed, {**scope, "current_version": data["Version"], "state": data["Status"], "relation": "current_state_only"})
+                state = known_state(data.get("Status"), JOB_STATES)
+                if now - observed > MAX_AGE:
+                    add("current_job", "stale", observed, scope)
+                    continue
+                add("current_job", status, observed, {**scope, "current_version": data["Version"], "state": state, "relation": "current_state_only"})
             else:
                 add("current_job", status, observed, scope)
         elif source == prefix + "/evaluations":
@@ -273,7 +322,7 @@ def project(bundle, run, now):
             require(isinstance(data, list) and len(data) <= 50)
             for value in data:
                 require(value.get("JobID") == jid and value.get("Namespace", "default") == ns)
-                require(UUID.fullmatch(value.get("ID", "")) and value.get("Status") in EVAL_STATES)
+                require(UUID.fullmatch(value.get("ID", "")))
                 modified = value.get("ModifyTime")
                 require(type(modified) is int and start <= modified / 1e9 <= end)
                 metrics = {"nodes_available": 0, "constraints_filtered": 0, "resources_exhausted": 0,
@@ -304,7 +353,7 @@ def project(bundle, run, now):
                         require(number(count))
                         metrics["constraints_filtered"] += count
                 add("evaluation", status, observed, {**scope, "evaluation": alias("evaluation", value["ID"]),
-                    "state": value["Status"], "event_time": utc(modified / 1e9), "relation": "job_time_window_not_version_proof", **metrics})
+                    "state": known_state(value.get("Status"), EVAL_STATES), "event_time": utc(modified / 1e9), "relation": "job_time_window_not_version_proof", **metrics})
         elif source == prefix + "/allocations" or source == prefix + "/deployments":
             kind = "allocation" if source.endswith("/allocations") else "deployment"
             if status != "observed":
@@ -321,7 +370,7 @@ def project(bundle, run, now):
                             and created / 1e9 <= end and modified / 1e9 >= start, "allocation_window_mismatch")
                     allocation_ids.add((value["ID"], jid, ns, version))
                 state = value.get("ClientStatus") if kind == "allocation" else value.get("Status")
-                require(state in (ALLOC_STATES if kind == "allocation" else DEPLOY_STATES))
+                state = known_state(state, ALLOC_STATES if kind == "allocation" else DEPLOY_STATES)
                 add(kind, status, observed, {**scope, kind: alias(kind, value["ID"]), "state": state, "relation": "recorded_health_version"})
         elif isinstance(source, str) and source.startswith("nomad/allocation/") and source.count("/") == 2:
             aid = source.rsplit("/", 1)[1]
@@ -334,17 +383,18 @@ def project(bundle, run, now):
             tasks = data.get("tasks") or {}
             require(isinstance(tasks, dict) and len(tasks) <= 8)
             for name, task in tasks.items():
-                require(isinstance(task, dict) and task.get("State") in {"pending", "running", "dead"})
+                require(isinstance(task, dict))
+                task_state = known_state(task.get("State"), JOB_STATES)
                 events = task.get("Events") or []
                 require(isinstance(events, list) and len(events) <= 50)
                 for event in events:
                     et = event.get("Time")
                     require(type(et) is int and start <= et / 1e9 <= end)
                     event_type = event.get("Type")
-                    if event_type not in EVENT_TYPES:
+                    if not isinstance(event_type, str) or event_type not in EVENT_TYPES:
                         event_type = "Other"
                     fields = {**scope, "allocation": alias("allocation", aid), "task": alias("task", name),
-                        "state": task["State"], "event_type": event_type, "event_time": utc(et / 1e9), "relation": "recorded_health_version"}
+                        "state": task_state, "event_type": event_type, "event_time": utc(et / 1e9), "relation": "recorded_health_version"}
                     if "OOMKilled" in event:
                         require(type(event["OOMKilled"]) is bool)
                         fields["oom_killed"] = event["OOMKilled"]
@@ -379,7 +429,7 @@ def read_evidence(factory: Path, incident_id: str, run_id: str, *, now=None) -> 
             require(len(refs) == 1, "incident_run_mismatch")
             ref = refs[0]
             require(ref.get("artifact_ref") == f"artifacts/{target}/{run_id}/manifest.json")
-            run = durable_run(fd, run_id, target, time.monotonic() + 5)
+            run = durable_run(fd, run_id, target, ref.get("ticket"), time.monotonic() + 5)
             require(run.get("status") == "failed", "not_a_failed_run")
             require(type(run.get("ticket")) is int and run["ticket"] > 0)
             require(HEX.fullmatch(run.get("commit", "")) and ref.get("commit") == run["commit"] and ref.get("ticket") == run.get("ticket"))

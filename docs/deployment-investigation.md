@@ -13,7 +13,7 @@ resolves the local incident's exact run, reads committed modern deployment rows
 under a nonblocking shared journal lock, and requires an unresolved terminal
 failure. Compatibility notifications never supply authority. It then verifies
 manifest identity, the unique diagnostics entry's size/hash, bundle identity,
-known namespace/region/version and failure-window freshness. Allocation details
+known namespace/region/version and failure-window provenance. Allocation details
 must refer to a matching version and a lifetime intersecting the window, with
 an earlier authenticated allocation-list reference. Current job state remains
 separate from recorded-health-version evidence. Evaluations correlate by job
@@ -21,16 +21,23 @@ and time and do not assert a deployed version.
 
 Every ancestor and leaf is opened using descriptor-relative `O_NOFOLLOW` reads;
 symlinks, nonregular files, traversal, conflicting identities, unauthenticated
-artifacts, unknown windows, partial or stale evidence fail closed with fixed
+artifacts, unknown windows or partial evidence fail closed with fixed
 reason codes. The store root must be a real canonical path supplied by trusted
 configuration, not a worker path. Duplicate JSON keys are rejected in incident,
 manifest and bundle objects. Reads do not create files or make network calls.
-Limits: 1 MiB per artifact/incident/manifest, 64 MiB decompressed journal across
-at most eight gzip segments and the live file, 1 MiB per journal line, five-second
-journal processing deadline, one-hour freshness/window, 256 projected rows and
-128 KiB serialized projection. These limits are conservative; older incidents,
-large journals or incomplete evidence need human handling, not a widened model
-request. Local file/JSON processing overhead is not a hard process deadline.
+Limits: 1 MiB per artifact/incident/manifest and per journal line; each journal
+file has the configured `journal_max_mb` rotation threshold plus one bounded row
+of rotation overshoot. Retained segment count follows configured journal retention.
+Read the live file first; only open newest-to-oldest archives when the run is not
+there. Filter unrelated run/ticket bytes before JSON parsing, retain at most 4096
+relevant replay rows and use a five-second journal deadline. Replay relevant rows
+chronologically through the same `deploy.replay_rows` resolution rule as incident
+sync: a later successful ticket run, acknowledgement or supersession refuses the
+old failure. Historical failure/version evidence does not expire after one hour;
+only current-job observations older than an hour become `status=stale`, without
+current values. Collection/window provenance remains strict. Limits also include
+256 projected rows and a 128 KiB serialized projection. Incomplete evidence needs
+human handling, not a widened model request. Local file/JSON processing overhead is not a hard process deadline.
 
 The broker returns immutable serialized projection bytes plus trusted private
 routing metadata. Only `Projection.payload` crosses the model boundary. Job,
@@ -39,7 +46,7 @@ aliases; public evidence references are generated `e0001` values. Only known
 states, event types, bounded numeric placement/resource metrics, exit codes and
 normalized timestamps enter the projection. No logs, messages, error text,
 status descriptions, constraint/group/task names, Consul Output, host paths,
-plans or original source identifiers enter it. Unrecognized event strings become
+plans or original source identifiers enter it. Unrecognized states become `unknown` and event strings become
 `Other`; a numeric exit code 137 alone cannot support an OOM finding.
 
 This is data minimization, not cryptographic attestation of the filesystem or
@@ -103,3 +110,18 @@ Phase order stays 1 → 2 → 4 → 3 → 5. PR #3's accepted follow-up can ship
 first SHA-201 runtime release. No merge/apply authority comes from findings.
 
 API shape checked against Nomad 2.0.4: [allocation metrics](https://github.com/hashicorp/nomad/blob/v2.0.4/api/allocations.go) expose NodesAvailable as a datacenter map, and [task event OOM signal](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/structs.go) is set in Details["oom_killed"]. Datacenter names are omitted and counts summed; arbitrary event Details stay excluded.
+
+## Evidence refusal and legacy route fencing
+
+`render_refusal(incident_id, refusal_code)` emits a fixed human-escalation template
+without reading a projection, journal or bundle. Only validated incident IDs and
+allowlisted fixed reader codes are accepted; exception messages and model prose
+are never rendered. `prepare_refusal(...)` resolves only trusted local incident
+metadata and requires a delivered, unambiguous root issue in the configured repo.
+If the incident routing itself is missing/unsafe, posting is refused; the future
+outbox must preserve an operator-visible local failure. No posting transport is
+installed by these functions.
+
+Nomad 2.0.4 [deployment states](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/deployment.go)
+include pending, initializing and unblocking; these are allowlisted. Unknown state
+strings remain minimized, never reflected publicly and never prove a diagnosis.

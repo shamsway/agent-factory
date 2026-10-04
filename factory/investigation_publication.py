@@ -11,8 +11,10 @@ from dataclasses import dataclass
 import json
 import re
 
+from . import incidents
+
 from .investigation_evidence import (Projection, EvidenceRefused, require, encoded, timestamp, utc,
-                                     MAX_PROJECTION, MAX_ROWS, read_evidence)
+                                     MAX_PROJECTION, MAX_ROWS, read_evidence, read_incident)
 
 MAX_RESULT = 8192
 MAX_PUBLIC = 16384
@@ -169,3 +171,45 @@ def prepare_for_incident(factory, repository: str, incident_id: str, run_id: str
     body = render(projection, raw_result)
     key = "investigation-" + projection.sha256
     return Publication(repository, projection.issue, key, body)
+
+
+# Codes originate in the trusted reader. Never interpolate an exception message
+# or accept unrestricted model prose as a refusal code.
+REFUSALS = frozenset({
+    "invalid_evidence", "invalid_reference", "unsafe_path", "unsafe_or_missing_file",
+    "unsafe_file_type", "duplicate_json_key", "invalid_json", "invalid_timestamp",
+    "file_budget_exhausted", "journal_budget_exhausted", "reader_timeout",
+    "journal_busy", "journal_unavailable", "run_unavailable", "run_already_resolved",
+    "run_identity_mismatch", "not_a_failed_run", "incident_identity_mismatch",
+    "incident_run_mismatch", "manifest_identity_mismatch", "diagnostics_not_authenticated",
+    "diagnostics_hash_mismatch", "bundle_identity_mismatch", "logs_not_allowed",
+    "window_unavailable", "stale_evidence", "partial_evidence", "invalid_observation_time",
+    "version_unavailable", "allocation_window_mismatch", "allocation_lineage_mismatch",
+    "row_budget_exhausted", "projection_budget_exhausted", "invalid_publication_destination",
+})
+
+
+def render_refusal(incident_id: str, refusal_code: str) -> str:
+    """Render human escalation without reading refused evidence or a projection."""
+    require(isinstance(incident_id, str) and incidents.ID_RE.fullmatch(incident_id), "invalid_reference")
+    require(isinstance(refusal_code, str) and refusal_code in REFUSALS, "invalid_refusal_code")
+    return ("## Deployment investigation escalated\n\n"
+            f"Incident: `{incident_id}`.\n"
+            f"Evidence reader refused the input (`{refusal_code}`).\n"
+            "A human must inspect the private incident and reconcile or refresh evidence.\n"
+            "No diagnosis or repair is proposed or authorized. Raw evidence is not published.\n")
+
+
+def prepare_refusal(factory, repository: str, incident_id: str, refusal_code: str) -> Publication:
+    """Route escalation using only validated incident metadata, never the bundle.
+
+    If routing itself is unavailable, refuse posting; the future outbox must
+    retain a local operator-visible failure. No worker-selected destination.
+    """
+    body = render_refusal(incident_id, refusal_code)
+    incident = read_incident(factory, incident_id)
+    issue = incident.get("issue")
+    require(incident.get("repo") == repository and type(issue) is int and issue > 0
+            and incident.get("status") == "delivered" and incident.get("uncertain") is False,
+            "publication_destination_unavailable")
+    return Publication(repository, issue, f"investigation-refused-{incident_id}-{refusal_code}", body)
