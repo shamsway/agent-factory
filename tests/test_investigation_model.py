@@ -70,6 +70,20 @@ class ModelTests(unittest.TestCase):
         self.assertNotIn(SECRET, envelope.body)
         self.assertEqual(model.snapshot(self.cfg)["states"]["complete"], 1)
 
+    def test_markdown_fences_remain_invalid(self):
+        def fenced_client(policy, payload):
+            self.assertIn("Do not use Markdown", payload["messages"][0]["content"])
+            wire = self.wire(payload)
+            body = json.loads(wire["body"])
+            message = body["choices"][0]["message"]
+            message["content"] = "```json\n" + message["content"] + "\n```"
+            wire["body"] = json.dumps(body)
+            return wire
+        state = self.call(client=fenced_client)
+        self.assertEqual(state["state"], "failed")
+        self.assertEqual(state["code"], "invalid_response")
+        self.assertNotIn("result", state)
+
     def test_uncertainty_and_crash_do_not_retry(self):
         for mode in ("timeout", "crash"):
             with self.subTest(mode=mode):
