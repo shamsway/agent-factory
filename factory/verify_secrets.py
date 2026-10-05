@@ -164,6 +164,12 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
             if live and status in {"configured", "configured_shared"}:
                 status = "not_checked_shared" if status == "configured_shared" else "not_checked"  # Never spend/export evidence for an auth probe.
             rows.append({"scope": "investigation", "key": KEY_NAME, "status": status})
+    if scope in ("all", "publisher"):
+        from .investigation_publisher import policy as publisher_policy, credential_status as publisher_status, verify_status, KEY_NAME as publisher_key
+        p = publisher_policy(cfg.publisher)
+        if p["key"] or p["enabled"] or scope == "publisher":
+            status = verify_status(cfg) if live else publisher_status(cfg)
+            rows.append({"scope": "publisher", "key": publisher_key, "status": status})
     return rows
 
 
@@ -173,7 +179,7 @@ def main(argv: list[str]) -> int:
         description="Compare installed unit credentials and optionally validate scoped credentials; values are never printed.",
     )
     parser.add_argument("--live", action="store_true", help="validate configured GH/1Password credentials in isolated subprocesses")
-    parser.add_argument("--scope", choices=("install", "apply", "investigation", "all"), default="install")
+    parser.add_argument("--scope", choices=("install", "apply", "investigation", "publisher", "all"), default="install")
     parser.add_argument("--json", action="store_true", help="emit names/statuses as JSON")
     parser.add_argument("--reuse-install-model-key", choices=("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LITELLM_API_KEY"),
                         help="explicit temporary shared model role; only with --scope investigation")
@@ -189,7 +195,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"ok": False, "error": "configuration_unavailable"}))
         return 1
     try:
-        rows = sync_rows(cfg) if args.scope not in ("apply", "investigation") else []
+        rows = sync_rows(cfg) if args.scope not in ("apply", "investigation", "publisher") else []
         sync_error = None
     except (OSError, subprocess.SubprocessError):
         rows, sync_error = [], "unit_inspection_unavailable"

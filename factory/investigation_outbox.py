@@ -8,6 +8,7 @@ import fcntl
 import os
 import re
 import stat
+import time
 
 from . import incidents, investigation_model as model, investigation_evidence as evidence
 
@@ -46,6 +47,7 @@ def read(fd, name):
                      and row.get("state") in {"queued", "uncertain", "delivered", "failed", "blocked"}
                      and row.get("code") in {"prepared", "fresh_validation_failed", "reconciled",
                          "post_intent", "post_rejected", "post_outcome_unknown", "confirmed"}
+                     and isinstance(row.get("key"), str) and re.fullmatch(r"investigation-(?:[0-9a-f]{64}|refused-incident-[0-9a-f]{24}-[a-z_]{1,64})", row["key"])
                      and type(row.get("issue")) is int and row["issue"] > 0
                      and isinstance(row.get("body_sha256"), str)
                      and re.fullmatch(r"[0-9a-f]{64}", row["body_sha256"]), "invalid_publication_destination")
@@ -90,24 +92,17 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
         evidence.require(row.get("publisher_login", publisher_login) == publisher_login, "publication_binding_changed")
         if row["state"] in {"delivered", "failed", "blocked"}:
             return row
-        try:
-            envelope = model.prepare(cfg, incident, run, now=now)
-            expected = binding(envelope)
-            evidence.require(all(row.get(k) == v for k, v in expected.items()), "publication_binding_changed")
-        except (model.ModelRefused, evidence.EvidenceRefused):
-            row.update(state="blocked", code="fresh_validation_failed")
-            model._write(fd, name, row)
-            return row
         marker = "<!-- factory-investigation-publication: " + name[:-5] + " -->"
-        body = marker + "\n" + envelope.body
-        endpoint = f"repos/{cfg.repo}/issues/{envelope.issue}/comments"
+        prefix = marker + "\n"
+        endpoint = f"repos/{cfg.repo}/issues/{row['issue']}/comments"
         # Bounded complete lookup; unknown lookup never grants permission to POST.
         try:
             for page in range(1, 11):
                 comments = publisher.api(endpoint + f"?per_page=100&page={page}")
                 evidence.require(isinstance(comments, list), "invalid_publication_destination")
-                matches = [c for c in comments if isinstance(c, dict) and c.get("body") == body
-                           and c.get("user", {}).get("login") == publisher_login]
+                matches = [c for c in comments if isinstance(c, dict) and isinstance(c.get("body"), str) and c["body"].startswith(prefix)
+                           and evidence.digest(c["body"][len(prefix):].encode()) == row["body_sha256"]
+                           and isinstance(c.get("user"), dict) and c["user"].get("login") == publisher_login]
                 if matches:
                     row.update(state="delivered", code="reconciled")
                     model._write(fd, name, row)
@@ -120,6 +115,17 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
             return row  # Lookup failed; no POST, no raw exception persisted.
         if row["state"] == "uncertain":
             return row
+        # Only a first POST needs current evidence. Reconciliation above uses
+        # the durable trusted body digest even if source evidence has aged out.
+        try:
+            envelope = model.prepare(cfg, incident, run, now=now)
+            expected = binding(envelope)
+            evidence.require(all(row.get(k) == v for k, v in expected.items()), "publication_binding_changed")
+        except (model.ModelRefused, evidence.EvidenceRefused):
+            row.update(state="blocked", code="fresh_validation_failed")
+            model._write(fd, name, row)
+            return row
+        body = prefix + envelope.body
         row.update(state="uncertain", code="post_intent", publisher_login=publisher_login)
         model._write(fd, name, row)  # durable intent before POST, no retries
         try:
@@ -136,3 +142,38 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
             row.update(state="delivered", code="confirmed")
         model._write(fd, name, row)
         return row
+
+
+def snapshot(cfg):
+    """Read-only complete bounded scan; counts only, no public or provider body."""
+    states = {s: 0 for s in ("queued", "uncertain", "blocked", "failed", "delivered")}
+    result = {"status": "observed", "states": states}
+    deadline = time.monotonic() + 2
+    try:
+        try:
+            cfg.factory.lstat()
+        except FileNotFoundError:
+            return result
+        with evidence.directory(cfg.factory) as parent:
+            try:
+                fd = os.open("investigation-outbox", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            except FileNotFoundError:
+                return result
+            try:
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        evidence.require(time.monotonic() < deadline, "reader_timeout")
+                        if not entry.name.endswith(".json"):
+                            continue
+                        evidence.require(re.fullmatch(r"[0-9a-f]{64}\.json", entry.name), "invalid_reference")
+                        row = read(fd, entry.name)
+                        evidence.require(row is not None and row.get("repo") == cfg.repo
+                                         and isinstance(row.get("incident"), str) and isinstance(row.get("run"), str), "invalid_reference")
+                        expected = evidence.digest((cfg.repo + "\0" + row["incident"] + "\0" + row["run"]).encode())
+                        evidence.require(entry.name == expected + ".json", "invalid_reference")
+                        states[row["state"]] += 1
+            finally:
+                os.close(fd)
+    except Exception:
+        result = {"status": "unavailable", "states": {s: 0 for s in states}}
+    return result

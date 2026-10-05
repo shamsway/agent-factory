@@ -17,7 +17,7 @@ import subprocess
 import sys
 import zlib
 
-from . import config, deploy, incidents, investigation_routing, investigation_model, lifecycle, verify_secrets
+from . import config, deploy, incidents, investigation_routing, investigation_model, investigation_outbox, lifecycle, verify_secrets
 
 LIMIT = 8 * 1024 * 1024
 PROPERTIES = "LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment,ExecStart,WorkingDirectory,InvocationID"
@@ -380,7 +380,7 @@ def inspect(cfg: config.Config, *, live: bool = False, candidates: bool = False,
                                       "directory": target.dir, "adapter": target.adapter}
                                      for name, target in sorted(cfg.targets.items())],
               "units": units, "credentials": verify_secrets.credential_rows(cfg, "all", live),
-              "deployment": ledger, "incidents": incidents.snapshot(cfg.factory), "incident_routing": investigation_routing.snapshot(cfg.factory), "investigations": investigation_model.snapshot(cfg), "locks": locks(cfg, lock_dirs),
+              "deployment": ledger, "incidents": incidents.snapshot(cfg.factory), "incident_routing": investigation_routing.snapshot(cfg.factory), "investigations": investigation_model.snapshot(cfg), "investigation_outbox": investigation_outbox.snapshot(cfg), "locks": locks(cfg, lock_dirs),
               "candidates": candidate_snapshot(cfg, ledger) if candidates else {"status": "not_requested"},
               "limits": ["Point-in-time observations; keep scheduling paused for drain checks.",
                          "Live module bytes are not observable; correlate process invocation with immutable artifact.",
@@ -391,6 +391,7 @@ def inspect(cfg: config.Config, *, live: bool = False, candidates: bool = False,
     if candidates:
         result["complete"] &= result["candidates"]["status"] == "observed" and result["candidates"].get("coverage") != "truncated"
     result["complete"] &= result["incident_routing"]["status"] == "observed" and result["incident_routing"]["receipt_status"] == "observed"
+    result["complete"] &= result["investigation_outbox"]["status"] == "observed"
     result["ok"] = bool(result["complete"] and not any(c["status"] in ("empty", "invalid", "unavailable") for c in result["credentials"]))
     for unit in units:
         if (unit["unit"] not in required and unit["status"] != "observed") or unit["unit"].endswith(".timer"):
