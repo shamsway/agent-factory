@@ -96,7 +96,7 @@ def credential_status(cfg):
         return "empty" if p["enabled"] else "not_configured"
     model_names = MODEL_KEY_NAMES
     # Operator-approved model sharing never permits apply or control-plane keys.
-    forbidden = [*cfg.apply_env.values(), *(value for name, value in cfg.install["env"].items()
+    forbidden = [cfg.publisher.get("key"), *cfg.apply_env.values(), *(value for name, value in cfg.install["env"].items()
                                            if name not in model_names)]
     if any(key == str(value) for value in forbidden if value):
         return "invalid"

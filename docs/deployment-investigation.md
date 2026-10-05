@@ -565,3 +565,52 @@ attempt. Definite failures can permit a later explicitly budgeted alternate
 route; unknown delivery/spend never automatically falls back. Disable/assess any
 server-side routing retries/offload that would multiply requests beyond this
 ledger. Native commercial structured-output transport remains a separate review.
+
+### Outbox reconciliation and visibility
+
+Uncertain delivery reconciles FIRST using the stored destination, marker, fixed
+body digest and publisher login. It does not reopen expired/changed evidence or
+turn a possibly delivered comment into blocked. Missing/incomplete lookup leaves
+uncertainty intact and never reposts. Fresh evidence/destination validation is
+required only before a first POST. Keys must have the generated string shape.
+
+`factory inspect` reports `investigation_outbox.states` counts for queued,
+uncertain, blocked, failed and delivered; no comment body or provider text.
+Malformed/inaccessible receipt scans make inspection incomplete and doctor FAIL.
+Doctor reports separate warning counts for all four unfinished states. Do not
+remove receipts to hide a warning or blindly retry an uncertain publication.
+
+### Dedicated publisher integration (disabled by default)
+
+Operator decision: use a dedicated GitHub App or bot identity, separate from the
+Factory dispatcher. Host-only `[publisher]` has `enabled`, `allow_publish`, `key`,
+`login`, `kind` (`installation_token` or `bot_token`) and bounded HTTP settings.
+No install/apply/model/triage key reuse, shell `GH_TOKEN` fallback or `gh` login.
+The credential travels only on stdin to a clean trusted HTTP subprocess, never
+argv/env; no redirects/proxies/retries/raw error bodies. GitHub API host is fixed.
+Each sender instance permits at most12 requests,30 seconds by default,5 seconds
+per request,1MiB per response. Endpoint allowlist is read-only role verification,
+root-issue comment listing and fixed-template comment creation only.
+
+`factory verify-secrets --scope publisher --json` reports the logical token name
+and configured/isolation status. `--live` performs GET only: bot `/user` must
+match login; App `/installation/repositories` must include the configured repo.
+`read_verified` for an App proves repository read access, not the bot login or
+Issues-write permission. Exact POST author/body confirmation and controlled live
+write acceptance remain separate gates. Installation tokens expire and require
+operator-managed minting/rotation; no App private-key/JWT automation is added.
+
+`factory investigation-publish --incident ID --run RUN` defaults to counts only.
+`--preview` displays the fixed body and destination for operator review; no network.
+`--enqueue` renders locally from committed evidence/model state; no network.
+`--send --confirm-public-write` additionally requires BOTH host publication opt-ins
+and the dedicated role, verifies it read-only, then invokes the trusted outbox.
+No dispatcher hook, scheduled sender, default enabled config or live write is
+introduced. Dedicated roles are logical isolation; same-user host file access is
+still possible and is not claimed as OS protection.
+
+Controlled source acceptance uses synthetic evidence, repository blobs and a
+fake GitHub transport: model receipt → enqueue → durable intent → fixed comment →
+confirmed/cache replay, plus lost response/no retry, expired evidence reconciliation,
+identity/config/endpoint/budget/key-isolation failures and operator counts.
+This does not prove live GitHub auth/write/delivery or a production incident.

@@ -133,3 +133,60 @@ class OutboxTests(unittest.TestCase):
         row.symlink_to(row.with_suffix(".backup"))
         with self.assertRaises(evidence.EvidenceRefused):
             self.deliver(FakePublisher())
+
+    def test_uncertain_reconciles_without_fresh_evidence(self):
+        self.enqueue()
+        remote = FakePublisher("lost_response")
+        self.assertEqual(self.deliver(remote)["state"], "uncertain")
+        with mock.patch.object(model, "prepare", side_effect=evidence.EvidenceRefused("stale_evidence")) as prepare:
+            self.assertEqual(self.deliver(remote)["state"], "delivered")
+            prepare.assert_not_called()
+        self.assertEqual(remote.posts, 1)
+
+    def test_uncertain_without_comment_stays_uncertain_when_evidence_expires(self):
+        self.enqueue()
+        remote = FakePublisher("unknown_without_comment")
+        self.deliver(remote)
+        with mock.patch.object(model, "prepare", side_effect=evidence.EvidenceRefused("run_unavailable")) as prepare:
+            self.assertEqual(self.deliver(remote)["state"], "uncertain")
+            prepare.assert_not_called()
+        self.assertEqual(remote.posts, 1)
+
+    def test_key_type_is_validated(self):
+        self.enqueue()
+        path = next((self.cfg.factory / "investigation-outbox").glob("*.json"))
+        row = json.loads(path.read_text())
+        row["key"] = 123
+        path.write_text(json.dumps(row))
+        with self.assertRaises(evidence.EvidenceRefused):
+            self.deliver(FakePublisher())
+
+    def test_snapshot_and_doctor_show_counts_without_private_text(self):
+        from factory import onboard
+        self.enqueue()
+        self.assertEqual(outbox.snapshot(self.cfg)["states"]["queued"], 1)
+        self.deliver(FakePublisher("unknown_without_comment"))
+        self.assertEqual(outbox.snapshot(self.cfg)["states"]["uncertain"], 1)
+        checks = []
+        onboard._investigation_outbox_checks(self.cfg, lambda ok, name, detail: checks.append((ok, name, detail)))
+        self.assertTrue(any(ok is None and name.endswith("uncertain") for ok, name, _ in checks))
+        self.assertNotIn(fixtures.SECRET, json.dumps(checks))
+
+    def test_snapshot_malformed_receipt_is_unavailable(self):
+        from factory import onboard
+        self.enqueue()
+        path = next((self.cfg.factory / "investigation-outbox").glob("*.json"))
+        path.write_text(fixtures.SECRET)
+        state = outbox.snapshot(self.cfg)
+        self.assertEqual(state["status"], "unavailable")
+        checks = []
+        onboard._investigation_outbox_checks(self.cfg, lambda ok, name, detail: checks.append(ok))
+        self.assertIn(False, checks)
+
+    def test_absent_store_is_observed_empty_without_creation(self):
+        from dataclasses import replace
+        empty = replace(self.cfg, root=self.cfg.root / "not-created")
+        state = outbox.snapshot(empty)
+        self.assertEqual(state["status"], "observed")
+        self.assertEqual(sum(state["states"].values()), 0)
+        self.assertFalse(empty.root.exists())

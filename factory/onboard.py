@@ -364,6 +364,17 @@ def _incident_routing_checks(cfg, report):
         report(None, "incident routing audit", "journal attempt uncertain; inspect local routing receipt")
 
 
+def _investigation_outbox_checks(cfg, report):
+    from . import investigation_outbox
+    state = investigation_outbox.snapshot(cfg)
+    report(state["status"] == "observed", "investigation outbox scan", state["status"])
+    if state["status"] == "observed":
+        for name in ("queued", "uncertain", "blocked", "failed"):
+            count = state["states"][name]
+            report(None if count else True, "investigation outbox " + name,
+                   f"{count}; inspect/reconcile retained receipts; never delete or blindly repost")
+
+
 def doctor(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory doctor", description="Check tools, auth, remotes, config drift, and the triage model."
@@ -526,6 +537,7 @@ def doctor(argv: list[str]) -> int:
         )
 
     _incident_routing_checks(cfg, report)
+    _investigation_outbox_checks(cfg, report)
     from .investigation_model import snapshot as investigation_snapshot
     model_state = investigation_snapshot(cfg)
     if model_state["status"] == "unavailable":
