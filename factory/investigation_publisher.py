@@ -193,6 +193,16 @@ def main(argv):
             return 0
         print(json.dumps({"state": row["state"], "code": row["code"]}))
         return 0 if row["state"] in {"queued", "delivered"} else 1
-    except (PublisherRefused, evidence.EvidenceRefused, config.ConfigError, OSError, ValueError):
+    except PublisherRefused as error:
+        allowed = {"publisher_disabled", "publisher_credential_invalid", "publisher_endpoint_refused",
+                   "publisher_budget", "publisher_outcome_unknown", "publisher_response_invalid",
+                   "publisher_identity_unverified", "public_write_confirmation_required"}
+        code = str(error) if str(error) in allowed else "publisher_unavailable"
+        print(json.dumps({"ok": False, "code": code}))
+        return 1
+    except incidents.RequestRefused:
+        print(json.dumps({"ok": False, "code": "publisher_auth_rejected"}))
+        return 1
+    except (evidence.EvidenceRefused, config.ConfigError, OSError, ValueError):
         print(json.dumps({"ok": False, "code": "publisher_unavailable"}))
         return 1
