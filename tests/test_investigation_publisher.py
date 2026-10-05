@@ -104,9 +104,10 @@ class PublisherTests(unittest.TestCase):
         self.assertNotIn(self.cfg.publisher["key"], json.dumps(rows))
 
     def test_cli_never_sends_without_confirmation(self):
-        with mock.patch.object(config, "load", return_value=self.cfg), mock.patch.object(publisher, "send") as send, redirect_stdout(io.StringIO()):
+        with mock.patch.object(config, "load", return_value=self.cfg), mock.patch.object(publisher, "send") as send, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(publisher.main(["--incident", self.incident, "--run", self.run, "--send"]), 1)
             send.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["code"], "public_write_confirmation_required")
 
     def test_http_key_only_on_stdin_and_clean_child_environment(self):
         wire = {"key": self.cfg.publisher["key"], "timeout": 1, "max_response_bytes": 1000}
@@ -159,3 +160,9 @@ class PublisherTests(unittest.TestCase):
         self.assertIn("explicit OOM", row["body"])
         self.assertFalse(row["public_write"])
         self.assertNotIn(fixtures.SECRET, output.getvalue())
+
+    def test_cli_auth_rejection_is_a_fixed_code_without_traceback(self):
+        with mock.patch.object(config, "load", return_value=self.cfg), mock.patch.object(publisher, "send", side_effect=incidents.RequestRefused(403)), redirect_stdout(io.StringIO()) as output:
+            code = publisher.main(["--incident", self.incident, "--run", self.run, "--send", "--confirm-public-write"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue()), {"ok": False, "code": "publisher_auth_rejected"})
