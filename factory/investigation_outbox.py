@@ -54,6 +54,11 @@ def read(fd, name):
     return row
 
 
+def publication_prefix(repository, incident, run):
+    identity = evidence.digest((repository + "\0" + incident + "\0" + run).encode())
+    return "<!-- factory-investigation-publication: " + identity + " -->\n"
+
+
 def binding(envelope):
     evidence.require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", envelope.repository)
                      and type(envelope.issue) is int and envelope.issue > 0, "invalid_publication_destination")
@@ -96,8 +101,7 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
         evidence.require(row.get("publisher_login", publisher_login) == publisher_login, "publication_binding_changed")
         if row["state"] in {"delivered", "failed", "blocked"}:
             return row
-        marker = "<!-- factory-investigation-publication: " + name[:-5] + " -->"
-        prefix = marker + "\n"
+        prefix = publication_prefix(cfg.repo, incident, run)
         endpoint = f"repos/{cfg.repo}/issues/{row['issue']}/comments"
         # Bounded complete lookup; unknown lookup never grants permission to POST.
         try:
