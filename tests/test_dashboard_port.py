@@ -29,6 +29,25 @@ class DashboardPortTest(unittest.TestCase):
         self.cfg.install = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "env": {}}
         self.host_path = self.root / "config.toml"
 
+    def test_doctor_warns_only_when_both_host_configs_exist(self):
+        base = self.root / "host-configs"
+        for name in ("factory", "agent-factory"):
+            (base / name).mkdir(parents=True)
+        empty = subprocess.CompletedProcess([], 0, "", "")
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(base)}):
+            for preferred, legacy in ((False, False), (True, False), (False, True), (True, True)):
+                for name, exists in (("factory", preferred), ("agent-factory", legacy)):
+                    path = base / name / "config.toml"
+                    if exists:
+                        path.write_text("")
+                    elif path.exists():
+                        path.unlink()
+                _, output, _ = self.doctor(empty)
+                rows = [r for r in json.loads(output)["rows"] if r["label"] == "multiple host configs"]
+                self.assertEqual(bool(rows), preferred and legacy)
+                if rows:
+                    self.assertEqual(rows[0]["status"], "WARN")
+
     def listener(self, host: str = "127.0.0.1") -> socket.socket:
         listener = socket.socket()
         listener.bind((host, 0))
