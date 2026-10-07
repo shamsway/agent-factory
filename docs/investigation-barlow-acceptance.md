@@ -14,6 +14,13 @@ the key using the hidden manual systemd encryption procedure, and install the
 stopped oneshot service. No service runtime replacement or diagnostics enablement.
 
 Verify owner/mode metadata, source/wheel hashes, UID and systemd feature support.
+Before A completes, pin the exporter to the installed service-runtime interpreter
+(`<runtime>/bin/python -P -m factory investigation-export`) and prove exporter and
+broker were built from the same full source SHA using both source-to-wheel build
+manifests, verified wheel hashes and installed module hashes. Record both absolute
+interpreters/package locations; version strings or checkout HEAD are not proof.
+The provisioning guide's source parity gate is mandatory. A mismatch or unavailable
+export command requires separate runtime installation/rollout approval.
 Check the credential inside the temporary check unit, check matt's negative access
 and credential cleanup; verify matt has no execution/start/edit privilege capable
 of bypassing the dedicated identity. Preserve the durable outbox even if any
@@ -50,6 +57,37 @@ not model prose/credentials. Require a supported proposal or an honest fixed
 escalation. Check scope v2 against the actual failed commit and refresh the
 root-owned Git mirror explicitly if required.
 
+**Rehearsal before B2:** after evidence/model/scope preparation, first run the same
+root script below with the agreed incident/run/issue. Reach the `SEND` prompt,
+then type `ABORT` (or anything other than the exact SEND confirmation). This is an
+expected nonzero exit with no send, token mint or publisher-unit start. Verify both
+broker switches are false using the reviewed protected-policy checker (output
+booleans only), `systemctl is-active factory-publisher.service` reports `inactive`,
+and `/run/systemd/system/factory-publisher.service.d/50-acceptance.conf` is absent.
+Use these local read-only checks (no credentials loaded or network calls):
+
+```sh
+sudo -u factory-publisher /opt/factory-publisher/venv/bin/python -I -c '
+import json
+from factory.investigation_broker import load_policy
+try:
+    policy = load_policy("/etc/factory-publisher/policy.json")
+    flags = {key: policy[key] for key in ("enabled", "allow_publish")}
+except Exception:
+    print("publisher_cleanup_check_failed")
+    raise SystemExit(1)
+print(json.dumps(flags))
+raise SystemExit(0 if all(value is False for value in flags.values()) else 1)
+'
+test "$(systemctl is-active factory-publisher.service || true)" = inactive
+sudo test ! -e /run/systemd/system/factory-publisher.service.d/50-acceptance.conf
+sudo test ! -L /run/systemd/system/factory-publisher.service.d/50-acceptance.conf
+```
+
+Record the three cleanup checks. If any fails, stop and repair before a real send.
+Retain that invocation's timestamped metadata. Start B2 with a fresh export in a
+new script invocation; never reuse the rehearsal's 300s-old snapshot.
+
 **Advance conditional approval B2:** before starting the terminal session, agree
 on the exact repository (`shamsway/octant-private`), incident issue number,
 incident/run and reviewed candidate executables. B2 authorizes one send only if
@@ -80,20 +118,33 @@ EXIT/INT/TERM/HUP traps disable switches on success, refusal, error or interrupt
 stop/remove the temporary unit override and reload the manager. No shell trap can
 handle SIGKILL or power loss: after either, keep the unit stopped and manually
 verify both switches false before any further operation. A root-held lock rejects
-concurrent sessions. Private operator/publisher preview/result files are retained for review; remove
-that temporary metadata directory only after reviewing it before another session.
+concurrent sessions. Each invocation retains private operator/publisher metadata
+under `/run/factory-publisher-acceptance/<UTC timestamp>/` (the script prints its
+path). Existing retained runs do not block rehearsal, B2 or B3. Do not remove or
+archive prior metadata as a prerequisite for the next invocation.
 Outbox/locks/token audit are never removed or restored. `status_write_failed` is a
 separate metadata warning: a delivered primary result remains delivered with its
 original exit code; inspect the outbox/status path rather than resending blindly.
 Unknown POST response retains an uncertain receipt for exact marker/author/body
 reconciliation and never authorizes another POST.
 
-**Separate approval B3:** operator-approved repeat of the same confirmed command
-(with the temporary switches restored only for that invocation) must return the
-same delivered result, no mint/POST and no duplicate. Count the remote marker
-comments read-only. Check status counts/token outcome/expiry/import result through
-inspect/doctor. Revert the controlled failure through the normal approved workflow
-and prove healthy recovery separately; publishing a finding is not recovery proof.
+**Separate approval B3:** before recovering the collector or resolving the failure,
+run the **same script** again with the same incident/run/pre-agreed issue:
+
+```sh
+sudo /root/reviewed/manual-publish-investigation.sh INCIDENT RUN PREAGREED_ISSUE
+```
+
+It uses a new timestamped work directory and fresh export/import/preview; retain
+the earlier directory. Reconfirm the unchanged destination/body and still-unresolved
+failure locally. The same delivered outbox receipt must return delivered with no
+new token mint/POST and no duplicate. Count remote marker comments read-only and
+record unchanged token audit alongside status counts/token outcome/expiry/import
+result through inspect/doctor. Verify both switches false, unit inactive and override
+absent again. If the failure was already resolved or fresh export refuses, do not
+bypass the check to force replay; record the unproven gate for operator review.
+Only then revert the controlled failure through the approved workflow and prove
+healthy recovery separately; publishing a finding is not recovery proof.
 
 ## C. Mandatory window cleanup
 

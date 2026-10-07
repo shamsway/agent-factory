@@ -346,3 +346,33 @@ After SIGKILL/power loss, manually verify the stopped unit and disabled switches
 The script is a future operator procedure, syntax-checked only, not host-tested
 or run by this source slice. See investigation-barlow-acceptance.md for approvals,
 cleanup and exact replay rules.
+
+## Step A exporter/broker source parity gate
+
+Before step A can complete, identify the **installed service runtime** using the
+reviewed interpreter's `factory inspect --json` metadata and pin its immutable
+absolute runtime directory in `manual-publish-investigation.sh` as `service_runtime`.
+The script intentionally ships with a refusing placeholder; do not point it at a
+development checkout, editable install, interactive PATH or a guessed runtime.
+Its exporter invocation is `<runtime>/bin/python -P -m factory investigation-export`
+as matt from the Octant repository. The publisher broker retains its separate
+root-owned environment.
+
+Verify exporter and broker were built from the **same full source SHA** before
+completing A: retain each source-to-wheel build manifest (source SHA + wheel
+SHA-256), verify those wheel hashes against the installed artifacts and compare
+installed Factory module hashes with that reviewed wheel's contents. Record both
+absolute interpreters, package/module locations, wheel hashes and the matching
+source SHA in the acceptance receipt. Version strings, path names and matching
+Git checkout HEADs alone are insufficient. If either provenance chain is missing,
+the SHA differs, the installed package is editable, or the service runtime lacks
+investigation-export, step A is incomplete. Stop for separately approved runtime
+installation/rollout; provisioning approval alone does not authorize a Factory
+service change. No such host verification has run in this source slice.
+
+Each script invocation now retains its metadata under
+`/run/factory-publisher-acceptance/<UTC timestamp>/`; the root-owned parent can
+already exist. Do not archive/delete prior runs just to replay. Follow acceptance
+B's abort rehearsal and verify switches false, unit inactive and temporary
+override absent before B2; use the same script for separately approved B3 replay
+before recovery/diagnostics cleanup.
