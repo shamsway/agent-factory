@@ -17,6 +17,59 @@ class ScopePolicy:
     commit: str
     # Explicit operator-reviewed hashed job/namespace -> repository paths.
     bindings: tuple
+    blobs: tuple = ()  # optional durable policy pins (path, blob)
+
+
+
+def load_policy(path, *, repository, commit):
+    """Load an operator-owned, approved exact-revision policy, never a model path."""
+    import json
+    from .publisher_credentials import protected_read
+    try:
+        raw = json.loads(protected_read(path), object_pairs_hook=evidence.unique_pairs)
+        evidence.require(isinstance(raw, dict) and set(raw) ==
+                         {"version", "approved", "repository", "commit", "bindings"}, "unsupported_scope")
+        evidence.require(type(raw["version"]) is int and raw["version"] == 1
+                         and raw["approved"] is True and raw["repository"] == repository
+                         and raw["commit"] == commit and re.fullmatch(r"[0-9a-f]{40}", commit),
+                         "scope_revision_mismatch")
+        evidence.require(isinstance(raw["bindings"], list) and 1 <= len(raw["bindings"]) <= 32,
+                         "unsupported_scope")
+        bindings, blobs, identities = [], {}, set()
+        for row in raw["bindings"]:
+            evidence.require(isinstance(row, dict) and set(row) == {"job", "namespace", "files"},
+                             "unsupported_scope")
+            evidence.require(isinstance(row["job"], str) and re.fullmatch(r"job-[0-9a-f]{24}", row["job"])
+                             and isinstance(row["namespace"], str)
+                             and re.fullmatch(r"namespace-[0-9a-f]{24}", row["namespace"]), "unsupported_scope")
+            identity = row["job"], row["namespace"]
+            evidence.require(identity not in identities and isinstance(row["files"], list)
+                             and 1 <= len(row["files"]) <= 8, "unsupported_scope")
+            identities.add(identity)
+            paths = []
+            for file in row["files"]:
+                evidence.require(isinstance(file, dict) and set(file) == {"path", "blob"}
+                                 and isinstance(file["path"], str) and len(file["path"]) <= 256
+                                 and re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)+", file["path"])
+                                 and all(p not in {".", "..", "secrets"} for p in file["path"].split("/"))
+                                 and file["path"].endswith((".tf", ".nomad.hcl"))
+                                 and isinstance(file["blob"], str) and re.fullmatch(r"[0-9a-f]{40}", file["blob"]),
+                                 "unsupported_scope")
+                evidence.require(file["path"] not in paths
+                                 and blobs.get(file["path"], file["blob"]) == file["blob"], "unsupported_scope")
+                paths.append(file["path"])
+                blobs[file["path"]] = file["blob"]
+            bindings.append((*identity, tuple(paths)))
+        return ScopePolicy(repository, commit, tuple(bindings), tuple(sorted(blobs.items())))
+    except evidence.EvidenceRefused:
+        raise
+    except Exception:
+        raise evidence.EvidenceRefused("unsupported_scope") from None
+
+
+def prepare_from_policy(repository_root, projection, raw_result, policy_path):
+    policy = load_policy(policy_path, repository=projection.repository, commit=projection.data()["commit"])
+    return prepare(repository_root, projection, raw_result, policy)
 
 
 def prepare(repository_root, projection, raw_result, policy):
@@ -55,6 +108,8 @@ def prepare(repository_root, projection, raw_result, policy):
             mode, kind, blob = row.split(b"\t", 1)[0].split()
             evidence.require(mode in {b"100644", b"100755"} and kind == b"blob"
                              and row.split(b"\t", 1)[1] == path.encode() + b"\0", "unsupported_scope")
+            if policy.blobs:
+                evidence.require(dict(policy.blobs).get(path) == blob.decode(), "scope_blob_mismatch")
             size = subprocess.run(command + ["cat-file", "-s", blob.decode()], env=env,
                                   capture_output=True, timeout=5, check=True).stdout
             evidence.require(0 < int(size) <= 1024 * 1024, "unsupported_scope")
