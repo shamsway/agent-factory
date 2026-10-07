@@ -391,6 +391,13 @@ def doctor(argv: list[str]) -> int:
         if args.json and fix is not None:
             rows[-1]["fix"] = fix
 
+    host_base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    host_candidates = [host_base / name / "config.toml" for name in ("factory", "agent-factory")]
+    if all(path.exists() or path.is_symlink() for path in host_candidates):
+        report(None, "multiple host configs",
+               f"both factory/config.toml and agent-factory/config.toml exist; "
+               f"active: {config.host_config_path()}; legacy config is ignored")
+
     present = (cfg.root / CONFIG_NAME).exists()
     report(present, f"{CONFIG_NAME} present", "" if present else "run `factory init`")
     tracked = sh(["git", "ls-files", "--error-unmatch", CONFIG_NAME], cwd=cfg.root).returncode == 0
