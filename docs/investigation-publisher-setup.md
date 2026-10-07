@@ -209,3 +209,123 @@ tokens can remain valid until expiry; key rotation is not guaranteed token revoc
 
 References: [systemd encrypted credentials](https://github.com/systemd/systemd/blob/main/docs/CREDENTIALS.md),
 [systemd-creds options](https://github.com/systemd/systemd/blob/main/man/systemd-creds.xml).
+
+## 5. Option B account, storage and mapping installation
+
+This is an **operator-run provisioning plan**, not authorization to execute it.
+Use the immutable reviewed candidate paths/hashes recorded in REVIEW.md. Root
+creates a non-login `factory-publisher` system account with no sudo rights. The
+operator is trusted root; `matt` and dispatched workers must have no noninteractive
+sudo/polkit rule granting root, arbitrary `systemd-run`, this service start/edit,
+or arbitrary execution as `factory-publisher`. Check the actual host rules before
+claiming isolation; do not remove existing host privileges without a separate plan.
+
+Example root-only directory provisioning, after checking names/UID conflicts:
+
+```sh
+useradd --system --user-group --home-dir /var/lib/factory-publisher --shell /usr/sbin/nologin factory-publisher
+groupadd --system factory-transfer
+usermod --append --groups factory-transfer factory-publisher
+install -d -o factory-publisher -g factory-publisher -m 0700 /var/lib/factory-publisher
+install -d -o factory-publisher -g factory-publisher -m 0700 /var/lib/factory-publisher/snapshots /var/lib/factory-publisher/state
+install -d -o matt -g factory-transfer -m 2750 /var/lib/factory-transfer
+install -d -o factory-publisher -g factory-publisher -m 0755 /var/lib/factory-publisher-status
+install -d -o root -g factory-publisher -m 0750 /etc/factory-publisher
+install -d -o root -g factory-publisher -m 0750 /opt/factory-publisher
+```
+
+The transfer group grants publisher read/traverse on matt's staging directory;
+it grants matt **no** access to publisher state, key or executable. Export produces
+0640 files in this setgid directory. Check group inheritance/readability using a
+synthetic export before using real incident data. Root installs the broker v2
+policy example from investigation-publisher-broker.md, replacing the nonsecret
+App IDs, configured UID and all exact paths. Mode 0640 root:factory-publisher;
+both switches false. Create the exact no-newline sentinel in snapshots, state and
+status directories, mode 0600 in the private stores, 0644 in the status directory:
+
+```sh
+printf '%s' '{"repository":"shamsway/octant-private","version":1}' > /var/lib/factory-publisher/snapshots/broker-store.json
+printf '%s' '{"repository":"shamsway/octant-private","version":1}' > /var/lib/factory-publisher/state/broker-store.json
+printf '%s' '{"repository":"shamsway/octant-private","version":1}' > /var/lib/factory-publisher-status/broker-store.json
+chown factory-publisher:factory-publisher /var/lib/factory-publisher/{snapshots,state}/broker-store.json /var/lib/factory-publisher-status/broker-store.json
+chmod 0600 /var/lib/factory-publisher/{snapshots,state}/broker-store.json
+chmod 0644 /var/lib/factory-publisher-status/broker-store.json
+```
+
+Install the already accepted **scope v2** artifact as
+`/etc/factory-publisher/scope.json`, root:factory-publisher 0640. Record its SHA-256
+against the accepted artifact (14 namespace-default job/file mappings reviewed at
+25ae5fd). Root prepares a read-only Octant Git mirror at
+`/opt/factory-publisher/octant-private`, including the actual failed commit; no
+worker writable ancestors, alternate object stores, replace refs or symlinks.
+Root refreshes it explicitly if a later failed commit is missing. The broker never
+fetches or uses worker Git credentials. A new job/path mapping needs operator
+approval; ordinary changes to contents do not change scope v2 approval.
+
+Install the source and dependency wheels in a root-owned, publisher-readable venv
+under `/opt/factory-publisher/venv`; workers cannot write any ancestor. Record all
+wheel SHA-256 values including Factory and tomlkit, install only reviewed hashes
+with `--no-index --require-hashes --only-binary=:all:` from an offline wheelhouse.
+The earlier broker dependency instructions are one part of this manifest; **do
+not** resolve/install ordinary dependencies online on Barlow. No worker runtime
+or service venv is replaced during publisher provisioning.
+
+Root installs a **non-enabled oneshot** system service. No timer or socket. Use a
+fixed `ExecStart` for the one approved operation, edited only by the root operator:
+
+```ini
+[Unit]
+Description=Operator-confirmed Factory investigation publisher
+[Service]
+Type=oneshot
+User=factory-publisher
+Group=factory-publisher
+SupplementaryGroups=factory-transfer
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/factory-publisher /var/lib/factory-publisher-status
+LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-key.cred
+ExecStart=/opt/factory-publisher/venv/bin/factory investigation-broker --policy /etc/factory-publisher/policy.json --verify-token
+```
+
+`--verify-token` is a separately approved live GitHub operation, never a default
+boot/start action. There is intentionally no `[Install]` section. Keep the unit
+stopped. Root manually changes ExecStart to one of the reviewed import/preview/
+confirmed-send invocations from the acceptance plan before starting it. Never
+read ExecStart arguments from staging/status files, accept an arbitrary command
+from matt, or install a service-start permission for workers. For preview/import,
+root can instead run the exact broker command as the publisher without loading a
+credential; those operations do not access the key. With no automatic sending,
+root edits the two policy switches only during the confirmed live test.
+
+Using the reviewed configuration command/API on the **actually selected** existing
+host config, set `publisher.status_file` to
+`/var/lib/factory-publisher-status/status.json` and `publisher.status_uid` to the
+new numeric UID. Keep existing shared publisher switches off. Verify with
+`factory inspect --json` and doctor; neither should see a valid cached token.
+Missing/stale status is honest until an operator runs an import/preview/status
+refresh. Check all owner/mode metadata and negative access tests as matt; do not
+print key material, host config, decrypted credentials or token responses.
+
+## 6. Rollback and removal
+
+Stop the publisher unit and restore both broker switches false before any
+rollback. Keep snapshots and **all durable outbox/locks/token audit** in place;
+never roll them back with the executable. Uncertain posts require exact remote
+comment reconciliation, never outbox deletion or a new incident ID to repost.
+Restore the prior immutable publisher venv/policy only after compatibility review.
+Factory service rollback follows its normal separately approved rollout procedure.
+
+For removal, disable any accidentally enabled unit and remove root-owned unit/
+credential references, then remove the encrypted credential only after deciding
+whether a future restoration is needed. Revoke the App key in GitHub if retiring
+it; installation tokens may remain valid until expiry. Remove status config using
+the selected configuration path and report not configured. Archive durable state
+privately for dedupe/audit before any separately approved account/data deletion.
+Do not delete the old Private-vault key or vault content as part of this guide.
+Manual key rotation remains section 4. The future authenticated transfer design
+is SHA-245; it is not required for this operator-confirmed release.

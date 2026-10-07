@@ -6,6 +6,7 @@ import sys
 from importlib import import_module
 
 COMMANDS = {
+    "investigation-export": ("investigation_transfer", "main", "operator-only bounded incident/run export; no network"),
     "investigation-broker": ("investigation_broker", "main", "dedicated-account fixed publisher broker (no shared host config)"),
     "init": ("onboard", "init", "prepare this repository: .factory.toml, labels, issue template"),
     "doctor": ("onboard", "doctor", "check tools, auth, remotes, and the triage model"),

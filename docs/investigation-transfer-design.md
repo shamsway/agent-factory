@@ -1,7 +1,9 @@
 # Trusted publisher transfer — design for operator review
 
-Status: proposed only, 2026-10-07. No transfer code, socket, service, host
-provisioning or diagnostic enablement is included. App-key delivery is manual
+Status: future design deferred to **SHA-245**, 2026-10-07. It does not block
+SHA-201 Option B. The current release uses [operator export/import](investigation-option-b.md)
+and requires operator confirmation of every public write. No authenticated producer,
+socket, host provisioning or diagnostic enablement is included. App-key delivery is manual
 systemd encrypted credentials, not a 1Password service account/vault.
 
 ## Trust decision that must precede implementation

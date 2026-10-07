@@ -19,9 +19,13 @@ Policy schema (replace IDs and paths during separately approved provisioning):
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "publisher_uid": 1001,
-  "store": "/var/lib/factory-publisher/octant-private",
+  "snapshots": "/var/lib/factory-publisher/snapshots",
+  "state": "/var/lib/factory-publisher/state",
+  "status_file": "/var/lib/factory-publisher-status/status.json",
+  "repository_root": "/opt/factory-publisher/octant-private",
+  "scope_file": "/etc/factory-publisher/scope.json",
   "enabled": false,
   "allow_publish": false,
   "app": {
@@ -35,15 +39,14 @@ Policy schema (replace IDs and paths during separately approved provisioning):
 }
 ```
 
-`store` is a separate broker-owned snapshot/outbox directory, not a worker-writable
-`.factory` path. Provision the exact bytes of `broker-store.json` as canonical JSON
-`{"repository":"shamsway/octant-private","version":1}` (no newline). The full
-snapshot must contain only root/publisher-owned regular files/directories, no
-symlinks or group/other writes. Its scan is capped at 10,000 entries and two seconds.
-Broker preview/send accepts only `--incident` and `--run`, never body, destination,
-paths, model instructions or tokens. Both policy switches plus
-`--send --confirm-public-write` are required for a write. Preview makes no token
-request and never calls a model. A terminal outbox replay returns without minting.
+`snapshots` and `state` are separate publisher-owned directories, with neither
+nested in the other. Each requires canonical `broker-store.json` bytes
+`{"repository":"shamsway/octant-private","version":1}` (no newline). The status
+parent requires the same sentinel. No worker ownership, symlinks/devices or group/
+other writes are allowed. Recursive store scans are capped at 10,000 entries and
+two seconds. Both policy switches plus `--send --confirm-public-write` and a
+matching saved preview are required before a first POST. Preview makes no token
+request and never calls a model. Terminal replay returns without minting.
 
 The App key file must be private (no group/other permission) and all ancestors
 protected. The optional cryptography dependency signs RS256 in process; keys,
@@ -57,27 +60,10 @@ in-process refresh: the three-request lifetime budget never resets. After expiry
 (or the 60-second safety margin) this instance refuses. A fresh, explicitly invoked
 one-shot process can mint a new token. Unknown mint outcomes are not retried
 automatically.
-Status results contain only outcome/expiry/validity; shared inspect/doctor do not
-yet have a cross-account broker-status channel.
-
-## Provisioning still required before unattended operation
-
-The operator must manually provision the App key into a root-owned encrypted
-systemd credential, with manual re-provision for rotation. Only the dedicated
-publisher system unit loads it. No 1Password service account, vault or key-sync
-job is required. Never expose it to `matt`, Factory units, install/apply config,
-workers or a general token-vending interface. No credential has been provisioned
-by this source slice.
-
-A trusted transfer mechanism must produce an atomic publisher-owned snapshot of
-incident routing, ledger, manifests, diagnostic bundles and validated model result.
-It must authenticate the producer and reject arbitrary worker-supplied findings,
-paths or destinations. Copying worker-controlled files and changing ownership is
-not proof of provenance. No socket listener/queue admission is enabled in this
-slice. Do not activate the broker until this transfer boundary is reviewed and
-proven on Barlow. This deliberate gap is an activation blocker, not live isolation
-proof. Outbox state must remain on the publisher side across snapshot refreshes;
-never replace uncertain receipts or rebuild the store to retry a post.
+Status results contain only fixed metadata. See [Option B](investigation-option-b.md)
+for one-way status, import and the accepted unauthenticated evidence risk. There is
+no unattended operation. The encrypted key is manually provisioned by the operator;
+no 1Password service account, vault, sync job or token-vending interface is added.
 
 ## Approved source scope
 
@@ -105,8 +91,7 @@ expiry and validity booleans only. Failure/ready states are recorded without
 provider error text or credentials. `investigation-broker --policy PATH --status`
 reads that closed schema without minting. Because tokens are never persisted, a
 later status command honestly reports no cached valid token even if the last
-mint's reported expiry is in the future. Shared inspect/doctor integration awaits
-a reviewed cross-account metadata channel. A failed/unknown mint is not retried
+mint's reported expiry is in the future. Shared inspect/doctor read only the publisher-owned status file. A failed/unknown mint is not retried
 within an invocation; any operator retry creates a new one-shot token budget.
 
 ## Validation and error behavior
@@ -120,6 +105,5 @@ unknown exceptions become publisher_unavailable, without tracebacks/error text.
 Broker-only release dependencies are pinned with wheel SHA-256 hashes in
 requirements/publisher-wheels.txt. See the setup guide for isolated offline install.
 CI and scripts/test-linux.sh install those dependencies in disposable test environments;
-worker/service installs remain unchanged. The transfer design is separately reviewable
-in [investigation-transfer-design.md](investigation-transfer-design.md), with no transfer
-implementation in this slice.
+worker/service installs remain unchanged. The authenticated transfer design is
+deferred to SHA-245; current operator transfer is described in Option B.

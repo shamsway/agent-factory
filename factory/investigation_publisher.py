@@ -20,11 +20,13 @@ class PublisherRefused(ValueError):
 def policy(raw):
     defaults = {"enabled": False, "allow_publish": False, "key": "", "login": "",
                 "kind": "installation_token", "timeout": 30, "request_timeout": 5,
-                "max_requests": 12, "max_response_bytes": 1048576}
+                "max_requests": 12, "max_response_bytes": 1048576, "status_file": "", "status_uid": 0}
     if not isinstance(raw, dict) or set(raw) - set(defaults):
         raise config.ConfigError("invalid investigation publisher policy")
     p = {**defaults, **raw}
-    if (any(type(p[k]) is not bool for k in ("enabled", "allow_publish"))
+    if (not isinstance(p["status_file"], str) or (p["status_file"] and not p["status_file"].startswith("/"))
+            or type(p["status_uid"]) is not int or p["status_uid"] < 0
+            or any(type(p[k]) is not bool for k in ("enabled", "allow_publish"))
             or not isinstance(p["key"], str) or len(p["key"]) > 4096
             or not re.fullmatch(r"[A-Za-z0-9_.-]*", p["key"])
             or not isinstance(p["login"], str)
