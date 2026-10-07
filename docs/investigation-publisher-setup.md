@@ -92,6 +92,8 @@ with open('/dev/tty', 'r+') as terminal:
         terminal.write('\n')
     key = ''.join(lines).encode()
 try:
+    subprocess.run(['openssl', 'pkey', '-check', '-noout'], input=key,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     subprocess.run(['systemd-creds', 'encrypt', '--with-key=host', '--name=app-key',
                     '-', str(stage)], input=key, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL, check=True)
@@ -153,6 +155,41 @@ credential is unreadable, and check the key is absent from Factory configuration
 unit environments and workers using purpose-built status tools, never grep/cat
 secret-bearing files. Stop the check unit and verify the credential mount is gone.
 Do not invoke broker send or model/provider calls for this filesystem check.
+
+An exact check-only invocation, after provisioning the account and the isolated
+broker environment, is:
+
+```sh
+sudo systemd-run --wait --collect --unit=factory-publisher-key-check \
+  --property=User=factory-publisher --property=Group=factory-publisher \
+  --property=UMask=0077 --property=LimitCORE=0 --property=RuntimeMaxSec=30 \
+  --property=LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-key.cred \
+  /opt/factory-publisher/venv/bin/python -I -c '
+import os
+from pathlib import Path
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+try:
+    path = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "app-key"
+    key = serialization.load_pem_private_key(path.read_bytes(), password=None)
+    assert isinstance(key, rsa.RSAPrivateKey) and key.key_size >= 2048
+except Exception:
+    print("credential check failed")
+    raise SystemExit(1)
+print("credential check passed")
+'
+sudo -u matt test ! -r /run/credentials/factory-publisher-key-check.service/app-key
+sudo test ! -e /run/credentials/factory-publisher-key-check.service/app-key
+```
+
+The first command verifies actual readability/type inside the credential unit,
+not merely the existence of encrypted bytes on disk. The two following commands
+check unprivileged access and post-unit mount cleanup; they alone are insufficient
+proof because the unit uses its own mount namespace. Root must also review the
+unit's User, credential reference and filesystem access metadata. If the checker
+fails or the mount remains, stop the check unit, investigate and keep publishing
+off. Never copy/decrypt the key out to troubleshoot. Key-check commands perform
+no GitHub/provider request and leave no plaintext file for shredding.
 
 This is a procedure for future provisioning, not a shipped or enabled service.
 Trusted transfer design review is still required; a key mount alone does not
