@@ -1,7 +1,10 @@
 """Option B operator transfer. Synthetic evidence; no network or credentials."""
 import copy
+from contextlib import redirect_stdout
+import io
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 import subprocess
@@ -45,6 +48,115 @@ class TransferTests(unittest.TestCase):
     def save(self):
         self.bundle['sha256'] = evidence.digest(evidence.encoded({k: v for k, v in self.bundle.items() if k != 'sha256'}))
         self.path.write_bytes(evidence.encoded(self.bundle))
+
+    def export_cli(self, path=None):
+        with mock.patch.object(transfer.config, 'load', return_value=self.fixture.cfg), \
+                mock.patch.object(transfer, 'export_bundle', return_value=self.bundle), redirect_stdout(io.StringIO()) as output:
+            code = transfer.main(['--incident', self.bundle['incident'], '--run', self.bundle['run'],
+                                  '--staging-dir', str(path or self.root)])
+        return code, json.loads(output.getvalue())
+
+    def test_export_cli_writes_0640_and_idempotent_reexport(self):
+        code, result = self.export_cli()
+        path = self.root / result['file']
+        self.assertEqual(code, 0)
+        self.assertEqual(transfer.read_bundle(path), self.bundle)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        before = path.read_bytes()
+        self.assertEqual(self.export_cli(), (code, result))
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_export_cli_rejects_symlink_staging_directory(self):
+        path = self.root / 'link'
+        path.symlink_to(self.root, target_is_directory=True)
+        code, result = self.export_cli(path)
+        self.assertEqual(code, 1)
+        self.assertEqual(result['code'], 'unsafe_or_missing_file')
+
+    def test_export_cli_rejects_foreign_staging_owner(self):
+        actual = os.fstat
+        def foreign(fd):
+            meta = actual(fd)
+            if stat.S_ISDIR(meta.st_mode) and meta.st_ino == self.root.stat().st_ino:
+                return SimpleNamespace(st_uid=os.geteuid() + 10000, st_mode=meta.st_mode)
+            return meta
+        with mock.patch.object(os, 'fstat', side_effect=foreign):
+            code, result = self.export_cli()
+        self.assertEqual(code, 1)
+        self.assertEqual(result['code'], 'unsafe_staging_directory')
+
+    def test_export_cli_rejects_group_writable_staging(self):
+        self.root.chmod(0o770)
+        code, result = self.export_cli()
+        self.assertEqual(code, 1)
+        self.assertEqual(result['code'], 'unsafe_staging_directory')
+
+    def test_export_cli_rejects_existing_symlink_without_touching_target(self):
+        name = transfer.key(self.bundle['repository'], self.bundle['incident'], self.bundle['run']) + '.json'
+        target = self.root / 'unrelated'
+        target.write_bytes(b'unrelated')
+        (self.root / name).symlink_to(target)
+        code, result = self.export_cli()
+        self.assertEqual(code, 1)
+        self.assertEqual(result['code'], 'unsafe_staging_file')
+        self.assertEqual(target.read_bytes(), b'unrelated')
+
+    def test_export_cli_rejects_foreign_existing_file(self):
+        code, result = self.export_cli()
+        path = self.root / result['file']
+        before = path.read_bytes()
+        actual = os.stat
+        def foreign(name, *args, **kwargs):
+            meta = actual(name, *args, **kwargs)
+            if name == result['file'] and kwargs.get('dir_fd') is not None:
+                return SimpleNamespace(st_uid=os.geteuid() + 10000, st_mode=meta.st_mode)
+            return meta
+        with mock.patch.object(os, 'stat', side_effect=foreign):
+            code, result = self.export_cli()
+        self.assertEqual(code, 1)
+        self.assertEqual(result['code'], 'unsafe_staging_file')
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_manual_sequence_syntax_and_fixed_guards(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'manual-publish-investigation.sh'
+        subprocess.run(['bash', '-n', str(script)], check=True)
+        text = script.read_text()
+        self.assertIn('trap cleanup EXIT', text)
+        self.assertIn("trap 'exit 143' TERM", text)
+        self.assertIn('set_switches false', text)
+        self.assertIn('SEND unresolved $issue', text)
+        self.assertIn('--send --confirm-public-write', text)
+        self.assertEqual(transfer.MAX_TRANSFER_AGE, 300)
+
+    def test_export_cli_closed_refusal_codes_only(self):
+        for error, expected in ((evidence.EvidenceRefused('stale_evidence'), 'stale_evidence'),
+                                (evidence.EvidenceRefused(fixtures.SECRET), 'transfer_unavailable'),
+                                (OSError(fixtures.SECRET), 'transfer_unavailable')):
+            with mock.patch.object(transfer.config, 'load', side_effect=error), redirect_stdout(io.StringIO()) as output:
+                code = transfer.main(['--incident', self.bundle['incident'], '--run', self.bundle['run'],
+                                      '--staging-dir', str(self.root)])
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output.getvalue())['code'], expected)
+            self.assertNotIn(fixtures.SECRET, output.getvalue())
+
+    def test_broker_preview_body_equals_real_outbox_post_body(self):
+        from tests.test_investigation_outbox import FakePublisher
+        request = {k: self.bundle[k] for k in ('incident', 'run')}
+        remote = FakePublisher()
+        remote.verify = lambda: None
+        self.policy['app']['login'] = 'publisher-bot'
+        self.policy.update(enabled=True, allow_publish=True)
+        envelope = transfer.validate(self.bundle, now=NOW)[1]
+        with mock.patch.object(transfer, 'load_imported', return_value=envelope), \
+                mock.patch.object(broker, 'AppTokens') as tokens, \
+                mock.patch.object(broker.publisher, 'Publisher', return_value=remote):
+            tokens.return_value.get.return_value = 'synthetic-token'
+            tokens.return_value.status.return_value = {'outcome': 'ready'}
+            preview = broker.handle(self.policy, request)
+            result = broker.handle(self.policy, request, send=True)
+        self.assertEqual(result['state'], 'delivered')
+        self.assertEqual(remote.posts, 1)
+        self.assertEqual(preview['body'], remote.comments[0]['body'])
 
     def test_export_has_no_free_text_key_or_raw_logs(self):
         raw = evidence.encoded(self.bundle)

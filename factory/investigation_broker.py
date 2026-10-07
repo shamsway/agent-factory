@@ -13,7 +13,7 @@ import time
 from types import SimpleNamespace
 
 from . import investigation_evidence as evidence, investigation_model as model
-from . import investigation_outbox as outbox, investigation_publisher as publisher
+from . import investigation_outbox as outbox, investigation_publisher as publisher, publisher_status
 from .publisher_credentials import AppTokens, app_policy, protected_read
 from .investigation_publication import REFUSALS as EVIDENCE_FAILURE_CODES
 
@@ -73,20 +73,15 @@ def handle(policy, request, *, send=False, wire_fn=None):
             or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', request['run'])):
         raise publisher.PublisherRefused('publisher_request_invalid')
     p = policy['app']
-    cfg = SimpleNamespace(factory=Path(policy.get('snapshots', policy.get('store', ''))), repo=p['repository'])
-    if policy.get('version') == 2:
-        from . import investigation_transfer as transfer
-        cfg.publication_store = Path(policy['state'])
-        cfg.prepare_publication = lambda cfg, incident, run, now=None: transfer.load_imported(policy, incident, run, now=now)
+    from . import investigation_transfer as transfer
+    cfg = SimpleNamespace(factory=Path(policy['snapshots']), publication_store=Path(policy['state']), repo=p['repository'])
+    cfg.prepare_publication = lambda cfg, incident, run, now=None: transfer.load_imported(policy, incident, run, now=now)
     if not send:
         envelope = outbox.prepare_envelope(cfg, request['incident'], request['run'])
-        if policy.get('version') == 2:
-            from . import investigation_transfer as transfer
-            with evidence.directory(cfg.publication_store) as fd:
-                model._write(fd, 'preview-' + transfer.key(cfg.repo, request['incident'], request['run']) + '.json',
-                             outbox.binding(envelope))
-        marker = '<!-- factory-investigation-publication: ' + evidence.digest(
-            (cfg.repo + '\0' + request['incident'] + '\0' + request['run']).encode()) + ' -->\n'
+        with evidence.directory(cfg.publication_store) as fd:
+            model._write(fd, 'preview-' + transfer.key(cfg.repo, request['incident'], request['run']) + '.json',
+                         outbox.binding(envelope))
+        marker = outbox.publication_prefix(cfg.repo, request['incident'], request['run'])
         return {'repository': envelope.repository, 'issue': envelope.issue, 'body': marker + envelope.body,
                 'public_write': False}
     if not (policy['enabled'] and policy['allow_publish']):
@@ -94,8 +89,7 @@ def handle(policy, request, *, send=False, wire_fn=None):
     # Terminal/reconciliation paths need no fresh evidence. Queued rows do.
     with outbox.store(cfg, request['incident'], request['run']) as (fd, name):
         row = outbox.read(fd, name)
-    if row is None and policy.get('version') == 2:
-        from . import investigation_transfer as transfer
+    if row is None:
         envelope = outbox.prepare_envelope(cfg, request['incident'], request['run'])
         preview_path = cfg.publication_store / ('preview-' + transfer.key(cfg.repo, request['incident'], request['run']) + '.json')
         preview = json.loads(protected_read(preview_path), object_pairs_hook=evidence.unique_pairs)
@@ -109,16 +103,14 @@ def handle(policy, request, *, send=False, wire_fn=None):
     if row['state'] == 'queued':
         envelope = outbox.prepare_envelope(cfg, request['incident'], request['run'])
         expected = outbox.binding(envelope)
-        if policy.get('version') == 2:
-            from . import investigation_transfer as transfer
-            preview = json.loads(protected_read(cfg.publication_store / ('preview-' + transfer.key(cfg.repo,
-                request['incident'], request['run']) + '.json')), object_pairs_hook=evidence.unique_pairs)
-            evidence.require(preview == expected, 'preview_changed')
+        preview = json.loads(protected_read(cfg.publication_store / ('preview-' + transfer.key(cfg.repo,
+            request['incident'], request['run']) + '.json')), object_pairs_hook=evidence.unique_pairs)
+        evidence.require(preview == expected, 'preview_changed')
         evidence.require(set(expected) == {'repo', 'issue', 'key', 'body_sha256'}
                          and all(row.get(key) == value for key, value in expected.items()),
                          'publication_binding_changed')
     def audit(status):
-        with evidence.directory(getattr(cfg, "publication_store", cfg.factory)) as fd:
+        with evidence.directory(cfg.publication_store) as fd:
             model._write(fd, 'publisher-token-status.json', {'version': 1, **status})
     tokens = AppTokens(p, wire_fn=wire_fn, audit=audit)
     cfg.publisher = {'enabled': True, 'allow_publish': True, 'key': tokens.get(),
@@ -150,6 +142,42 @@ FAILURE_CODES = frozenset({
 }) | EVIDENCE_FAILURE_CODES
 
 
+def operate(policy, args):
+    """Primary operation only. Metadata refresh cannot alter its outcome."""
+    if args.import_bundle:
+        if args.send or args.status or args.incident or args.run or args.verify_token:
+            raise publisher.PublisherRefused('publisher_request_invalid')
+        from . import investigation_transfer as transfer
+        try:
+            return transfer.import_bundle(policy, args.import_bundle), 0
+        except Exception:
+            # Best effort import metadata must not mask the original refusal.
+            try:
+                with evidence.directory(Path(policy['state'])) as fd:
+                    model._write(fd, 'import-result.json', {'version': 1, 'result': 'refused', 'at': evidence.utc(time.time())})
+            except Exception:
+                pass
+            raise
+    if args.verify_token:
+        if args.send or args.status or args.incident or args.run:
+            raise publisher.PublisherRefused('publisher_request_invalid')
+        def audit(status):
+            with evidence.directory(Path(policy['state'])) as fd:
+                model._write(fd, 'publisher-token-status.json', {'version': 1, **status})
+        tokens = AppTokens(policy['app'], audit=audit)
+        cfg = SimpleNamespace(repo=policy['app']['repository'], publisher={
+            'key': tokens.get(), 'login': policy['app']['login']}, install={'env': {}},
+            apply_env={}, llm_key='', investigation={})
+        publisher.Publisher(cfg).verify()
+        return {'state': 'read_verified', 'login': policy['app']['login']}, 0
+    if args.status:
+        if args.send or args.incident or args.run:
+            raise publisher.PublisherRefused('publisher_request_invalid')
+        return {'state': 'status_requested'}, 0
+    result = handle(policy, {'incident': args.incident, 'run': args.run}, send=args.send)
+    return result, 0 if result.get('state', 'delivered') == 'delivered' else 1
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog='factory investigation-broker')
     parser.add_argument('--policy', required=True)
@@ -161,76 +189,24 @@ def main(argv):
     parser.add_argument('--send', action='store_true')
     parser.add_argument('--confirm-public-write', action='store_true')
     args = parser.parse_args(argv)
+    policy = None
     try:
         if args.send and not args.confirm_public_write:
             raise publisher.PublisherRefused('public_write_confirmation_required')
         policy = load_policy(args.policy)
-        if args.import_bundle:
-            if args.send or args.status or args.incident or args.run or args.verify_token:
-                raise publisher.PublisherRefused('publisher_request_invalid')
-            from . import investigation_transfer as transfer, publisher_status
-            try:
-                result = transfer.import_bundle(policy, args.import_bundle)
-            except Exception:
-                with evidence.directory(Path(policy['state'])) as fd:
-                    model._write(fd, 'import-result.json', {'version': 1, 'result': 'refused', 'at': evidence.utc(time.time())})
-                publisher_status.write(policy)
-                raise
-            publisher_status.write(policy)
-            print(json.dumps(result))
-            return 0
-        if args.verify_token:
-            if args.send or args.status or args.incident or args.run:
-                raise publisher.PublisherRefused('publisher_request_invalid')
-            # Explicit separately approved read-only App/token verification; no issue POST.
-            def audit(status):
-                with evidence.directory(Path(policy['state'])) as fd:
-                    model._write(fd, 'publisher-token-status.json', {'version': 1, **status})
-            tokens = AppTokens(policy['app'], audit=audit)
-            from . import publisher_status
-            try:
-                credential = tokens.get()
-                cfg = SimpleNamespace(repo=policy['app']['repository'], publisher={
-                    'key': credential, 'login': policy['app']['login']}, install={'env': {}},
-                    apply_env={}, llm_key='', investigation={})
-                publisher.Publisher(cfg).verify()
-            finally:
-                publisher_status.write(policy)
-            print(json.dumps({'state': 'read_verified', 'login': policy['app']['login']}))
-            return 0
-        if args.status:
-            if args.send or args.incident or args.run:
-                raise publisher.PublisherRefused('publisher_request_invalid')
-            if policy.get('version') == 2:
-                from . import publisher_status
-                print(json.dumps(publisher_status.write(policy)))
-                return 0
-            path = Path(policy.get('state', policy.get('store', ''))) / 'publisher-token-status.json'
-            row = json.loads(protected_read(path), object_pairs_hook=evidence.unique_pairs)
-            fields = {'version', 'outcome', 'expires_at', 'requests', 'max_requests', 'valid'}
-            if (not isinstance(row, dict) or set(row) != fields or row['version'] != 1
-                    or row['outcome'] not in {'request_reserved', 'ready', 'refresh_failed'}
-                    or type(row['requests']) is not int or not 0 <= row['requests'] <= 3
-                    or row['max_requests'] != 3 or type(row['valid']) is not bool
-                    or (row['expires_at'] is not None and not evidence.number(row['expires_at']))):
-                raise publisher.PublisherRefused('publisher_policy_invalid')
-            # A prior process's in-memory token is gone; don't claim the cached value still exists.
-            row['valid'] = False
-            row['token_persisted'] = False
-            print(json.dumps(row))
-            return 0
-        try:
-            result = handle(policy, {'incident': args.incident, 'run': args.run}, send=args.send)
-        finally:
-            if policy.get('version') == 2:
-                from . import publisher_status
-                publisher_status.write(policy)
-        print(json.dumps(result))
-        return 0 if result.get('state', 'delivered') == 'delivered' else 1
+        result, exit_code = operate(policy, args)
     except (publisher.PublisherRefused, evidence.EvidenceRefused) as error:
         code = str(error)
-        print(json.dumps({'ok': False, 'code': code if code in FAILURE_CODES else 'publisher_unavailable'}))
-        return 1
+        result, exit_code = {'ok': False, 'code': code if code in FAILURE_CODES else 'publisher_unavailable'}, 1
     except Exception:
-        print(json.dumps({'ok': False, 'code': 'publisher_unavailable'}))
-        return 1
+        result, exit_code = {'ok': False, 'code': 'publisher_unavailable'}, 1
+    if policy is not None:
+        try:
+            status = publisher_status.write(policy)
+            if args.status and exit_code == 0:
+                result = status
+        except Exception:
+            # A POST may already be delivered. Never obscure it or authorize retry.
+            result = {**result, 'status_write_failed': True}
+    print(json.dumps(result))
+    return exit_code

@@ -50,18 +50,43 @@ not model prose/credentials. Require a supported proposal or an honest fixed
 escalation. Check scope v2 against the actual failed commit and refresh the
 root-owned Git mirror explicitly if required.
 
-As matt, export this one incident/run to staging. As publisher, import within five
-minutes. Confirm status last_import=imported. Preview using exact incident/run;
-show the operator **repository, issue number and entire marker/body**. Independently
-confirm the failure remains unresolved and destination matches the intended
-incident. Do not send based only on an approval for provisioning or this plan.
+**Advance conditional approval B2:** before starting the terminal session, agree
+on the exact repository (`shamsway/octant-private`), incident issue number,
+incident/run and reviewed candidate executables. B2 authorizes one send only if
+the local preview matches that repository/issue, the operator approves the complete
+shown body and independently verifies the failure remains unresolved. This is
+conditional authorization in advance, not a chat approval between preview and send.
+The five-minute (300s) transfer expiry is unchanged.
 
-**Separate approval B2:** after reviewing that exact preview, root temporarily
-sets both broker switches true and invokes the same incident/run with
-`--send --confirm-public-write` through the credential unit. Record intent, bot
-login, resulting comment ID and delivered receipt only. Root switches both off
-immediately in a finally/cleanup procedure, including on error. Unknown response:
-retain uncertain receipt; reconcile exact author/body/marker, never repost.
+Root reviews/installs [scripts/manual-publish-investigation.sh](../scripts/manual-publish-investigation.sh)
+and pins its candidate executable/repository paths during separately approved
+provisioning. With B2 already approved, run this **single root-run sequence** in
+one terminal session:
+
+```sh
+sudo /root/reviewed/manual-publish-investigation.sh INCIDENT RUN PREAGREED_ISSUE
+```
+
+It exports as matt, imports/previews as publisher without loading credentials,
+checks the exact pre-agreed destination, displays the complete marker/body, and
+asks the local operator to type `SEND unresolved ISSUE` only after verifying the
+failure is still unresolved. It then temporarily enables both switches and starts
+the fixed encrypted-credential publisher unit with `--send --confirm-public-write`.
+The broker rechecks the 300s age and saved preview binding before a first POST.
+If local review takes too long, abort and restart with a fresh export; never extend
+expiry. No model call, deployment change or automatic POST retry is in this script.
+
+EXIT/INT/TERM/HUP traps disable switches on success, refusal, error or interruption,
+stop/remove the temporary unit override and reload the manager. No shell trap can
+handle SIGKILL or power loss: after either, keep the unit stopped and manually
+verify both switches false before any further operation. A root-held lock rejects
+concurrent sessions. Private operator/publisher preview/result files are retained for review; remove
+that temporary metadata directory only after reviewing it before another session.
+Outbox/locks/token audit are never removed or restored. `status_write_failed` is a
+separate metadata warning: a delivered primary result remains delivered with its
+original exit code; inspect the outbox/status path rather than resending blindly.
+Unknown POST response retains an uncertain receipt for exact marker/author/body
+reconciliation and never authorizes another POST.
 
 **Separate approval B3:** operator-approved repeat of the same confirmed command
 (with the temporary switches restored only for that invocation) must return the

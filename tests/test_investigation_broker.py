@@ -84,7 +84,10 @@ class StoreTests(unittest.TestCase):
 
 class BrokerTests(unittest.TestCase):
     def setUp(self):
-        self.policy = {'version': 1, 'publisher_uid': 1001, 'store': '/protected/store',
+        temp = tempfile.TemporaryDirectory(dir=Path.home())
+        self.addCleanup(temp.cleanup)
+        self.policy = {'version': 2, 'publisher_uid': 1001, 'snapshots': temp.name, 'state': temp.name,
+                       'status_file': '/protected/status/status.json', 'repository_root': '/protected/repo', 'scope_file': '/protected/scope.json',
                        'enabled': True, 'allow_publish': True, 'app': copy.deepcopy(APP)}
         self.request = {'incident': 'incident-' + 'a' * 24, 'run': 'deploy-test-01234567-1'}
         self.row = {'repo': APP['repository'], **self.request, 'issue': 101,
@@ -100,9 +103,12 @@ class BrokerTests(unittest.TestCase):
         mock.patch.object(outbox, 'store', side_effect=store).start()
         mock.patch.object(outbox, 'read', side_effect=lambda *args: self.row).start()
         mock.patch.object(outbox, 'enqueue', side_effect=lambda *args: self.row).start()
-        self.prepare = mock.patch.object(model, 'prepare', return_value=SimpleNamespace(
+        from factory import investigation_transfer as transfer
+        self.prepare = mock.patch.object(transfer, 'load_imported', return_value=SimpleNamespace(
             repository=APP['repository'], issue=101, idempotency_key=self.row['key'], body='fixed body')).start()
         mock.patch.object(outbox, 'binding', return_value={k: self.row[k] for k in ('repo', 'issue', 'key', 'body_sha256')}).start()
+        mock.patch.object(broker, 'protected_read', side_effect=lambda *args: json.dumps({k: self.row[k] for k in ('repo', 'issue', 'key', 'body_sha256')}).encode()).start()
+        self.status = mock.patch.object(broker.publisher_status, 'write', return_value={'token': {'outcome': 'ready', 'expires_at': 2000000000}}).start()
         self.client = mock.patch.object(broker.publisher, 'Publisher').start()
         self.deliver = mock.patch.object(outbox, 'deliver', return_value={**self.row, 'state': 'delivered', 'code': 'reconciled'}).start()
 
@@ -138,7 +144,7 @@ class BrokerTests(unittest.TestCase):
     def test_uncertain_reconciliation_with_real_outbox_no_post(self):
         with tempfile.TemporaryDirectory() as directory:
             factory = Path(directory)
-            self.policy['store'] = str(factory)
+            self.policy.update(snapshots=str(factory), state=str(factory))
             cfg = SimpleNamespace(factory=factory, repo=APP['repository'])
             row = {**self.row, 'version': 1, 'state': 'uncertain', 'code': 'post_outcome_unknown',
                    'body_sha256': evidence.digest(b'fixed body'), 'publisher_login': APP['login']}
@@ -192,16 +198,35 @@ class BrokerTests(unittest.TestCase):
             self.assertNotIn('private-provider-text', output.getvalue())
 
     def test_status_never_claims_cached_token(self):
-        status = {'version': 1, 'outcome': 'ready', 'expires_at': 2000000000,
-                  'requests': 3, 'max_requests': 3, 'valid': True}
-        with mock.patch.object(broker, 'load_policy', return_value=self.policy), \
-                mock.patch.object(broker, 'protected_read', return_value=json.dumps(status).encode()), \
-                redirect_stdout(io.StringIO()) as output:
+        with mock.patch.object(broker, 'load_policy', return_value=self.policy), redirect_stdout(io.StringIO()) as output:
             self.assertEqual(broker.main(['--policy', '/policy', '--status']), 0)
         result = json.loads(output.getvalue())
-        self.assertFalse(result['valid'])
-        self.assertFalse(result['token_persisted'])
+        self.assertNotIn('key', result['token'])
+        self.assertNotIn('valid', result['token'])
         self.tokens.assert_not_called()
+
+    def test_delivered_send_survives_broken_status_directory(self):
+        self.status.side_effect = OSError('private-status-path')
+        with mock.patch.object(broker, 'load_policy', return_value=self.policy), redirect_stdout(io.StringIO()) as output:
+            code = broker.main(['--policy', '/policy', '--incident', self.request['incident'],
+                                '--run', self.request['run'], '--send', '--confirm-public-write'])
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(result['state'], 'delivered')
+        self.assertEqual(result['code'], 'reconciled')
+        self.assertTrue(result['status_write_failed'])
+        self.assertNotIn('private-status-path', output.getvalue())
+
+    def test_primary_refusal_survives_failed_status(self):
+        self.status.side_effect = OSError('private-status-path')
+        self.policy['enabled'] = False
+        with mock.patch.object(broker, 'load_policy', return_value=self.policy), redirect_stdout(io.StringIO()) as output:
+            code = broker.main(['--policy', '/policy', '--incident', self.request['incident'],
+                                '--run', self.request['run'], '--send', '--confirm-public-write'])
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['code'], 'publisher_disabled')
+        self.assertTrue(result['status_write_failed'])
 
     def test_policy_uid_sentinel_schema(self):
         for patch in ({'extra': True}, {'publisher_uid': 0}, {'publisher_uid': 999}, {'enabled': 1}):

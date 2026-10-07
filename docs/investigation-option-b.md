@@ -89,5 +89,6 @@ doctor reports missing/stale/malformed status honestly, pending outbox counts,
 expired/failed token operations and refused imports. Status expires after five
 minutes; because there is no timer, stale between operator sessions is expected.
 The file accepts no requests or directions. Factory never writes it or invokes
-the publisher. A failed status write makes the broker command fail; publication
-may already have occurred, so inspect the durable outbox rather than retry a POST.
+the publisher. A failed status write adds `status_write_failed: true` without changing the primary
+result or exit code. Publication may already have occurred; inspect the durable
+outbox/status path rather than retry a POST.

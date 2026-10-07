@@ -244,6 +244,23 @@ def load_imported(policy, incident, run, *, now=None):
     return prepare_bundle(bundle, policy, now=now)
 
 
+EXPORT_FAILURE_CODES = publication.REFUSALS | frozenset({
+    'transfer_invalid', 'transfer_budget', 'transfer_hash_mismatch',
+    'transfer_identity_mismatch', 'transfer_window_mismatch', 'transfer_lineage_mismatch',
+    'publication_binding_changed', 'publication_destination_unavailable', 'result_unavailable',
+    'unsafe_staging_directory', 'unsafe_staging_file',
+})
+
+
+@contextmanager
+def staging_directory(path):
+    with evidence.directory(path) as fd:
+        meta = os.fstat(fd)
+        evidence.require(meta.st_uid == os.geteuid() and not meta.st_mode & 0o022,
+                         'unsafe_staging_directory')
+        yield fd
+
+
 def main(argv):
     parser = argparse.ArgumentParser(prog='factory investigation-export')
     parser.add_argument('--incident', required=True)
@@ -253,12 +270,21 @@ def main(argv):
     try:
         cfg = config.load()
         bundle = export_bundle(cfg, args.incident, args.run)
-        with evidence.directory(Path(args.staging_dir).absolute()) as fd:
+        with staging_directory(Path(args.staging_dir).absolute()) as fd:
             name = key(cfg.repo, args.incident, args.run) + '.json'
+            try:
+                meta = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                evidence.require(stat.S_ISREG(meta.st_mode) and meta.st_uid == os.geteuid(), 'unsafe_staging_file')
             model._write(fd, name, bundle)
             os.chmod(name, 0o640, dir_fd=fd, follow_symlinks=False)
-        print(json.dumps({'state': 'exported', 'file': name, 'sha256': bundle['sha256']}))
-        return 0
+        result, exit_code = {'state': 'exported', 'file': name, 'sha256': bundle['sha256']}, 0
+    except evidence.EvidenceRefused as error:
+        code = str(error)
+        result, exit_code = {'ok': False, 'code': code if code in EXPORT_FAILURE_CODES else 'transfer_unavailable'}, 1
     except Exception:
-        print(json.dumps({'ok': False, 'code': 'transfer_unavailable'}))
-        return 1
+        result, exit_code = {'ok': False, 'code': 'transfer_unavailable'}, 1
+    print(json.dumps(result))
+    return exit_code

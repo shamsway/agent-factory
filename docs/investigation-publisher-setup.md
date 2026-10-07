@@ -329,3 +329,20 @@ privately for dedupe/audit before any separately approved account/data deletion.
 Do not delete the old Private-vault key or vault content as part of this guide.
 Manual key rotation remains section 4. The future authenticated transfer design
 is SHA-245; it is not required for this operator-confirmed release.
+
+## Conditional acceptance sequence
+
+The B/B2 acceptance plan now supports advance **conditional** approval for an exact
+repository/incident issue and unresolved failure. Root reviews and installs
+`scripts/manual-publish-investigation.sh` in a root-owned location, pins its candidate
+exporter and broker paths, and runs it manually in one terminal session. The script
+exports as matt, imports/previews as publisher, checks the pre-agreed destination,
+displays the complete body, and requires a local unresolved-failure confirmation.
+The transfer age stays 300 seconds. It creates a temporary root-owned ExecStart
+override for the already provisioned encrypted-credential publisher service and
+disables both switches in EXIT/INT/TERM/HUP cleanup, including errors. No worker
+can install/invoke it as root; no scheduled invocation or sudo grant is added.
+After SIGKILL/power loss, manually verify the stopped unit and disabled switches.
+The script is a future operator procedure, syntax-checked only, not host-tested
+or run by this source slice. See investigation-barlow-acceptance.md for approvals,
+cleanup and exact replay rules.
