@@ -9,25 +9,33 @@ umask 0077
 }
 incident=$1 run=$2 issue=$3
 repository=shamsway/octant-private
-# Pin these reviewed candidate paths during provisioning; never use worker PATH.
-exporter=/home/matt/git/agent-factory/.venv/bin/factory
+# Pin the installed service runtime identified by inspect during provisioning.
+# The placeholder deliberately refuses to run until the operator pins that path.
+service_runtime=/REPLACE_WITH_INSTALLED_SERVICE_RUNTIME
+exporter_python=$service_runtime/bin/python
 matt_repo=/home/matt/git/octant-private
 broker=/opt/factory-publisher/venv/bin/factory
 python=/opt/factory-publisher/venv/bin/python
 policy=/etc/factory-publisher/policy.json
 staging=/var/lib/factory-transfer
 unit=factory-publisher.service
-work=/run/factory-publisher-acceptance
+work_root=/run/factory-publisher-acceptance
 override=/run/systemd/system/factory-publisher.service.d/50-acceptance.conf
 
 # Root-held lock; no concurrent switch changes/acceptance sessions.
 exec 9>/run/factory-publisher-acceptance.lock
 flock -n 9 || { echo 'acceptance_already_running' >&2; exit 1; }
-[[ ! -e $work && ! -L $work && ! -e $override && ! -L $override ]] || {
+stamp=$(date -u +%Y%m%dT%H%M%S.%NZ)
+work=$work_root/$stamp
+[[ ! -L $work_root && ( ! -e $work_root || -d $work_root ) && ! -e $work && ! -L $work && ! -e $override && ! -L $override ]] || {
   echo 'acceptance_paths_in_use' >&2; exit 1;
 }
 [[ $(systemctl is-active "$unit" || true) == inactive ]] || {
   echo 'publisher_must_be_inactive' >&2; exit 1;
+}
+
+[[ $service_runtime != /REPLACE_WITH_INSTALLED_SERVICE_RUNTIME && -x $exporter_python ]] || {
+  echo 'installed_service_runtime_required' >&2; exit 1;
 }
 
 set_switches() {
@@ -86,12 +94,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 set_switches false
-install -d -o root -g factory-publisher -m 0750 "$work"
+install -d -o root -g factory-publisher -m 0750 "$work_root"
+mkdir -m 0750 "$work"
+chown root:factory-publisher "$work"
+printf 'acceptance_work=%s\n' "$work"
 
 # Export as matt; neither import nor preview loads the App credential.
 (
   cd "$matt_repo"
-  runuser -u matt -- "$exporter" investigation-export --incident "$incident" --run "$run" --staging-dir "$staging"
+  runuser -u matt -- "$exporter_python" -P -m factory investigation-export --incident "$incident" --run "$run" --staging-dir "$staging"
 ) > "$work/export.json"
 name=$("$python" -I - "$work/export.json" <<'PY'
 import json, re, sys

@@ -128,6 +128,25 @@ class TransferTests(unittest.TestCase):
         self.assertIn('--send --confirm-public-write', text)
         self.assertEqual(transfer.MAX_TRANSFER_AGE, 300)
 
+    def test_manual_exporter_uses_installed_service_runtime(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'manual-publish-investigation.sh'
+        text = script.read_text()
+        self.assertIn('exporter_python=$service_runtime/bin/python', text)
+        self.assertIn('runuser -u matt -- "$exporter_python" -P -m factory investigation-export', text)
+        self.assertIn('installed_service_runtime_required', text)
+        self.assertNotIn('/home/matt/git/agent-factory/.venv', text)
+
+    def test_manual_work_directory_is_per_invocation_and_retained(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'manual-publish-investigation.sh'
+        text = script.read_text()
+        self.assertIn('work_root=/run/factory-publisher-acceptance', text)
+        self.assertIn('stamp=$(date -u +%Y%m%dT%H%M%S.%NZ)', text)
+        self.assertIn('work=$work_root/$stamp', text)
+        self.assertIn('! -L $work_root', text)
+        self.assertNotIn('! -e $work_root &&', text)
+        self.assertNotIn('rm -rf', text)
+        self.assertIn('mkdir -m 0750 "$work"', text)
+
     def test_export_cli_closed_refusal_codes_only(self):
         for error, expected in ((evidence.EvidenceRefused('stale_evidence'), 'stale_evidence'),
                                 (evidence.EvidenceRefused(fixtures.SECRET), 'transfer_unavailable'),
