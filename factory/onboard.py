@@ -545,6 +545,8 @@ def doctor(argv: list[str]) -> int:
 
     _incident_routing_checks(cfg, report)
     _investigation_outbox_checks(cfg, report)
+    from . import publisher_status
+    publisher_status.doctor(cfg, report)
     from .investigation_model import snapshot as investigation_snapshot
     model_state = investigation_snapshot(cfg)
     if model_state["status"] == "unavailable":

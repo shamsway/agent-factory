@@ -100,7 +100,7 @@ KNOWN_KEYS = {
     "triage": ("url", "model", "key"),
     "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
                       "max_input_bytes", "max_output_tokens", "token_budget", "timeout", "max_requests", "send_store_false", "allow_shared_model_key"),
-    "publisher": ("enabled", "allow_publish", "key", "login", "kind", "timeout", "request_timeout", "max_requests", "max_response_bytes"),
+    "publisher": ("enabled", "allow_publish", "key", "login", "kind", "timeout", "request_timeout", "max_requests", "max_response_bytes", "status_file", "status_uid"),
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env"),

@@ -208,7 +208,10 @@ class BrokerTests(unittest.TestCase):
             with mock.patch.object(broker, 'protected_read', return_value=json.dumps({**self.policy, **patch}).encode()), \
                     mock.patch.object(os, 'geteuid', return_value=1001), self.assertRaises(PublisherRefused):
                 broker.load_policy('/policy')
-        reads = [json.dumps(self.policy).encode(), evidence.encoded({'version': 1, 'repository': APP['repository']})]
+        policy = {k: v for k, v in self.policy.items() if k != 'store'}
+        policy.update(version=2, snapshots='/protected/snapshots', state='/protected/state',
+                      status_file='/protected/status/status.json', repository_root='/protected/repo', scope_file='/protected/scope.json')
+        reads = [json.dumps(policy).encode()] + [evidence.encoded({'version': 1, 'repository': APP['repository']})] * 2
         with mock.patch.object(broker, 'protected_read', side_effect=reads), \
                 mock.patch.object(os, 'geteuid', return_value=1001), mock.patch.object(broker, 'protected_store'):
-            self.assertEqual(broker.load_policy('/policy')['store'], self.policy['store'])
+            self.assertEqual(broker.load_policy('/policy')['state'], policy['state'])

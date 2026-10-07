@@ -17,7 +17,7 @@ from . import incidents, investigation_model as model, investigation_evidence as
 def store(cfg, incident, run):
     evidence.require(incidents.ID_RE.fullmatch(incident) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", run), "invalid_reference")
     name = evidence.digest((cfg.repo + "\0" + incident + "\0" + run).encode())
-    with evidence.directory(cfg.factory) as parent:
+    with evidence.directory(getattr(cfg, "publication_store", cfg.factory)) as parent:
         try:
             os.mkdir("investigation-outbox", mode=0o700, dir_fd=parent)
         except FileExistsError:
@@ -61,9 +61,13 @@ def binding(envelope):
             "key": envelope.idempotency_key, "body_sha256": evidence.digest(envelope.body.encode())}
 
 
+def prepare_envelope(cfg, incident, run, *, now=None):
+    return getattr(cfg, "prepare_publication", model.prepare)(cfg, incident, run, now=now)
+
+
 def enqueue(cfg, incident, run, *, now=None):
     """Persist only trusted identity and hashes; never take a supplied body."""
-    envelope = model.prepare(cfg, incident, run, now=now)
+    envelope = prepare_envelope(cfg, incident, run, now=now)
     expected = binding(envelope)
     with store(cfg, incident, run) as (fd, name):
         row = read(fd, name)
@@ -118,7 +122,7 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
         # Only a first POST needs current evidence. Reconciliation above uses
         # the durable trusted body digest even if source evidence has aged out.
         try:
-            envelope = model.prepare(cfg, incident, run, now=now)
+            envelope = prepare_envelope(cfg, incident, run, now=now)
             expected = binding(envelope)
             evidence.require(all(row.get(k) == v for k, v in expected.items()), "publication_binding_changed")
         except (model.ModelRefused, evidence.EvidenceRefused):
@@ -151,10 +155,10 @@ def snapshot(cfg):
     deadline = time.monotonic() + 2
     try:
         try:
-            cfg.factory.lstat()
+            getattr(cfg, "publication_store", cfg.factory).lstat()
         except FileNotFoundError:
             return result
-        with evidence.directory(cfg.factory) as parent:
+        with evidence.directory(getattr(cfg, "publication_store", cfg.factory)) as parent:
             try:
                 fd = os.open("investigation-outbox", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             except FileNotFoundError:

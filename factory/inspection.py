@@ -17,7 +17,7 @@ import subprocess
 import sys
 import zlib
 
-from . import config, deploy, incidents, investigation_routing, investigation_model, investigation_outbox, lifecycle, verify_secrets
+from . import config, deploy, incidents, investigation_routing, investigation_model, investigation_outbox, publisher_status, lifecycle, verify_secrets
 
 LIMIT = 8 * 1024 * 1024
 PROPERTIES = "LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment,ExecStart,WorkingDirectory,InvocationID"
@@ -380,7 +380,7 @@ def inspect(cfg: config.Config, *, live: bool = False, candidates: bool = False,
                                       "directory": target.dir, "adapter": target.adapter}
                                      for name, target in sorted(cfg.targets.items())],
               "units": units, "credentials": verify_secrets.credential_rows(cfg, "all", live),
-              "deployment": ledger, "incidents": incidents.snapshot(cfg.factory), "incident_routing": investigation_routing.snapshot(cfg.factory), "investigations": investigation_model.snapshot(cfg), "investigation_outbox": investigation_outbox.snapshot(cfg), "locks": locks(cfg, lock_dirs),
+              "deployment": ledger, "incidents": incidents.snapshot(cfg.factory), "incident_routing": investigation_routing.snapshot(cfg.factory), "investigations": investigation_model.snapshot(cfg), "investigation_outbox": investigation_outbox.snapshot(cfg), "publisher_status": publisher_status.observe(cfg), "locks": locks(cfg, lock_dirs),
               "candidates": candidate_snapshot(cfg, ledger) if candidates else {"status": "not_requested"},
               "limits": ["Point-in-time observations; keep scheduling paused for drain checks.",
                          "Live module bytes are not observable; correlate process invocation with immutable artifact.",
