@@ -72,7 +72,7 @@ def jwt(p, *, now):
 
 
 class AppTokens:
-    """One process, one repository, refresh before expiry; no token serialization."""
+    """One mint per invocation, maximum three requests; no in-process refresh."""
     def __init__(self, raw, *, wire_fn=None, clock=time.time, audit=None):
         self.p = app_policy(raw)
         self.wire_fn = wire_fn or http_call
@@ -95,6 +95,10 @@ class AppTokens:
         self._expires = 0
         self.outcome = 'refresh_failed'
         try:
+            # Expiry ends this instance's lifetime budget. A fresh broker invocation
+            # can mint a new token; this instance never silently resets its audit.
+            if self.requests >= 3:
+                raise PublisherRefused('publisher_token_unavailable')
             bearer = jwt(self.p, now=now)
             def call(endpoint, payload=None):
                 if self.requests >= 3:
@@ -135,5 +139,8 @@ class AppTokens:
         except Exception:
             self._token, self._expires = None, 0
             self.outcome = 'refresh_failed'
-            self.audit(self.status())
+            try:
+                self.audit(self.status())
+            except Exception:
+                pass  # Audit failure still refuses the operation; never leak its exception.
             raise PublisherRefused('publisher_token_unavailable') from None

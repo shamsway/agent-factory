@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from . import investigation_evidence as evidence, investigation_model as model
 from . import investigation_outbox as outbox, investigation_publisher as publisher
 from .publisher_credentials import AppTokens, app_policy, protected_read
+from .investigation_publication import REFUSALS as EVIDENCE_FAILURE_CODES
 
 
 def protected_store(path):
@@ -75,7 +76,7 @@ def handle(policy, request, *, send=False, wire_fn=None):
                 'public_write': False}
     if not (policy['enabled'] and policy['allow_publish']):
         raise publisher.PublisherRefused('publisher_disabled')
-    # The outbox validates evidence and destination before obtaining any credential.
+    # Terminal/reconciliation paths need no fresh evidence. Queued rows do.
     with outbox.store(cfg, request['incident'], request['run']) as (fd, name):
         row = outbox.read(fd, name)
     if row is None:
@@ -84,6 +85,12 @@ def handle(policy, request, *, send=False, wire_fn=None):
                      and row.get('run') == request['run'], 'invalid_publication_destination')
     if row['state'] in {'delivered', 'failed', 'blocked'}:
         return {'state': row['state'], 'code': row['code'], 'token': {'outcome': 'not_requested'}}
+    if row['state'] == 'queued':
+        envelope = model.prepare(cfg, request['incident'], request['run'])
+        expected = outbox.binding(envelope)
+        evidence.require(set(expected) == {'repo', 'issue', 'key', 'body_sha256'}
+                         and all(row.get(key) == value for key, value in expected.items()),
+                         'publication_binding_changed')
     def audit(status):
         with evidence.directory(cfg.factory) as fd:
             model._write(fd, 'publisher-token-status.json', {'version': 1, **status})
@@ -97,6 +104,22 @@ def handle(policy, request, *, send=False, wire_fn=None):
     row = outbox.deliver(cfg, request['incident'], request['run'], publisher=client,
                          publisher_login=p['login'])
     return {'state': row['state'], 'code': row['code'], 'token': tokens.status()}
+
+
+
+# Closed public metadata only; exception text is never accepted as a provider message.
+FAILURE_CODES = frozenset({
+    'publisher_policy_invalid', 'publisher_request_invalid', 'publisher_store_unavailable',
+    'publisher_disabled', 'public_write_confirmation_required', 'publisher_token_unavailable',
+    'publisher_key_invalid', 'publisher_identity_unverified', 'publisher_token_scope_invalid',
+    'publisher_credential_invalid', 'publisher_endpoint_refused', 'publisher_budget',
+    'publisher_outcome_unknown', 'publisher_response_invalid', 'publication_binding_changed',
+    'invalid_publication_destination', 'publication_destination_unavailable',
+    'invalid_reference', 'unsafe_path', 'unsafe_or_missing_file', 'unsafe_file_type',
+    'invalid_evidence', 'stale_evidence', 'partial_evidence', 'incident_identity_mismatch',
+    'incident_run_mismatch', 'result_unavailable', 'model_retry_pending', 'model_state_unavailable',
+    'scope_mapping_unavailable', 'scope_revision_mismatch', 'unsupported_scope',
+}) | EVIDENCE_FAILURE_CODES
 
 
 def main(argv):
@@ -132,6 +155,10 @@ def main(argv):
         result = handle(policy, {'incident': args.incident, 'run': args.run}, send=args.send)
         print(json.dumps(result))
         return 0 if result.get('state', 'delivered') == 'delivered' else 1
+    except (publisher.PublisherRefused, evidence.EvidenceRefused) as error:
+        code = str(error)
+        print(json.dumps({'ok': False, 'code': code if code in FAILURE_CODES else 'publisher_unavailable'}))
+        return 1
     except Exception:
-        print(json.dumps({'ok': False, 'code': 'publisher_broker_refused'}))
+        print(json.dumps({'ok': False, 'code': 'publisher_unavailable'}))
         return 1
