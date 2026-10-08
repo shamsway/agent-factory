@@ -7,14 +7,15 @@ import unittest
 
 
 class PublisherScriptCleanupTests(unittest.TestCase):
-    def check_cleanup(self, name):
+    def check_cleanup(self, name, *, override_exists=True):
         script = Path(__file__).resolve().parents[1] / 'scripts' / name
         text = script.read_text()
         cleanup = text[text.index('cleanup() {'):text.index("\ntrap cleanup EXIT")]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             override = root / 'override'
-            override.touch()
+            if override_exists:
+                override.touch()
             harness = r'''set -euo pipefail
 unit=factory-publisher.service
 check=factory-publisher-check.service
@@ -42,10 +43,19 @@ echo failed > "$work/state"
                             calls.index('reset-failed factory-publisher.service'))
             self.assertEqual((root / 'state').read_text().strip(), 'inactive')
             self.assertFalse(override.exists())
-            self.assertIn('daemon-reload', calls)
+            if override_exists:
+                self.assertIn('daemon-reload', calls)
 
     def test_failed_a2_resets_unit_after_stop(self):
         self.check_cleanup('manual-verify-publisher.sh')
 
     def test_failed_publication_resets_unit_after_stop(self):
         self.check_cleanup('manual-publish-investigation.sh')
+
+    def test_failed_publication_resets_even_if_override_missing(self):
+        self.check_cleanup('manual-publish-investigation.sh', override_exists=False)
+
+    def test_unpinned_a2_runtime_is_refused_before_network_capable_start(self):
+        script = Path(__file__).resolve().parents[1] / 'scripts/manual-verify-publisher.sh'
+        text = script.read_text()
+        self.assertLess(text.index('installed_service_runtime_required'), text.index('systemctl start --wait'))
