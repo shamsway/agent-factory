@@ -21,9 +21,12 @@ manifests, verified wheel hashes and installed module hashes. Record both absolu
 interpreters/package locations; version strings or checkout HEAD are not proof.
 The provisioning guide's source parity gate is mandatory. A mismatch or unavailable
 export command requires separate runtime installation/rollout approval.
-Check the credential inside the temporary check unit, check matt's negative access
-and credential cleanup; verify matt has no execution/start/edit privilege capable
-of bypassing the dedicated identity. Preserve the durable outbox even if any
+Check the credential inside the temporary check unit and credential cleanup.
+(a) Verify key, credential, policy and state paths are not readable or writable
+by matt without privilege escalation. (b) Record NOPASSWD sudo, docker membership
+and Nomad without ACLs as accepted root-equivalent escalation paths, linked to
+SHA-113 and SHA-245. Step A must not fail because of (b). The account and encrypted
+credential protect non-root access only; matt can become root and obtain the key. Preserve the durable outbox even if any
 verification fails. Validate the accepted 14 scope v2 mappings and actual commit
 availability. Use a synthetic export/import to prove group readability, atomic
 snapshot installation and missing/observed/stale status reporting in inspect/doctor.
