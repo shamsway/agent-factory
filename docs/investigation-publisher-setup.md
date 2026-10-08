@@ -138,13 +138,16 @@ LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-k
 ```
 
 Only this unit references the credential. Root owns its executable, environment
-and policy; workers cannot change them or start arbitrary commands as this user.
+and policy; unprivileged workers cannot change them or start arbitrary commands
+as this user. On Barlow workers running as matt can escalate to root and bypass
+these controls, including decrypting the App key.
 Keep both publisher-policy switches false. Set `key_file` to the credential mount
 for the reviewed unit; use the manager-provided `$CREDENTIALS_DIRECTORY` in a
 trusted launcher when wiring it, not a worker-supplied path. Systemd unit path
 and broker policy must agree. Do not grant `matt` membership in publisher groups,
 read ACLs, sudo/systemd rules for arbitrary publisher execution, or access to the
-publisher's process memory. Privileged human root access remains trusted.
+publisher's process memory. Existing matt root escalation is accepted for SHA-201;
+these instructions do not require removing it. See investigation-option-b.md.
 
 Before any mint/write, perform separately approved local-only verification through
 a temporary check-only system unit with the same User and LoadCredentialEncrypted
@@ -215,10 +218,16 @@ References: [systemd encrypted credentials](https://github.com/systemd/systemd/b
 This is an **operator-run provisioning plan**, not authorization to execute it.
 Use the immutable reviewed candidate paths/hashes recorded in REVIEW.md. Root
 creates a non-login `factory-publisher` system account with no sudo rights. The
-operator is trusted root; `matt` and dispatched workers must have no noninteractive
-sudo/polkit rule granting root, arbitrary `systemd-run`, this service start/edit,
-or arbitrary execution as `factory-publisher`. Check the actual host rules before
-claiming isolation; do not remove existing host privileges without a separate plan.
+operator is trusted root. On Barlow matt is also root-equivalent through NOPASSWD
+sudo, docker membership and Nomad without ACLs. Verify key/credential/policy/state
+access is denied without escalation, and record those known escalation paths as
+accepted risk (SHA-113, SHA-245); they must not fail step A. The encrypted credential
+and dedicated user do not prevent matt from obtaining the key as root. No sudoers,
+group, Nomad or host-hardening change is authorized in SHA-201. Future real isolation
+requires removing NOPASSWD and docker membership and enabling Nomad ACLs (SHA-113).
+The App's authority is limited to Issues read/write on shamsway/octant-private;
+one-hour tokens and attributable/revocable identity reduce impact, not root access.
+Confirmation protects non-root mistakes/compromise, not root compromise.
 
 Example root-only directory provisioning, after checking names/UID conflicts:
 
@@ -235,7 +244,7 @@ install -d -o root -g factory-publisher -m 0750 /opt/factory-publisher
 ```
 
 The transfer group grants publisher read/traverse on matt's staging directory;
-it grants matt **no** access to publisher state, key or executable. Export produces
+without privilege escalation it grants matt **no** access to publisher state, key or executable. Export produces
 0640 files in this setgid directory. Check group inheritance/readability using a
 synthetic export before using real incident data. Root installs the broker v2
 policy example from investigation-publisher-broker.md, replacing the nonsecret
@@ -263,7 +272,7 @@ fetches or uses worker Git credentials. A new job/path mapping needs operator
 approval; ordinary changes to contents do not change scope v2 approval.
 
 Install the source and dependency wheels in a root-owned, publisher-readable venv
-under `/opt/factory-publisher/venv`; workers cannot write any ancestor. Record all
+under `/opt/factory-publisher/venv`; workers without privilege escalation cannot write any ancestor. Record all
 wheel SHA-256 values including Factory and tomlkit, install only reviewed hashes
 with `--no-index --require-hashes --only-binary=:all:` from an offline wheelhouse.
 The earlier broker dependency instructions are one part of this manifest; **do

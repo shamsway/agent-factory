@@ -8,12 +8,24 @@ introduced. Dedicated publisher user and encrypted App credential remain require
 
 ## Residual risk
 
-A compromised `matt` process can forge incident evidence and cause a misleading
-fixed-template finding to be **proposed** on an octant-private incident issue.
-It cannot choose free text, post without operator confirmation, mint tokens, or
-touch code, PRs or deployments through this publisher. Root/operator compromise
-is outside this boundary. Hashes prove internal consistency, not producer identity.
-Operator review of the exact destination and complete body is mandatory each time.
+Operator decision, 2026-10-07: `matt` is root-equivalent on Barlow. NOPASSWD
+sudo, docker membership and Nomad without ACLs are accepted escalation paths.
+The dedicated publisher user and systemd encrypted credential protect the App key
+only from non-root processes and accidental exposure. A compromised `matt` can
+become root, decrypt the key, change the switches and post without confirmation.
+Operator confirmation stops non-root compromise and mistakes; it does not stop a
+root compromise. Hashes prove consistency, not producer identity.
+
+The App grants Issues read/write and Metadata read only on
+`shamsway/octant-private`, with one-hour installation tokens. Its bot identity is
+attributable and revocable by uninstalling the App or rotating its key. This
+credential has narrower authority than the dispatch/apply credentials `matt`
+already holds. Root compromise also defeats the fixed-template enforcement; the
+App itself grants no code, PR or deployment write authority.
+
+No sudoers, group, Nomad or host-hardening changes belong to SHA-201. Real isolation
+requires future host hardening in SHA-245, including Nomad ACLs (SHA-113).
+Operator review of the exact destination and complete body remains mandatory.
 
 ## Export and import
 
@@ -66,8 +78,8 @@ destination and saves their binding in publisher-owned state. Root/operator revi
 that output, then separately invokes `--send --confirm-public-write` for the same
 incident/run with both broker policy switches enabled. A changed binding requires
 a new preview. Switches remain off outside the controlled test window. CLI flags
-are human confirmation, not a cryptographic identity mechanism: do not grant matt
-sudo, systemd or executable access permitting invocation as the publisher.
+are human confirmation, not a cryptographic identity mechanism. Existing root
+escalation can bypass them; this accepted risk does not fail acceptance A.
 
 Queued sends revalidate the imported snapshot and preview before minting and again
 before the first POST. Uncertain receipts reconcile exact marker/body/publisher
