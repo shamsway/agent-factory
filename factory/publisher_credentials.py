@@ -30,8 +30,11 @@ def protected_read(path, *, maximum=32768, secret=False):
                 raise PublisherRefused('publisher_policy_invalid')
         with evidence.file_at(fd, (path.name,)) as handle:
             meta = os.fstat(handle.fileno())
-            forbidden = 0o077 if secret else 0o022
-            if meta.st_uid not in {0, os.geteuid()} or meta.st_mode & forbidden:
+            # systemd credentials may be root:root 0440 with a service-user ACL.
+            # Root-group readability is safe; secret files must never be writable.
+            forbidden = 0o337 if secret else 0o022
+            if (meta.st_uid not in {0, os.geteuid()} or meta.st_mode & forbidden
+                    or (secret and meta.st_mode & 0o040 and meta.st_gid != 0)):
                 raise PublisherRefused('publisher_policy_invalid')
             raw = handle.read(maximum + 1)
             if len(raw) > maximum:
