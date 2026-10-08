@@ -81,9 +81,9 @@ cleanup() {
     echo 'CRITICAL: switch_disable_failed; stop and repair as root; never resend blindly' >&2
     [[ $primary != 0 ]] || primary=1
   fi
+  systemctl stop "$unit" >/dev/null 2>&1 || { echo 'publisher_stop_failed' >&2; primary=1; }
+  systemctl reset-failed "$unit" >/dev/null 2>&1 || { echo 'publisher_reset_failed' >&2; primary=1; }
   if [[ -e $override ]]; then
-    systemctl stop "$unit" >/dev/null 2>&1 || { echo 'publisher_stop_failed' >&2; primary=1; }
-    systemctl reset-failed "$unit" >/dev/null 2>&1 || { echo 'publisher_reset_failed' >&2; primary=1; }
     rm -f -- "$override"
     systemctl daemon-reload >/dev/null 2>&1 || { echo 'unit_reload_failed' >&2; primary=1; }
   fi

@@ -3,6 +3,8 @@
 set -euo pipefail
 umask 0077
 [[ $(id -u) == 0 && $(hostname -s) == barlow && $# == 0 ]] || { echo 'root_barlow_no_args_required' >&2; exit 1; }
+service_runtime=/REPLACE_WITH_INSTALLED_SERVICE_RUNTIME
+[[ $service_runtime != /REPLACE_WITH_INSTALLED_SERVICE_RUNTIME && -x $service_runtime/bin/python ]] || { echo 'installed_service_runtime_required' >&2; exit 1; }
 python=/opt/factory-publisher/venv/bin/python
 helper=/usr/local/libexec/factory-publisher/a2-fields.py
 unit=factory-publisher.service
@@ -66,7 +68,7 @@ systemctl start --wait "$unit" >/dev/null 2>&1 || start_exit=$?
 if [[ $start_exit != 0 ]]; then echo '{"state":"failed","code":"a2_service_failed_no_automatic_retry"}'; exit "$start_exit"; fi
 "$python" -I "$helper" after "$work" > "$work/summary.json"
 # Non-live inspection only. Raw metadata receipt remains root0700/0600.
-(cd /home/matt/git/octant-private && runuser -u matt -- env HOME=/home/matt XDG_RUNTIME_DIR=/run/user/$(id -u matt) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u matt)/bus /REPLACE_WITH_INSTALLED_SERVICE_RUNTIME/bin/python -P -m factory inspect --json) > "$work/inspect.json"
+(cd /home/matt/git/octant-private && runuser -u matt -- env HOME=/home/matt XDG_RUNTIME_DIR=/run/user/$(id -u matt) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u matt)/bus "$service_runtime/bin/python" -P -m factory inspect --json) > "$work/inspect.json"
 "$python" -I - "$work/inspect.json" <<'PY'
 import json,sys
 try:
