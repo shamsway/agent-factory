@@ -48,6 +48,8 @@ they do not install cryptography into existing worker or service runtimes.
 
 ## 2. Encrypt and install the key, without a plaintext file
 
+Operator verification (2026-10-08): a 1Password SSH Key item can display the key in OpenSSH format in the UI while `op read` returns PEM (PKCS#8). For this App key and future rotations, retrieve the existing field with `op read` into the protected in-memory encryption path; never print its output, pass it in argv, or create a plaintext key file. Accept `BEGIN PRIVATE KEY` / `BEGIN RSA PRIVATE KEY`; do not infer from the UI header that it is the wrong stored key. Validate with `openssl pkey -check -noout` before encryption.
+
 Use a trusted **root operator terminal on Barlow**, never a `matt` worker shell or
 agent tool session. Obtain the PEM from the operator Private vault manually.
 Do not export it into an environment variable, shell argument, clipboard log,
@@ -71,25 +73,25 @@ assert store.stat().st_mode & 0o077 == 0
 stage = store / 'factory-publisher-app-key.cred.new'
 assert not stage.exists() and not stage.is_symlink()
 os.umask(0o077)
-with open('/dev/tty', 'r+') as terminal:
-    original = termios.tcgetattr(terminal.fileno())
-    hidden = termios.tcgetattr(terminal.fileno())
+with open('/dev/tty', 'r') as reader, open('/dev/tty', 'w') as writer:
+    original = termios.tcgetattr(reader.fileno())
+    hidden = termios.tcgetattr(reader.fileno())
     hidden[3] &= ~(termios.ECHO | termios.ECHONL)
     lines = []
-    terminal.write('Paste the PEM key; input is hidden. Finish at its END line.\n')
-    terminal.flush()
+    writer.write('Paste the PEM key; input is hidden. Finish at its END line.\n')
+    writer.flush()
     try:
-        termios.tcsetattr(terminal.fileno(), termios.TCSAFLUSH, hidden)
+        termios.tcsetattr(reader.fileno(), termios.TCSAFLUSH, hidden)
         while True:
-            line = terminal.readline()
+            line = reader.readline()
             if not line or sum(map(len, lines)) + len(line) > 32768:
                 raise RuntimeError('key input refused')
             lines.append(line)
             if line.strip() in ('-----END PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----'):
                 break
     finally:
-        termios.tcsetattr(terminal.fileno(), termios.TCSAFLUSH, original)
-        terminal.write('\n')
+        termios.tcsetattr(reader.fileno(), termios.TCSAFLUSH, original)
+        writer.write('\n')
     key = ''.join(lines).encode()
 try:
     subprocess.run(['openssl', 'pkey', '-check', '-noout'], input=key,
@@ -151,38 +153,22 @@ these instructions do not require removing it. See investigation-option-b.md.
 
 Before any mint/write, perform separately approved local-only verification through
 a temporary check-only system unit with the same User and LoadCredentialEncrypted
-settings. Its trusted checker runs `openssl pkey -check -noout -in
-<credential-mount>/app-key` with stdout/stderr suppressed and returns only a fixed
-pass/fail. Check filesystem owner/mode metadata; as unprivileged `matt`, verify the
-credential is unreadable, and check the key is absent from Factory configuration,
-unit environments and workers using purpose-built status tools, never grep/cat
-secret-bearing files. Stop the check unit and verify the credential mount is gone.
-Do not invoke broker send or model/provider calls for this filesystem check.
+settings. Its trusted checker runs the same
+`protected_read(secret=True)` path as token minting, then `load_pem_private_key`
+and an RSA/minimum2048-bit check. It makes no network requests and prints only
+`key_loadable`, `type` and `bits` (null type/bits on failure). systemd may expose
+root:root0440 credentials with a service-user ACL; root-group read is allowed,
+any write bit, other permissions or non-root group read is refused. Directory
+checks remain unchanged. The encrypted on-disk credential remains root:root0600.
 
-An exact check-only invocation, after provisioning the account and the isolated
-broker environment, is:
+After installing the reviewed check unit, run it only with operator approval:
 
 ```sh
-sudo systemd-run --wait --collect --unit=factory-publisher-key-check \
-  --property=User=factory-publisher --property=Group=factory-publisher \
-  --property=UMask=0077 --property=LimitCORE=0 --property=RuntimeMaxSec=30 \
-  --property=LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-key.cred \
-  /opt/factory-publisher/venv/bin/python -I -c '
-import os
-from pathlib import Path
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-try:
-    path = Path(os.environ["CREDENTIALS_DIRECTORY"]) / "app-key"
-    key = serialization.load_pem_private_key(path.read_bytes(), password=None)
-    assert isinstance(key, rsa.RSAPrivateKey) and key.key_size >= 2048
-except Exception:
-    print("credential check failed")
-    raise SystemExit(1)
-print("credential check passed")
-'
-sudo -u matt test ! -r /run/credentials/factory-publisher-key-check.service/app-key
-sudo test ! -e /run/credentials/factory-publisher-key-check.service/app-key
+sudo systemctl start --wait factory-publisher-check.service
+# ExecStart: /opt/factory-publisher/venv/bin/python -I -m factory.publisher_key_check
+
+sudo -u matt test ! -r /run/credentials/factory-publisher-check.service/app-key
+sudo test ! -e /run/credentials/factory-publisher-check.service/app-key
 ```
 
 The first command verifies actual readability/type inside the credential unit,

@@ -28,7 +28,7 @@ class ProtectedReadTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.path = self.root / 'policy.json'
         self.path.write_bytes(b'synthetic')
-        self.path.chmod(0o600)
+        self.path.chmod(0o400)
 
     def test_regular_private_file(self):
         self.assertEqual(credentials.protected_read(self.path, secret=True), b'synthetic')
@@ -69,18 +69,61 @@ class ProtectedReadTests(unittest.TestCase):
                 with self.assertRaises(PublisherRefused):
                     credentials.protected_read(self.path)
 
-    def test_secret_rejects_every_group_other_bit(self):
-        for bit in (0o040, 0o020, 0o010, 0o004, 0o002, 0o001):
-            self.path.chmod(0o600 | bit)
-            with self.subTest(bit=bit), self.assertRaises(PublisherRefused):
-                credentials.protected_read(self.path, secret=True)
+    def systemd_layout(self, mode=0o440, gid=0):
+        original = os.fstat
+        directory_inode = self.root.stat().st_ino
+        file_inode = self.path.stat().st_ino
+        def layout(fd):
+            meta = original(fd)
+            if meta.st_ino == directory_inode:
+                return SimpleNamespace(st_uid=0, st_gid=0, st_mode=stat.S_IFDIR | 0o550)
+            if meta.st_ino == file_inode:
+                return SimpleNamespace(st_uid=0, st_gid=gid, st_mode=stat.S_IFREG | mode)
+            return meta
+        return mock.patch.object(os, 'fstat', side_effect=layout)
+
+    def test_systemd_root_group_credential_layout(self):
+        for mode in (0o440, 0o400):
+            with self.subTest(mode=oct(mode)), self.systemd_layout(mode):
+                self.assertEqual(credentials.protected_read(self.path, secret=True), b'synthetic')
+
+    def test_secret_refuses_unsafe_modes_and_group(self):
+        for mode, gid in ((0o640, 992), (0o440, 992), (0o444, 0), (0o460, 0),
+                          (0o600, 0), (0o420, 0), (0o401, 0), (0o410, 0)):
+            with self.subTest(mode=oct(mode), gid=gid), self.systemd_layout(mode, gid):
+                with self.assertRaises(PublisherRefused):
+                    credentials.protected_read(self.path, secret=True)
+
+    def test_real_checker_reads_and_parses_systemd_layout(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from factory import publisher_key_check
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.path.chmod(0o600)
+        self.path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        self.path.rename(self.root / 'app-key')
+        self.path = self.root / 'app-key'
+        with self.systemd_layout(), mock.patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.root)):
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(publisher_key_check.main(), 0)
+        self.assertEqual(json.loads(output.getvalue()), {'key_loadable': True, 'type': 'rsa', 'bits': 2048})
+
+    def test_real_checker_rejects_bad_pem_without_error_text(self):
+        from factory import publisher_key_check
+        self.path.rename(self.root / 'app-key')
+        self.path = self.root / 'app-key'
+        with self.systemd_layout(), mock.patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.root)):
+            with redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(publisher_key_check.main(), 1)
+        self.assertEqual(json.loads(output.getvalue()), {'key_loadable': False, 'type': None, 'bits': None})
+        self.assertNotIn('synthetic', output.getvalue())
 
     def test_writable_policy_and_oversize(self):
         self.path.chmod(0o620)
         with self.assertRaises(PublisherRefused):
             credentials.protected_read(self.path)
-        self.path.chmod(0o600)
+        self.path.chmod(0o400)
         with self.assertRaises(PublisherRefused):
             credentials.protected_read(self.path, maximum=3)
 
