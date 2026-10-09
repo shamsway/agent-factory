@@ -371,3 +371,13 @@ already exist. Do not archive/delete prior runs just to replay. Follow acceptanc
 B's abort rehearsal and verify switches false, unit inactive and temporary
 override absent before B2; use the same script for separately approved B3 replay
 before recovery/diagnostics cleanup.
+
+
+### Root operator metadata readers
+
+Install `scripts/a2-fields.py` with the pinned acceptance scripts. Its root-side
+reads of the publisher-owned result, token audit and status explicitly trust
+`{0, publisher_uid}` from the protected broker policy. Default credential reads
+still trust only root/self; no-follow, bounded reads and unwritable ancestors
+remain required. Cleanup resets only failed units: an already inactive or
+unloaded successful oneshot needs no reset. Inactivity remains the final gate.
