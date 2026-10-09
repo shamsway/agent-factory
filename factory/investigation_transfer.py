@@ -58,7 +58,8 @@ def read_bundle(path):
 
 def validate(bundle, *, now=None):
     """Recheck closed projection/result, identity, lineage, window and digests."""
-    now = time.time() if now is None else now
+    # Use the same microsecond precision as serialized evidence timestamps.
+    now = evidence.timestamp(evidence.utc(time.time() if now is None else now))
     evidence.require(isinstance(bundle, dict) and set(bundle) == FIELDS
                      and type(bundle['version']) is int and bundle['version'] == 1, 'transfer_invalid')
     evidence.require(len(evidence.encoded(bundle)) <= MAX_BUNDLE, 'transfer_budget')
@@ -161,7 +162,8 @@ def validate(bundle, *, now=None):
 
 
 def export_bundle(cfg, incident, run, *, now=None):
-    now = time.time() if now is None else now
+    # Use the same microsecond precision as serialized evidence timestamps.
+    now = evidence.timestamp(evidence.utc(time.time() if now is None else now))
     projection = evidence.read_evidence(cfg.factory, incident, run, now=now)
     evidence.require(projection.repository == cfg.repo and projection.deliverable and projection.issue is not None,
                      'publication_destination_unavailable')

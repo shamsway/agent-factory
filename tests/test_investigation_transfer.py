@@ -45,6 +45,17 @@ class TransferTests(unittest.TestCase):
         self.scope = mock.patch.object(transfer.scope, 'prepare_from_policy').start()
         self.addCleanup(mock.patch.stopall)
 
+    def test_export_normalizes_submicrosecond_now_before_validation(self):
+        import math
+        now = math.nextafter(float(NOW), math.inf)
+        while evidence.timestamp(evidence.utc(now)) <= now:
+            now = math.nextafter(now, math.inf)
+        bundle = transfer.export_bundle(self.fixture.cfg, self.fixture.fixture.root_id,
+                                        self.fixture.fixture.run.run_id, now=now)
+        self.assertEqual(evidence.timestamp(bundle['exported_at']),
+                         evidence.timestamp(evidence.utc(now)))
+        transfer.validate(bundle, now=now)
+
     def save(self):
         self.bundle['sha256'] = evidence.digest(evidence.encoded({k: v for k, v in self.bundle.items() if k != 'sha256'}))
         self.path.write_bytes(evidence.encoded(self.bundle))
