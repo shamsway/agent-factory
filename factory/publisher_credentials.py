@@ -14,8 +14,15 @@ from . import investigation_evidence as evidence
 from .investigation_publisher import PublisherRefused, http_call
 
 
-def protected_read(path, *, maximum=32768, secret=False):
-    """No symlinks; every ancestor must be owned by root/self and not writable by others."""
+def protected_read(path, *, maximum=32768, secret=False, owners=None):
+    """No symlinks or writable ancestors; optional explicit trusted owner UIDs.
+
+    Root-side operator readers must name the publisher UID from the protected
+    policy. The default remains root/self, including for App credentials.
+    """
+    owners = {0, os.geteuid()} if owners is None else frozenset(owners)
+    if not owners or any(type(uid) is not int or uid < 0 for uid in owners):
+        raise PublisherRefused('publisher_policy_invalid')
     path = Path(path)
     if not path.is_absolute() or '..' in path.parts:
         raise PublisherRefused('publisher_policy_invalid')
@@ -26,14 +33,14 @@ def protected_read(path, *, maximum=32768, secret=False):
             os.close(fd)
             fd = nxt
             meta = os.fstat(fd)
-            if meta.st_uid not in {0, os.geteuid()} or meta.st_mode & 0o022:
+            if meta.st_uid not in owners or meta.st_mode & 0o022:
                 raise PublisherRefused('publisher_policy_invalid')
         with evidence.file_at(fd, (path.name,)) as handle:
             meta = os.fstat(handle.fileno())
             # systemd credentials may be root:root 0440 with a service-user ACL.
             # Root-group readability is safe; secret files must never be writable.
             forbidden = 0o337 if secret else 0o022
-            if (meta.st_uid not in {0, os.geteuid()} or meta.st_mode & forbidden
+            if (meta.st_uid not in owners or meta.st_mode & forbidden
                     or (secret and meta.st_mode & 0o040 and meta.st_gid != 0)):
                 raise PublisherRefused('publisher_policy_invalid')
             raw = handle.read(maximum + 1)

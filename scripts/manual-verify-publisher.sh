@@ -31,7 +31,9 @@ cleanup() {
   primary=$?
   trap - EXIT INT TERM HUP
   systemctl stop "$unit" >/dev/null 2>&1 || { echo 'a2_stop_failed' >&2; primary=1; }
+  if systemctl is-failed --quiet "$unit"; then
   systemctl reset-failed "$unit" >/dev/null 2>&1 || { echo 'a2_reset_failed' >&2; primary=1; }
+  fi
   if [[ $owned_override == true ]]; then rm -f -- "$override"; fi
   systemctl daemon-reload >/dev/null 2>&1 || { echo 'a2_reload_failed' >&2; primary=1; }
   for item in "$unit" "$check"; do

@@ -82,11 +82,16 @@ cleanup() {
     [[ $primary != 0 ]] || primary=1
   fi
   systemctl stop "$unit" >/dev/null 2>&1 || { echo 'publisher_stop_failed' >&2; primary=1; }
+  if systemctl is-failed --quiet "$unit"; then
   systemctl reset-failed "$unit" >/dev/null 2>&1 || { echo 'publisher_reset_failed' >&2; primary=1; }
+  fi
   if [[ -e $override ]]; then
     rm -f -- "$override"
     systemctl daemon-reload >/dev/null 2>&1 || { echo 'unit_reload_failed' >&2; primary=1; }
   fi
+  [[ $(systemctl is-active "$unit" || true) == inactive ]] || {
+    echo 'publisher_unit_not_inactive' >&2; primary=1;
+  }
   # Deliberately retain root-only preview/result metadata for operator review.
   exit "$primary"
 }
