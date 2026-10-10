@@ -112,6 +112,21 @@ class DiagnosticTests(unittest.TestCase):
         self.assertFalse(any("/fs/" in call[0] for call in f.calls))
         self.assertFalse(b["logs_enabled"])
 
+    def test_only_explicit_oom_detail_is_retained_as_boolean_with_logs_off(self):
+        f = fixture()
+        event = f.rows["/v1/allocation/failed"]["TaskStates"]["main"]["Events"][0]
+        event["Details"] = {"oom_killed": "true", "driver_message": "unknown-workload-secret"}
+        b = self.collect(f, p=diagnostics.Policy(nomad_addr="http://nomad", logs=False))
+        allocation = next(r for r in b["observations"] if r["source"] == "nomad/allocation/failed")
+        projected = allocation["data"]["tasks"]["main"]["Events"][0]
+        self.assertIs(projected["OOMKilled"], True)
+        self.assertNotIn("Details", projected)
+        self.assertNotIn("unknown-workload-secret", json.dumps(b))
+        event["Details"]["oom_killed"] = "unknown-workload-secret"
+        b = self.collect(f, p=diagnostics.Policy(nomad_addr="http://nomad", logs=False))
+        allocation = next(r for r in b["observations"] if r["source"] == "nomad/allocation/failed")
+        self.assertNotIn("OOMKilled", allocation["data"]["tasks"]["main"]["Events"][0])
+
     def test_apply_token_is_never_used_by_diagnostics(self):
         f = fixture()
         self.collect(f)

@@ -8,5 +8,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python -m pip install '.[atlas]'
+      - run: |
+          python -m pip install --require-hashes --only-binary=:all: -r requirements/publisher-wheels.txt
+      - run: python -m pip install '.[atlas,publisher]'
+      - name: Prepare required Linux isolation boundary
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap dbus-user-session
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - run: python -m unittest discover -s tests
+        env:
+          FACTORY_REQUIRE_ISOLATION: "1"

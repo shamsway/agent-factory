@@ -19,6 +19,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+publisher = ["cryptography==46.0.7"]
 atlas = ["graphifyy==0.9.56"]
 
 [project.urls]

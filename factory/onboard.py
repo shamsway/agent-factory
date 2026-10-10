@@ -353,6 +353,28 @@ def checkout_state(cfg: config.Config) -> tuple[bool, str]:
     return (not problems), ("; ".join(problems) if problems else f"on {cfg.main}, clean")
 
 
+def _incident_routing_checks(cfg, report):
+    from . import investigation_routing
+    routing = investigation_routing.snapshot(cfg.factory)
+    report(routing["status"] == "observed" and routing["receipt_status"] == "observed",
+           "incident routing", routing["reason"] or routing["receipt_status"])
+    unresolved = sum(r["comment"] in {"uncertain", "failed"} for r in routing["handoffs"])
+    report(None if unresolved else True, "incident handoff comments", f"{unresolved} uncertain/failed; see factory inspect")
+    if (routing.get("last_transition") or {}).get("audit") == "uncertain":
+        report(None, "incident routing audit", "journal attempt uncertain; inspect local routing receipt")
+
+
+def _investigation_outbox_checks(cfg, report):
+    from . import investigation_outbox
+    state = investigation_outbox.snapshot(cfg)
+    report(state["status"] == "observed", "investigation outbox scan", state["status"])
+    if state["status"] == "observed":
+        for name in ("queued", "uncertain", "blocked", "failed"):
+            count = state["states"][name]
+            report(None if count else True, "investigation outbox " + name,
+                   f"{count}; inspect/reconcile retained receipts; never delete or blindly repost")
+
+
 def doctor(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory doctor", description="Check tools, auth, remotes, config drift, and the triage model."
@@ -368,6 +390,13 @@ def doctor(argv: list[str]) -> int:
         rows.append({"status": tag, "label": label, "detail": detail})
         if args.json and fix is not None:
             rows[-1]["fix"] = fix
+
+    host_base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    host_candidates = [host_base / name / "config.toml" for name in ("factory", "agent-factory")]
+    if all(path.exists() or path.is_symlink() for path in host_candidates):
+        report(None, "multiple host configs",
+               f"both factory/config.toml and agent-factory/config.toml exist; "
+               f"active: {config.host_config_path()}; legacy config is ignored")
 
     present = (cfg.root / CONFIG_NAME).exists()
     report(present, f"{CONFIG_NAME} present", "" if present else "run `factory init`")
@@ -513,6 +542,17 @@ def doctor(argv: list[str]) -> int:
             f"already set here, would leak into anything installed from this shell: {', '.join(leaked)}"
             if leaked else "clean",
         )
+
+    _incident_routing_checks(cfg, report)
+    _investigation_outbox_checks(cfg, report)
+    from . import publisher_status
+    publisher_status.doctor(cfg, report)
+    from .investigation_model import snapshot as investigation_snapshot
+    model_state = investigation_snapshot(cfg)
+    if model_state["status"] == "unavailable":
+        report(None, "investigation state", "unavailable; see factory inspect")
+    elif model_state["states"]["uncertain"]:
+        report(None, "investigation state", "uncertain requests retained; no automatic retry")
 
     fails = sum(r["status"] == "FAIL" for r in rows)
     if args.json:

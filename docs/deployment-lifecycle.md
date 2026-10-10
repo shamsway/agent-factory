@@ -455,3 +455,15 @@ when revisions change the plan; never paste secrets or the raw plan.
 PR-description publication and review allow up to ten seconds for GitHub to
 report the pushed head before rejecting a mismatch. Only the matching gated
 revision is accepted; polling never approves a different revision.
+
+### Incident routing receipts during rollout preverification
+
+`factory inspect.complete` requires successful incident-routing and handoff
+receipt scans. One malformed or unreadable `.factory/routing-handoffs/*.json`
+receipt can therefore block rollout preverify even if deployment history and
+services are healthy. Doctor reports unavailable routing/receipt observation;
+uncertain audit or comment delivery is a separate warning. Preserve the original
+receipt and reconcile its identity/delivery state using protected local evidence;
+do not delete incidents or handoff receipts to bypass the gate or blindly repost
+an uncertain comment. Use fixed-code inspect/doctor metadata when reporting the
+problem. No automatic repair or cleanup of these durable receipts is performed.
