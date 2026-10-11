@@ -30,5 +30,6 @@ git ls-files -z --cached --others --exclude-standard \
       git config --global user.email ci@example.invalid
       git config --global user.name ci
       mkdir /src && cd /src && tar -xf -
-      pip install -q --root-user-action=ignore '.[atlas]'
+      pip install -q --root-user-action=ignore --require-hashes --only-binary=:all: -r requirements/publisher-wheels.txt
+      pip install -q --root-user-action=ignore '.[atlas,publisher]'
       $run"

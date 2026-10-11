@@ -126,7 +126,7 @@ class InvestigationLaneTest(unittest.TestCase):
                 import subprocess
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-            with mock.patch.object(dispatch, "run", side_effect=fake_run):
+            with mock.patch.object(dispatch, "run", side_effect=fake_run), mock.patch.object(dispatch, "gh_json", return_value={"body": ""}):
                 dispatch.finish_investigation(7, wt, None)
 
             comment = next(c for c in calls if c[:3] == ["gh", "issue", "comment"])
@@ -151,7 +151,7 @@ class InvestigationLaneTest(unittest.TestCase):
             dispatch.configure(config.load(repo))
             wt = dispatch.FACTORY / "wt-7"
             wt.mkdir(parents=True)  # no .factory/handoff-7.md written
-            with mock.patch.object(dispatch, "escalate") as escalate_mock:
+            with mock.patch.object(dispatch, "escalate") as escalate_mock, mock.patch.object(dispatch, "gh_json", return_value={"body": ""}):
                 dispatch.finish_investigation(7, wt, None)
             escalate_mock.assert_called_once()
             self.assertEqual(escalate_mock.call_args[0][0], 7)

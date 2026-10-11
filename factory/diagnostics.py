@@ -334,8 +334,18 @@ def nomad(ctx: Context):
                 for name, task in list((value.get("TaskStates") or {}).items())[:8]:
                     tasks[name] = pick(task, "State Failed StartedAt FinishedAt")
                     fields = "Type Time ExitCode Signal FailsTask" + (" DisplayMessage Message RestartReason" if ctx.p.logs else "")
-                    tasks[name]["Events"] = [pick(e, fields)
-                        for e in task.get("Events", []) if seconds(e.get("Time")) is not None and ctx.start <= seconds(e["Time"]) <= ctx.end][-50:]
+                    events = []
+                    for event in task.get("Events", []):
+                        if seconds(event.get("Time")) is None or not ctx.start <= seconds(event["Time"]) <= ctx.end:
+                            continue
+                        projected = pick(event, fields)
+                        # Nomad 2.x records this explicit driver signal in Details.
+                        # Never retain the arbitrary Details map or infer from 137.
+                        oom = (event.get("Details") or {}).get("oom_killed")
+                        if oom in ("true", "false"):
+                            projected["OOMKilled"] = oom == "true"
+                        events.append(projected)
+                    tasks[name]["Events"] = events[-50:]
                 return {**pick(value, "ID JobID Namespace EvalID DeploymentID PreviousAllocation NextAllocation ClientStatus DesiredStatus"), "tasks": tasks}
             details = ctx.observe(f"nomad/allocation/{aid}", allocation, lineage=alloc_lineage)
             if not ctx.p.logs:
@@ -403,8 +413,11 @@ def verify_nomad_token(cfg, token: str) -> str:
         names = identity.get("Policies") or []
         if not names or len(names) > 8:
             return "invalid"
-        allowed = {"list-jobs", "read-job", "read-logs", "read-fs", "read-scaling", "list-scaling-policies",
-                   "read-scaling-policy", "read", "list"}
+        allowed = {"list-jobs", "read-job", "read-logs", "read-scaling", "list-scaling-policies",
+                   "read-scaling-policy"}
+        if any(t.diagnostics and t.diagnostics.get("logs") is True and t.diagnostics.get("error_logs")
+               for t in cfg.targets.values()):
+            allowed.add("read-fs")
         for name in names:
             rules = get("/v1/acl/policy/" + urllib.parse.quote(name, safe="")).get("Rules", "")
             # Conservative: reject unknown capabilities and non-read policies.
@@ -413,6 +426,10 @@ def verify_nomad_token(cfg, token: str) -> str:
             # scanning HCL. Operator can use a simple explicit read-only policy.
             if any(part in rules for part in ("#", "//", "/*", "\\")):
                 return "unavailable"
+            # Read-only variables still expose stored secrets. Never accept
+            # variable access, even when an explicit path only grants read/list.
+            if re.search(r"\bvariables\s*\{", rules):
+                return "invalid"
             if len(re.findall(r"\bpolicy\s*=", rules)) != len(re.findall(r'\bpolicy\s*=\s*"[^"]+"', rules)):
                 return "unavailable"
             if len(re.findall(r"\bcapabilities\s*=", rules)) != len(re.findall(r"\bcapabilities\s*=\s*\[[^]]*\]", rules)):

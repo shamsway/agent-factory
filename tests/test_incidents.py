@@ -101,7 +101,7 @@ class IncidentTest(unittest.TestCase):
         path = self.factory / "incidents" / (self.id + ".json")
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(self.client.issues[0]["labels"], [{"name": config.LABEL_INVESTIGATE}])
+        self.assertEqual(self.client.issues[0]["labels"], [{"name": config.LABEL_HUMAN}])
 
     def test_concurrent_delivery_cannot_create_twice(self):
         entered, release = threading.Event(), threading.Event()
@@ -226,7 +226,7 @@ class IncidentTest(unittest.TestCase):
         self.deliver()
         self.assertEqual(self.client.creates, 1)
         self.assertEqual(issue["state"], "open")
-        self.assertEqual(issue["labels"], [{"name": "custom"}, {"name": config.LABEL_INVESTIGATE}])
+        self.assertEqual(issue["labels"], [{"name": "custom"}, {"name": config.LABEL_HUMAN}])
         self.assertIn("User-owned notes.", issue["body"])
         self.assertIn("deploy-default-abcdef12-2", issue["body"])
 
