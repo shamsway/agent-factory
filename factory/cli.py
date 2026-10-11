@@ -6,6 +6,8 @@ import sys
 from importlib import import_module
 
 COMMANDS = {
+    "investigation-export": ("investigation_transfer", "main", "operator-only bounded incident/run export; no network"),
+    "investigation-broker": ("investigation_broker", "main", "dedicated-account fixed publisher broker (no shared host config)"),
     "init": ("onboard", "init", "prepare this repository: .factory.toml, labels, issue template"),
     "doctor": ("onboard", "doctor", "check tools, auth, remotes, and the triage model"),
     "install": ("onboard", "install", "install the systemd user timer (and dashboard)"),
@@ -16,6 +18,9 @@ COMMANDS = {
     "prune-private": ("retention", "main", "prune resolved private plans under the apply lock (supports --dry-run)"),
     "apply": ("apply", "main", "terraform apply for merged, apply-eligible tickets"),
     "incidents": ("incidents", "main", "inspect and reconcile durable deployment incident delivery"),
+    "investigation-accept": ("investigation_model", "accept_main", "exercise synthetic investigation evidence (provider export requires explicit flags)"),
+    "investigation-publish": ("investigation_publisher", "main", "inspect/enqueue fixed findings; explicit opt-in and dedicated identity required to send"),
+    "investigation-reset": ("investigation_model", "reset_main", "audit a bounded model retry without deleting prior attempts"),
     "diagnostics": ("diagnostics", "main", "collect bounded read-only evidence for a terminal deployment run"),
     "manage": ("manage", "main", "recommend PR/issue viability, resolve untouched escalations, publish terminal human handoffs"),
     "gate": ("gate", "main", "run the deterministic quality gate in this worktree"),

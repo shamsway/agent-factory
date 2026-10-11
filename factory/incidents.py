@@ -193,6 +193,7 @@ def body(row: dict) -> str:
              "", "Read-only investigation: gather evidence and report findings. Do not modify",
              "tracked files, merge, apply, restart workloads or acknowledge a failed run.",
              "Production repair remains subject to normal gates and human approval.", "",
+             "Investigation awaits the isolated SHA-201 investigator; hand this incident to a human.", "",
              "### Correlated failed runs (latest 20)"]
     for run in row["runs"][-20:]:
         pr = f", PR #{run['pr']}" if run["pr"] else ""
@@ -251,7 +252,7 @@ class GitHub:
     def create(self, row: dict) -> int:
         result = self.api(f"repos/{self.repo}/issues", {
             "title": f"Deployment incident: {row['target']} / ticket #{row['original_ticket']}",
-            "body": body(row), "labels": [config.LABEL_INVESTIGATE]}, "POST")
+            "body": body(row), "labels": [config.LABEL_HUMAN]}, "POST")
         number = result.get("number")
         if not isinstance(number, int) or number <= 0:
             raise ValueError("invalid GitHub issue response")
@@ -266,10 +267,11 @@ class GitHub:
         new = old[:start] + body(row) + old[end + len(END):]
         payload = {"body": new}
         if len(row["runs"]) > row["published_runs"]:
-            # A new failure needs another investigation even if the previous
-            # one has been closed or its investigation label was removed.
-            labels = [r["name"] for r in issue.get("labels", []) if r["name"] != config.LABEL_HUMAN]
-            payload.update(state="open", labels=sorted(set(labels) | {config.LABEL_INVESTIGATE}))
+            # Until the isolated SHA-201 route is accepted, new/reopened roots
+            # go directly to humans, never back into the legacy worker lane.
+            labels = [r["name"] for r in issue.get("labels", [])
+                      if r["name"] not in {config.LABEL_INVESTIGATE, config.LABEL_AGENT}]
+            payload.update(state="open", labels=sorted(set(labels) | {config.LABEL_HUMAN}))
         self.api(f"repos/{self.repo}/issues/{row['issue']}", payload, "PATCH")
 
 

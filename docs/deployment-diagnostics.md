@@ -143,3 +143,5 @@ break a healthy production workload to demonstrate collection.
 ### Diagnostic ACL verification boundary
 
 The optional diagnostic token verifier rejects every `variables` block, including read/list-only paths: stored secrets are outside diagnostic scope. It also rejects `read-fs` unless an operator has enabled logs and configured allowlisted application error-log paths on a diagnostic target. `read-logs` does not itself grant filesystem access. This conservative capability check is not proof that log/filesystem contents contain no secrets; unknown workload-secret formats remain SHA-238. Optional plan-lineage extraction failures log only their exception type and cannot stop terminal deployment recording.
+
+The verifier supports only its conservative HCL subset. JSON policy documents, although accepted by Nomad, are rejected as invalid; convert an operator-reviewed policy to supported HCL rather than bypassing verification.
