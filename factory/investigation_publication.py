@@ -1,9 +1,9 @@
-"""SHA-201 public rendering boundary, independent of investigation logic.
+"""Public rendering boundary, independent of investigation logic.
 
 No unrestricted model prose or raw source values are interpolated. A caller in
 trusted broker code supplies Projection; model input can supply only the result.
-This module performs no GitHub calls. Wiring publication and isolation is a later
-review gate; rendering is not itself evidence of a sandboxed investigation.
+This module performs no GitHub calls. The outbox and dedicated broker wire publication; rendering is not itself
+evidence of a sandboxed investigation or production activation.
 """
 from __future__ import annotations
 
@@ -160,11 +160,12 @@ class Publication:
 
 def prepare_for_incident(factory, repository: str, incident_id: str, run_id: str,
                          raw_result: bytes, *, now=None) -> Publication:
-    """Produce a fixed-destination envelope for a future trusted outbox sender.
+    """Produce a fixed-destination envelope for a trusted outbox sender.
 
     Does not post. Destination comes from the local incident, compared to the
     configured repository. No worker-supplied endpoint, credential or body field.
-    The sender must deduplicate this key, persist delivery and use its own role.
+    The outbox persists delivery and reconciles marker, body hash and author;
+    the sender uses its own role. The key identifies the local envelope.
     """
     projection = read_evidence(factory, incident_id, run_id, now=now)
     require(projection.repository == repository and projection.issue is not None and projection.deliverable,
@@ -204,7 +205,7 @@ def render_refusal(incident_id: str, refusal_code: str) -> str:
 def prepare_refusal(factory, repository: str, incident_id: str, refusal_code: str) -> Publication:
     """Route escalation using only validated incident metadata, never the bundle.
 
-    If routing itself is unavailable, refuse posting; the future outbox must
+    If routing itself is unavailable, refuse posting; the outbox must
     retain a local operator-visible failure. No worker-selected destination.
     """
     body = render_refusal(incident_id, refusal_code)

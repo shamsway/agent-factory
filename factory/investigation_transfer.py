@@ -1,7 +1,7 @@
-"""Option B: explicit operator transfer of structured, unauthenticated evidence.
+"""Operator-reviewed export/import: explicit operator transfer of structured, unauthenticated evidence.
 
 No logs/config/provider prose, sockets, signing identities or automatic sends.
-Hashes detect substitution, not coherent forgery by the matt account.
+Hashes detect substitution, not coherent forgery by the exporting Factory service account.
 """
 import argparse
 from contextlib import contextmanager

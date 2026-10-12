@@ -11,7 +11,8 @@ It runs on your machine, on a systemd timer, with the agent CLIs you already
 have. State is GitHub (labels, comments, PRs) plus a gitignored `.factory/`
 directory; the dispatcher itself is stateless and safe to re-run.
 
-Deployment failures have a durable, deduplicated investigation outbox. Inspect
+Deployment failures have a durable, deduplicated incident notification outbox.
+Investigation findings use a separate fixed-template publication outbox. Inspect
 it with `factory incidents` or `factory inspect --json`; see
 [notification recovery and operator commands](docs/deployment-incidents.md).
 
@@ -244,9 +245,15 @@ merge stage.
 | Command | What one invocation does |
 |---|---|
 | `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or a `wontfix` proposal comment. `--dry-run`, `--issue N`, `--replay a,b,c`. |
-| `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. `ready-for-investigation` tickets take a shorter path instead: one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan. |
+| `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. Ordinary `ready-for-investigation` tickets take a shorter path instead (deployment roots are fenced to humans): one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan. |
 | `factory inspect` | Read-only runtime/unit/process identity, credential-boundary comparisons, deployment state and existing lock probes as JSON. `--live` validates scoped tokens; `--candidates` queries bounded candidate metadata without Git fetch; `--worker-cwd` checks a worker's gate interpreter context. See [operational verification](docs/metadata-verification.md) for coverage and limitations. |
-| `factory verify-secrets` | Compare loaded unit credentials, fail on required missing units or failed supported live checks. `--scope install` (default), `apply`, or `all`; `--live`; `--json`. Only names/statuses are reported. |
+| `factory verify-secrets` | Compare loaded unit credentials, fail on required missing units or failed supported live checks. `--scope install` (default), `apply`, `investigation`, `publisher`, or `all`; `--live`; `--json`; `--reuse-install-model-key NAME` for explicit investigation reuse. Only names/statuses are reported. |
+| `factory incidents` | Durable failed-run index, explicit delivery/retry and repair-run attachment. |
+| `factory diagnostics` | Bounded read-only collection for explicitly enabled deployment targets. |
+| `factory investigation-export` | Export validated evidence/model bindings for operator transfer. |
+| `factory investigation-broker` | Canonical dedicated publisher: import, preview, confirmed send, token verification and status. |
+| `factory investigation-publish` | Alternative host-table publisher: counts, preview, enqueue and explicitly confirmed send. |
+| `factory investigation-accept` / `factory investigation-reset` | Synthetic provider acceptance and audited receipt reset; explicit live/spend flags required for provider calls. |
 | `factory apply` | No-op unless `[apply].enabled = true`. One stateless pass: finds merged, not-yet-applied tickets, checks out the merge commit fresh, re-runs the tf-plan-safety check against a fresh `terraform plan`, and applies using `[apply].env` credentials — never the dispatcher's. `--dry-run`. |
 | `factory manage` | First recommends directions for `needs-review` PRs, then `needs-viability` issues; then resolves untouched `ready-for-human` escalation packets within `[manager].rounds`; finally publishes one routed human handoff request per escalation whose automatic recovery is terminal (also without a manager). `--dry-run` lists eligible requests without inference or writes. |
 | `factory gate` | Runs the deterministic gate in the current worktree and writes a Markdown report. Workers run it themselves; the dispatcher re-runs it as the evidence of record. |
@@ -458,7 +465,8 @@ ticket's `human_touch` details. The dashboard retains its existing 100-issue,
    unless the issue carries `kind/ops`, which exempts it from the
    acceptance-criteria check (an incident report has no done-condition
    yet). The model then decides between the five labels; `wontfix` is only
-   ever proposed. `ready-for-investigation` tickets skip straight to a
+   ever proposed. Deployment incident roots are fenced to `ready-for-human`.
+   Ordinary `ready-for-investigation` tickets skip straight to a
    shorter path: one worker pass gathers evidence and posts a findings
    report as a comment — no gate, no PR, no review — then the ticket routes
    to `ready-for-human` for a person to decide what happens next.
@@ -1930,3 +1938,11 @@ for version correlation, unavailable evidence, budgets and operator configuratio
 ## License
 
 MIT
+
+## Deployment failure handling
+
+Follow [incidents](docs/deployment-incidents.md) → [diagnostics](docs/deployment-diagnostics.md)
+→ [investigation](docs/deployment-investigation.md) → [dedicated broker](docs/investigation-publisher-broker.md)
+→ [operator export/import](docs/investigation-option-b.md) → [setup](docs/investigation-publisher-setup.md).
+[Authenticated transfer](docs/investigation-transfer-design.md) remains future design.
+Host-specific scripts and acceptance procedures live in your private host operator notes.

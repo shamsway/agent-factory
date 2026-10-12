@@ -1,4 +1,4 @@
-"""SHA-190: durable sanitized deployment artifacts.
+"""durable sanitized deployment artifacts.
 
 Run: python -m unittest tests.test_artifacts
 """

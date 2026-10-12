@@ -8,6 +8,28 @@
 - O1 bounded observation producer (#97): stdlib-only `experiments/o1-observation/observer.py` (`start`/`status`/`stop`/`report`) with frozen `protocol.json`. Opens `.factory/events.jsonl` O_RDONLY, freezes a chunk-digested byte range (256 MiB cap, suffix + explicit coverage beyond it) before classifying the latest 12 recorded `merged`/`escalate` ticket executions by exact structured reason codes only. Runs land in exclusive, never-overwritten directories under the main root's `.factory/experiments/o1-observation/`, capped at 10 minutes, 64 MiB output and three iterations per lineage; no subprocess, network or model calls. Disposition starts `pending`.
 - Experiment-informed roadmap next actions (#100): each roadmap/initiative plan (CLI `evidence investigate`, FM `fm_investigate`, dashboard Roadmap) gains `experiments` — the latest retained run of every experiment whose `protocol.json` names that initiative as `roadmap`, with its decision link, latest result, per-run recorded disposition and accepted/rejected/deferred/pending grouping, marked `informed_by` and never a blocker — and `next`: the next action (`implement` or `decide`) with a cited explanation from accepted `NOW`/`NEXT`/`THEN`/`LATER` Plan tiers, eligibility and real `Blocked by` edges, plus separate current-priority decisions, runnable, blocked, in-flight, later-held and displaced work and unresolved evidence. Read-only.
 
+## Deployment investigation release — 2026-10-11
+
+- Add evidence projection, bounded model receipts, fixed-template publication outbox,
+  scope v2 validation, operator export/import, dedicated App-token broker and one-way status.
+- Add `incidents`, `diagnostics`, `investigation-export`, `investigation-broker`,
+  `investigation-publish`, `investigation-accept` and `investigation-reset` commands.
+- Add host-only `[investigation]` and `[publisher]` tables, optional `publisher` extra,
+  `verify-secrets --scope investigation|publisher` and explicit model-key reuse.
+- Host-specific operator scripts/tests and acceptance procedures now live in the fork;
+  portable setup refers to your private host operator notes. Script generalization is deferred.
+
+### Upgrade notes
+
+- New/reopened deployment incident roots receive `ready-for-human`; the legacy
+  investigation worker refuses them. Findings grant no repair authority.
+- `inspect.complete` now requires routing, model receipt and publication outbox scans.
+- Nomad diagnostic token verification rejects variables capabilities and restricts
+  filesystem reads to explicitly approved log paths; review existing diagnostic policies.
+- Plan-lineage extraction failures cannot prevent terminal deployment recording.
+- Provisioning, runtime rollout, diagnostics enablement and live publication each
+  need their own operator approval and evidence. No automatic production investigation.
+
 ## 0.3.5 — 2026-09-18
 
 Compared against 0.3.0 (`289cac5`). Released channel `stable` points at `v0.3.5`.

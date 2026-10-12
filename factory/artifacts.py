@@ -1,4 +1,4 @@
-"""Durable, sanitized deployment artifacts (SHA-190).
+"""Durable, sanitized deployment artifacts.
 
 Artifacts live under `<factory>/artifacts/<target>/<run_id>/` -- outside the
 deploy worktree, so adapter cleanup never removes them -- and hold only

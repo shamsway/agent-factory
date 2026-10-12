@@ -842,7 +842,7 @@ class HostConfigTest(unittest.TestCase):
             self.assertEqual(out["ok"], proc.returncode == 0)
 
     def test_doctor_flags_non_loopback_dashboard_bind(self) -> None:
-        """SHA-176: policy is loopback-only + SSH tunnel; doctor should FAIL a
+        """policy is loopback-only + SSH tunnel; doctor should FAIL a
         non-loopback [install].host with no escape hatch, and only WARN (not
         pass silently) once FACTORY_DASHBOARD_ALLOW_REMOTE is set."""
         gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
@@ -1205,7 +1205,7 @@ unused = ["agent"]
 
 class DashboardTest(unittest.TestCase):
     def test_dashboard_refuses_non_loopback_bind_without_escape_hatch(self) -> None:
-        """SHA-176: /api/act mutates GitHub with the operator's own `gh`
+        """/api/act mutates GitHub with the operator's own `gh`
         credentials and the dashboard has no auth of its own -- binding
         beyond loopback must be a hard refusal, not just a --help warning."""
         with tempfile.TemporaryDirectory() as d:
@@ -2837,7 +2837,7 @@ class DispatchTest(unittest.TestCase):
             )
 
     def test_review_rejects_verdict_when_reviewer_process_fails(self) -> None:
-        """SHA-177: a reviewer process failure (auth, crash, network -- not a
+        """a reviewer process failure (auth, crash, network -- not a
         genuine review) must never be accepted as an approval-eligible
         result; review() must fall back to REVISE and say why, not surface
         whatever the failed process happened to print."""
