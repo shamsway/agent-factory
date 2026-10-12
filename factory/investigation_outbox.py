@@ -1,4 +1,4 @@
-"""Inactive trusted publication outbox. No default transport or dispatch hook.
+"""Durable trusted publication outbox. No default transport or dispatch hook.
 
 Only freshly rendered fixed envelopes can enter. Caller supplies a separately
 reviewed publisher transport and identity; model output never supplies either.

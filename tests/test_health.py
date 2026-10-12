@@ -1,4 +1,4 @@
-"""SHA-191: post-apply target health verification.
+"""post-apply target health verification.
 
 Run: python -m unittest tests.test_health
 """

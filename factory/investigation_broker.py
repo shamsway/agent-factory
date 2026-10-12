@@ -19,7 +19,7 @@ from .investigation_publication import REFUSALS as EVIDENCE_FAILURE_CODES
 
 
 def protected_store(path):
-    """Reject snapshots containing worker-owned/writable files, links or devices."""
+    """Reject snapshot/state entries not root/euid-owned, group/other writes, links or devices."""
     deadline = time.monotonic() + 2
     remaining = 10000
     def scan(fd):

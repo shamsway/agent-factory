@@ -1,35 +1,23 @@
-# SHA-201 Option B: operator-controlled publication
+# Operator-reviewed export/import: operator-controlled publication
 
-Decision: 2026-10-07. This is the release boundary. The authenticated producer,
-factory-evidence account, signed attestations, socket and authenticated executor
-are deferred to SHA-245. See [future design](investigation-transfer-design.md).
+This release uses operator-reviewed export/import. Authenticated producer identity,
+signed attestations and a socket executor remain a [future design](investigation-transfer-design.md).
 No background sending, dispatcher integration, timer or automatic fallback is
 introduced. Dedicated publisher user and encrypted App credential remain required.
 
 ## Residual risk
 
-Operator decision, 2026-10-07: `matt` is root-equivalent on Barlow. NOPASSWD
-sudo, docker membership and Nomad without ACLs are accepted escalation paths.
-The dedicated publisher user and systemd encrypted credential protect the App key
-only from non-root processes and accidental exposure. A compromised `matt` can
-become root, decrypt the key, change the switches and post without confirmation.
-Operator confirmation stops non-root compromise and mistakes; it does not stop a
-root compromise. Hashes prove consistency, not producer identity.
-
-The App grants Issues read/write and Metadata read only on
-`shamsway/octant-private`, with one-hour installation tokens. Its bot identity is
-attributable and revocable by uninstalling the App or rotating its key. This
-credential has narrower authority than the dispatch/apply credentials `matt`
-already holds. Root compromise also defeats the fixed-template enforcement; the
-App itself grants no code, PR or deployment write authority.
-
-No sudoers, group, Nomad or host-hardening changes belong to SHA-201. Real isolation
-requires future host hardening in SHA-245, including Nomad ACLs (SHA-113).
+A root-equivalent exporting account can bypass the dedicated publisher account,
+encrypted credential and confirmation switches. Record explicit acceptance in your private host operator notes. Hashes prove consistency, not producer identity. Account
+separation protects non-root processes and accidental exposure, not root compromise.
+The App is limited to Issues read/write and Metadata read on `<owner>/<repo>`;
+installation tokens expire after one hour. Its identity is attributable and revocable.
 Operator review of the exact destination and complete body remains mandatory.
+Host hardening and authenticated transfer require a separate implementation plan.
 
 ## Export and import
 
-As `matt`, using the reviewed candidate interpreter and the actual selected host
+As `<operator-user>`, using the reviewed candidate interpreter and the actual selected host
 configuration, invoke:
 
 ```sh
@@ -47,8 +35,12 @@ repository/incident/run; the existing operator-provisioned setgid directory give
 the publisher read access to the mode 0640 export. The publisher has no staging
 write permission. Staging is untrusted input, never a command queue.
 
-The publisher-side one-shot command is run by the root operator through the
-reviewed credential unit, with `--import-bundle /var/lib/factory-transfer/HASH.json`.
+The publisher-side one-shot command is run by the root operator as `<publisher-user>` without a credential, with
+`--import-bundle /var/lib/factory-transfer/<export-filename>.json`. Import and preview
+use `runuser -u <publisher-user> -- /path/to/publisher-venv/bin/python -I -m factory
+investigation-broker --policy /path/to/policy.json ...`; only `--send` and
+`--verify-token` require the encrypted-credential unit. The export filename is
+derived from repository/incident/run identity, not the bundle content hash.
 It bounds input to 256 KiB, rejects duplicate/unknown keys, links/devices, changed
 hashes/bindings/identities, unsupported rows/states, invalid time windows, unmatched
 job/version/task-event lineage and unsupported model evidence references. Proposal
@@ -62,7 +54,7 @@ Snapshots expire five minutes after export. Re-export after a delay or any sourc
 change; current-state observations retain their original one-hour bound. Historical
 version-bound rows do not acquire a one-hour expiration. The operator must check
 that the failure remains unresolved immediately before confirming publication;
-imports cannot observe changes to the matt ledger made after export.
+imports cannot observe changes to the <operator-user> ledger made after export.
 
 A publisher-only import lock protects immutable generation directories. Import
 writes a private stage, renames it, then atomically changes the incident/run pointer.
@@ -79,7 +71,7 @@ that output, then separately invokes `--send --confirm-public-write` for the sam
 incident/run with both broker policy switches enabled. A changed binding requires
 a new preview. Switches remain off outside the controlled test window. CLI flags
 are human confirmation, not a cryptographic identity mechanism. Existing root
-escalation can bypass them; this accepted risk does not fail acceptance A.
+escalation can bypass them; host risk acceptance must be recorded independently.
 
 Queued sends revalidate the imported snapshot and preview before minting and again
 before the first POST. Uncertain receipts reconcile exact marker/body/publisher
@@ -90,7 +82,7 @@ There is no unattended or scheduled sending in this release.
 ## One-way operator status
 
 Every import/preview/send writes a fixed metadata file in a publisher-owned,
-matt-readable directory: outbox state counts, last token outcome/reported expiry,
+<operator-user>-readable directory: outbox state counts, last token outcome/reported expiry,
 and last import result/time. No token survives the process and expiry is not a
 claim of a reusable credential. Failure diagnostics contain enum codes only.
 

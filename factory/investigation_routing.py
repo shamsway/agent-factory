@@ -160,7 +160,7 @@ HANDOFF_BODY = (
 def handoff(cfg, number, *, remote=None):
     """Durable, serialized fixed handoff. Unknown comment creation never repeats.
 
-    Reconcile by REST marker listing after a lost response. A missing marker
+    List REST markers on every call, matching any author, including after a lost response. A missing marker
     after uncertainty is not proof that GitHub did not accept the comment.
     Label edits are idempotent and retryable even if comment delivery is uncertain.
     """

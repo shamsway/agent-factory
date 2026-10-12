@@ -2,7 +2,7 @@
 
 Collectors share a deadline and byte budget. Only allowlisted state fields enter
 the bundle; job specs, plans, variables and host configuration are never copied.
-Unknown token shapes remain a sanitizer limitation (SHA-238).
+Unknown token shapes remain a sanitizer limitation.
 """
 from __future__ import annotations
 
@@ -339,7 +339,7 @@ def nomad(ctx: Context):
                         if seconds(event.get("Time")) is None or not ctx.start <= seconds(event["Time"]) <= ctx.end:
                             continue
                         projected = pick(event, fields)
-                        # Nomad 2.x records this explicit driver signal in Details.
+                        # the supported Nomad API records this explicit driver signal in Details.
                         # Never retain the arbitrary Details map or infer from 137.
                         oom = (event.get("Details") or {}).get("oom_killed")
                         if oom in ("true", "false"):

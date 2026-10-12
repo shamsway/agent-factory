@@ -52,7 +52,8 @@ def write(policy):
               'outbox': outbox.snapshot(SimpleNamespace(factory=state, repo=repo)), 'token': token, 'last_import': imported}
     schema(result, repo)
     path = Path(policy['status_file'])
-    # Parent is operator-provisioned, publisher-owned, read-only to matt.
+    # Parent is operator-provisioned and publisher-owned; reader access is host policy.
+    # Ownership checks do not protect against root-equivalent readers.
     from .publisher_credentials import protected_read
     evidence.require(protected_read(path.parent / 'broker-store.json') == evidence.encoded(
         {'version': 1, 'repository': repo}), 'publisher_status_invalid')
