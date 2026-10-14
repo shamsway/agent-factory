@@ -39,9 +39,9 @@ identity can create and update repository issues and that the investigation
 label exists before live activation. Verify credentials through Factory's
 supported inspection commands rather than printing host config or tokens.
 
-New issues receive `ready-for-investigation`: the existing worker gathers
-evidence and posts findings, then hands control to a human. This is not the
-implementation lane, and incident creation does not allow production writes.
+New incident roots receive `ready-for-human`. The legacy investigation worker
+refuses deployment roots; a human must review private evidence. Incident creation
+does not allow production writes.
 Human approval, pinned revision gates, failed-run acknowledgement and interrupted
 run reconciliation continue to apply to any later repair.
 
@@ -89,7 +89,7 @@ the read-only status until reconciled. Fix permissions/malformed local records
 before retrying an `unavailable` store. Preserve the outbox in runtime backup,
 upgrade and rollback; never restore an older outbox over active delivery state.
 
-To associate a later failed repair with the same root (or from SHA-202 code,
+To associate a later failed repair with the same root (or from repair code,
 use `enqueue(..., root_id=...)`):
 
 ```sh
@@ -100,8 +100,8 @@ factory incidents --deliver
 The run must exist uniquely in the journal and belong to the same target/repo.
 Replay preserves this attachment. The generated incident section is refreshed
 idempotently while preserving text outside its markers. A newly attached
-failure reopens the same issue and restores `ready-for-investigation`, removing
-the prior `ready-for-human` routing label while preserving unrelated labels.
+failure reopens the same issue and restores `ready-for-human`, removing
+`ready-for-investigation` and `ready-for-agent` while preserving unrelated labels.
 It does not reset a remediation budget or authorize another deployment.
 
 The first real apply/delivery pass also queues current unacknowledged historical
@@ -119,5 +119,5 @@ exhaustion and safe recovery. Those fixtures are separate from live GitHub
 delivery and production failure/repair proof. Live acceptance should use an
 isolated controlled failed target and reviewed permissions/notification scope;
 do not fail a healthy production job to test notifications. This module does
-not claim diagnostic collection (SHA-200), investigation proposals (SHA-201),
-bounded remediation (SHA-202), or unknown-secret sanitizer hardening (SHA-238).
+not claim diagnostic collection , investigation proposals ,
+bounded remediation , or unknown-secret sanitizer hardening .

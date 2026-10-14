@@ -2,7 +2,7 @@
 actually baked into this repo's installed systemd units.
 
 `factory install` copies [install].env into every unit's Environment= lines *at install time*;
-editing the host config alone does not touch a unit that is already running (see SHA-182: a
+editing the host config alone does not touch a unit that is already running (see a
 `factory install` rerun silently propagated an unscoped GH_TOKEN into the dispatcher unit for
 the first time, breaking automated merge with no loud error). Comparing values by hand
 (`cat`/grep on the host config, or `systemctl --user cat`) is fragile through nested shell

@@ -1,23 +1,23 @@
 # Trusted publisher transfer — design for operator review
 
-Status: future design deferred to **SHA-245**, 2026-10-07. It does not block
-SHA-201 Option B. The current release uses [operator export/import](investigation-option-b.md)
-and requires operator confirmation of every public write. No authenticated producer,
-socket, host provisioning or diagnostic enablement is included. App-key delivery is manual
-systemd encrypted credentials, not a 1Password service account/vault.
+Authenticated producer/executor identity and signed transfer remain future design.
+The current release implements [operator export/import](investigation-option-b.md),
+separate snapshot/state stores and one-way status with manual confirmation.
+App-key delivery uses systemd encrypted credentials. Your private host operator notes
+record the host's accepted provenance and escalation risks.
 
 ## Trust decision that must precede implementation
 
-Today Factory, the evidence reader and workers run as `matt`. A Unix socket's
-SO_PEERCRED identifying `matt`, a process name/executable path, a receipt in
+Today Factory, the evidence reader and workers run as `<operator-user>`. A Unix socket's
+SO_PEERCRED identifying `<operator-user>`, a process name/executable path, a receipt in
 `.factory`, or a hash supplied beside a bundle cannot distinguish the trusted
 reader from a worker. Copying those files as root and changing ownership does
 not authenticate their producer. The current journal/manifests are useful
-correlation evidence, not cryptographic attestations against another `matt`
+correlation evidence, not cryptographic attestations against another `<operator-user>`
 process. This design does not claim otherwise.
 
 Proposed unattended boundary: a separate trusted evidence producer, with a root-
-owned executable and policy, runs outside `matt` (a dedicated `factory-evidence`
+owned executable and policy, runs outside `<operator-user>` (a dedicated `factory-evidence`
 OS account). It owns the authoritative incident/run identity records and its
 attestation key. The publisher pins its public verification key. Lifecycle events
 must reach that producer from an authenticated deployment executor identity or an
@@ -38,7 +38,7 @@ path, publication prose or expand policy. The attestation covers repository,
 incident/run, failed revision, destination, monotonic generation, content hashes,
 policy versions, projection hash and result hash. Publisher verifies the pinned
 producer signature and repeats its own fixed rendering/reference/scope checks.
-No shared signing secret is supplied to `matt`.
+No shared signing secret is supplied to `<operator-user>`.
 
 Use a bounded producer-to-publisher socket restricted to the dedicated producer
 UID (SO_PEERCRED), plus the signed manifest. Requests carry one generation and
@@ -75,9 +75,8 @@ per incident/run; no partly updated ledger/manifest/projection combination.
 
 Publication outbox, locks, post intents, uncertain receipts and token audit stay
 in a separate publisher-owned durable state directory. They are not transferred,
-replaced, deleted or rolled back with snapshots. Current combined-store broker
-layout must be split before integration; this document does not claim that split
-is implemented. Persist generation/hash bindings with the outbox.
+replaced, deleted or rolled back with snapshots. The current broker already separates snapshot and durable state stores;
+authenticated transfer must preserve that split. Persist generation/hash bindings with the outbox.
 
 Replayed identical generation is idempotent. Lower generation is refused. Changed
 binding for an already queued first POST blocks and requires review. A later
@@ -93,11 +92,12 @@ refusals, with a bounded local operator-visible receipt.
 The publisher emits a fixed status document containing schema/generation/time,
 outbox state counts, token outcome/expiry (no token), transfer refusal enum and
 freshness. A root-owned one-way export copies only that closed schema atomically
-into a read-only status directory visible to `matt`; mode ownership and freshness
+into a read-only status directory visible to `<operator-user>`; mode ownership and freshness
 are checked by inspect/doctor. Publisher implementation accepts no requests on
 this status path, and it cannot carry paths, prose, credentials or commands.
 Missing/stale/unavailable status is reported honestly; it is not permission to
-send. The status exporter and consumer are still design-only.
+send. The current broker writes and inspect/doctor consume one-way status. Authenticated
+producer generation/signature reporting remains future design.
 
 ## Acceptance required
 

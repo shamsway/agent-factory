@@ -1,10 +1,13 @@
 # Deployment investigation: evidence reader and publication review
 
-SHA-201 begins with two trusted security components. They are library code for
-review, not an activated worker route. Diagnostics remain off on live targets.
-The legacy `ready-for-investigation` worker is refused for deployment roots by
-the routing fence described below; no raw bundle may be handed to it. No model process, broker endpoint, investigator-findings
-sender, target enablement or production repair is installed by this change.
+The release implements a bounded evidence reader, fixed renderer, model transport
+and receipts, source scope validation, durable outbox and dedicated publisher broker.
+[Operator export/import](investigation-option-b.md) and [broker setup](investigation-publisher-setup.md)
+provide manual publication. No production path automatically calls `investigate()`;
+only synthetic acceptance and an explicitly invoked operator helper call it.
+The legacy worker refuses deployment roots and hands them to humans. Source
+installation does not provision accounts, enable diagnostics, activate a model
+route or authorize repair. Host acceptance evidence belongs in your private host operator notes.
 
 ## Trusted evidence reader
 
@@ -69,15 +72,15 @@ only Details["oom_killed"] equal to the literal "true" or "false" and emits a
 boolean; it never retains the arbitrary Details map. Templates describe observed symptoms and review steps,
 including uncertainty, validation, risks and rollback. They never assert that an
 exit code establishes a cause, nor generate concrete edits or file scope. The
-later investigation logic must validate repository scope before a fix proposal.
+scope validator checks repository mappings before a scoped proposal.
 
-`prepare_for_incident(...)` prepares an immutable envelope for a future trusted
+`prepare_for_incident(...)` prepares an immutable envelope for the trusted
 outbox sender. The destination is the locally recorded root issue, checked
 against the configured repository, not the original failed ticket or a
 worker-selected endpoint. An incident still pending delivery or marked uncertain
 is not a publication destination, even when its issue number is populated. It carries a stable projection-based idempotency key.
-It does not post. The future sender must persist/deduplicate delivery, validate
-root routing and use its own role; the worker receives no GitHub credential.
+It does not post. The outbox persists delivery and reconciles marker, body hash and author;
+the dedicated broker supplies its own role; the worker receives no GitHub credential.
 Result limit is 8 KiB; rendered public output is at most 16 KiB. Neither a worker
 payload nor a serialized worker-provided projection is publication authority.
 
@@ -89,7 +92,7 @@ Example worker result for insufficient evidence:
 
 ## Model execution decision: trusted API call, no agent CLI
 
-For SHA-201's first cut, the trusted broker calls an operator-configured model
+The the trusted broker calls an operator-configured model
 API with the authenticated projection and fixed instructions. The model has no
 tools, credentials for Factory/GitHub/Nomad/Consul, host files, forwarded socket,
 repository checkout or generated-code execution. The API client owns only the
@@ -113,8 +116,8 @@ blind retries. No free-text response, tool call, endpoint override or invented
 reference can trigger code, diagnostics, publication, merge or apply. Reject
 invalid responses and use the fixed human-escalation path. Public delivery has
 its own durable receipt and identity; returning model JSON is not authority.
-The transport and private budget/result receipts are implemented below; trusted
-public outbox/delivery and route activation remain unimplemented.
+Transport, private budget/result receipts and trusted outbox/delivery are implemented.
+Automatic production invocation and authenticated producer isolation remain separate work.
 
 The first cut does **not** invoke `investigation_isolation.run`. That primitive
 is retained for a separately reviewed future deterministic/code-tool use. It
@@ -124,13 +127,12 @@ primitive, but they are not proof that a complete investigator is accepted.
 
 ## Review gates before investigation logic and enablement
 
-Review these two modules and adversarial fixtures first. Remaining SHA-201 work:
-incident routing, OS/process isolation from same-user private files and direct
-Nomad/Consul/network/GitHub access, durable request/time/output budgets, private
-result/proposal persistence, trusted delivery, concrete repository-scoped
-proposals and controlled acceptance. A prompt rule, file mode or stripped token
-is not isolation. Nomad ACLs are currently disabled; anonymous network access
-must be fenced independently. ACL rollout remains deferred to SHA-113 planning.
+Review the evidence, rendering, routing, request budgets, receipts, outbox and scope
+contracts before enablement. Their source integration is implemented. Host credential
+and OS/network isolation, provider acceptance and controlled end-to-end proof are
+separate operator gates. A prompt rule, file mode or stripped token is not isolation.
+Anonymous infrastructure access must be fenced where host ACLs do not enforce it.
+Consult your private host operator notes for host risk decisions and acceptance evidence.
 
 First-cut supported classes are placement constraints, resource exhaustion and
 explicit OOM, when structured evidence is sufficient. Configuration, dependency,
@@ -141,8 +143,7 @@ Only after the isolated route is installed and accepted may an operator review
 structured-only target diagnostics (`logs=false`). Logs-enabled collection and
 log-assisted publication require a separate explicit secret-review gate outside
 this first cut; paraphrasing does not make unknown workload secrets safe.
-Phase order stays 1 → 2 → 4 → 3 → 5. PR #3's accepted follow-up can ship with the
-first SHA-201 runtime release. No merge/apply authority comes from findings.
+No merge/apply authority comes from findings.
 
 API shape checked against Nomad 2.0.4: [allocation metrics](https://github.com/hashicorp/nomad/blob/v2.0.4/api/allocations.go) expose NodesAvailable as a datacenter map, and [task event OOM signal](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/structs.go) is set in Details["oom_killed"]. Datacenter names are omitted and counts summed; arbitrary event Details stay excluded.
 
@@ -153,7 +154,7 @@ without reading a projection, journal or bundle. Only validated incident IDs and
 allowlisted fixed reader codes are accepted; exception messages and model prose
 are never rendered. `prepare_refusal(...)` resolves only trusted local incident
 metadata and requires a delivered, unambiguous root issue in the configured repo.
-If the incident routing itself is missing/unsafe, posting is refused; the future
+If the incident routing itself is missing/unsafe, posting is refused; the
 outbox must preserve an operator-visible local failure. No posting transport is
 installed by these functions.
 
@@ -166,7 +167,7 @@ checks fresh routing and refuses before reading its handoff. Confirmed deploymen
 incidents instead receive a fixed human handoff.
 Unsafe/unavailable routing fails closed. Unrelated software tickets
 remain schedulable. This is a routing fence, not process/file/network isolation:
-an isolated replacement investigator and its trusted delivery remain outstanding.
+automatic production invocation and authenticated producer isolation remain outstanding.
 Keep diagnostics disabled until that replacement is installed and accepted.
 
 Nomad 2.0.4 [deployment states](https://github.com/hashicorp/nomad/blob/v2.0.4/nomad/structs/deployment.go)
@@ -191,7 +192,7 @@ refusal event. Missing/unsafe identity lookup remains a local safe refusal,
 without publishing arbitrary findings to an unconfirmed incident destination.
 Implementation and tests make no live incident comment/label writes or diagnostic enablement.
 
-New and reopened SHA-199 deployment incidents are also labelled ready-for-human
+New and reopened deployment incidents are also labelled ready-for-human
 until the isolated investigator is accepted. Repeated failure delivery therefore
 does not put a handed-off root back into the legacy lane. The incident body
 explicitly states this temporary handoff policy.
@@ -258,7 +259,7 @@ network boundaries, timeout/output limits, finite forks and a memory allocation
 above memory.max, then a clean follow-up run. Ordinary macOS/container suite
 runs can skip these three Linux-only tests and are not sandbox evidence.
 `scripts/test-linux.sh` does not prepare systemd/cgroup delegation; the required
-host CI and scoped Barlow fixtures provide this acceptance layer instead.
+host CI and scoped the target host fixtures provide this acceptance layer instead.
 
 This shares the host kernel and is not a VM. A reviewed syscall policy and
 accepted future code-tool integration remain gates before activating this
@@ -293,6 +294,8 @@ Example within the protected host configuration, never a consumer repo:
 [repo."owner/name".investigation]
 enabled = false
 allow_export = false
+allow_loopback_http = false
+allow_shared_model_key = false
 url = "https://approved-provider.example/v1/chat/completions"
 model = "operator-pinned-model-id"
 # key = <dedicated credential stored only in protected host configuration>
@@ -374,11 +377,10 @@ proposals, unsupported escalation, hostile/unknown-secret output, invalid refs,
 stale evidence, tools/usage/size refusal and versioned-model acceptance, disabled export, credential reuse,
 reservation-before-call, interrupted writes, crash/timeout replay and local HTTP
 redirect/proxy/body/time limits. No external provider or production incident was
-used. Remaining SHA-201 gates: genuine provider acceptance, explicit activation,
-durable public outbox/delivery, validated concrete repository scope/proposals and
-controlled end-to-end acceptance. Diagnostics/logs remain off; PRs #3/#4 stay
-draft. Sandbox code is frozen; its exit-125 classification ambiguity is a known
-low-priority limitation for any future separate activation review.
+used by these fixtures. Source includes durable delivery, scoped proposals and manual
+broker integration. Provider/host acceptance, explicit activation and controlled
+end-to-end proof must be recorded separately in your private host operator notes. Sandbox
+exit-125 classification remains a limitation for future code-tool activation.
 
 ### Audited recovery and synthetic provider acceptance
 
@@ -437,12 +439,16 @@ original receipts and ceilings; it never silently creates a replacement fixture.
 ### Acceptance host and service boundary
 
 Run acceptance on whichever host holds the dedicated protected investigation
-settings, using a throwaway virtual environment installed from the reviewed PR
-commit. If that host is Barlow, leave its existing service runtime, symlinks and
+settings, using a throwaway virtual environment installed from the reviewed source
+commit. Leave existing service runtime, symlinks and
 units untouched. Do not run factory install or restart services for acceptance.
 Use the throwaway environment's absolute interpreter (`python -P -m factory`)
 from the consumer checkout, so its normal host-only configuration loader selects
 the intended repo. The same-user key-access caveat applies on that host.
+
+Before activation, run doctor from the consumer checkout. Require the configured
+main branch and no tracked edits, and resolve any checkout warning before
+resuming scheduling.
 
 Resume promptly, preferably within the hour. Resume re-reads evidence with the
 current clock; any age-dependent current-state rows may disappear and change the
@@ -452,18 +458,11 @@ historical version-bound rows only; it does not freeze time or bypass the reader
 age/identity checks. A retryable response consumes one reservation and waits for
 an explicit later invocation; choose a sensible delay before --resume.
 
-For initial synthetic acceptance, Anthropic's OpenAI-compatible endpoint and
-`claude-haiku-4-5-20251001` are the operator-selected candidate. Leave
-send_store_false off. Anthropic documents max_completion_tokens, n=1, bearer
-authorization and usage fields as supported, but describes this compatibility
-layer as intended for evaluation rather than a long-term production solution.
-Revisit native transport before activation. Use a dedicated Console workspace
-and key with an operator-chosen monthly spend limit; Factory does not independently
-verify enforcement. See [compatibility documentation](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk)
-and [workspace controls](https://support.claude.com/en/articles/9796807-creating-and-managing-workspaces-in-the-claude-console).
-
-Use a workspace-scoped key. Multi-workspace personal/service-account keys need
-an anthropic-workspace-id header, which this first-cut broker does not configure.
+Select an OpenAI-compatible endpoint and an operator-pinned model. Review its
+request/response compatibility, retention policy and provider-side spend controls.
+Use a dedicated budget-limited key by default. Provider-specific headers or native
+transport may require separate implementation and acceptance; do not assume that
+OpenAI compatibility proves all accounting and output requirements.
 
 ### Operator-approved reuse of an existing model credential
 
@@ -477,14 +476,11 @@ with this setting. Existing provider budget controls and same-user credential
 access limitations apply; no new key, cap or OS boundary is implied. This option
 does not add any key to unit/worker environments or change installed services.
 
-The trusted model endpoint remains interchangeable. After commercial synthetic
-acceptance, test a separately pinned Lemonade model against the same evidence,
-usage/output/refusal gates. Primary/local and commercial backup routing needs a
-separate acceptance decision: no automatic fallback after an unknown outcome and
-no combined-budget reset when changing providers. Existing LiteLLM may supply
-such routes, but its own retries and logging must be reviewed before live evidence
-is routed through it. First reuse acceptance can call Anthropic directly to keep
-Factory's one-request/one-invocation boundary observable.
+The trusted model endpoint remains interchangeable. Test an OpenAI-compatible
+endpoint against the same evidence, usage/output/refusal gates. Primary and backup
+routing require separate acceptance: no automatic fallback after unknown outcomes,
+no combined-budget reset, and reviewed upstream retries/logging. Host route choices
+belong in your private host operator notes.
 
 For synthetic reuse without changing protected configuration or services, the
 operator may use verify-secrets --scope investigation --reuse-install-model-key
@@ -509,23 +505,23 @@ this code so a rejected response can be diagnosed without another provider call.
 Shared model credentials are explicitly authorized for synthetic testing. Before
 activation, revisit the shared worker spend cap and same-user visibility; shared
 mode is not dedicated credential isolation. Native provider structured output is
-a separate compatibility review before activation. Lemonade route design must
+a separate compatibility review before activation. Endpoint route design must
 verify its actual path, TLS/private-network policy and usage-accounting contract.
 One cumulative budget must span primary/fallback routes, with no automatic
 fallback after an uncertain outcome.
 
 
-### Inactive trusted outbox and source scope
+### Trusted outbox and source scope
 
 `investigation_outbox.enqueue` accepts only incident/run identity, reloads evidence
 and model state, and persists a fixed envelope binding (destination/key/body hash),
 never arbitrary text. `deliver` requires an explicitly supplied trusted publisher
-transport and login; there is no default GitHub client, CLI, dispatch hook or
-production enablement. First POST revalidates evidence/destination. Durable intent
+transport and login. The dedicated broker and explicit publication CLI supply
+transport; there is no dispatch hook or automatic production enablement. First POST revalidates evidence/destination. Durable intent
 precedes POST; confirmed sends deduplicate, unknown outcomes only reconcile by
 exact marker/body and publisher author, and definite rejections stay failed.
-Changed evidence/destination blocks. The sender must be reviewed separately with
-a dedicated identity, bounded HTTP/deadlines and credentials before activation.
+Changed evidence/destination blocks. The dedicated sender uses bounded HTTP/deadlines
+and its own credential; host activation requires independent acceptance.
 
 `investigation_scope.prepare` takes an operator-reviewed `ScopePolicy` binding
 hashed job/namespace to allowlisted repository paths at the failed exact revision.
@@ -534,37 +530,19 @@ missing/ambiguous bindings refuse instead of guessing ownership. Only tracked
 regular Terraform/Nomad blobs (up to eight, 1 MiB each) are accepted; symlinks,
 secret paths, traversal, missing files and mismatched revisions refuse. It returns
 blob identities, supported action, validation/risk/rollback enums. It generates
-no patch and grants no production authority. Operator scope-policy installation,
-publisher integration, concrete edit validation and end-to-end acceptance remain
-separate gates; these source libraries do not close SHA-201.
+no patch and grants no production authority. Publisher integration is implemented;
+operator mapping installation, concrete edit validation and end-to-end acceptance
+remain independent gates.
 
-### Proposed Lemonade route contract (not enabled)
+### Endpoint and fallback acceptance
 
-Keep the broker on Barlow and use an explicitly configured numeric loopback URL
-rather than relaxing plain HTTP for arbitrary private LAN hosts. Review an exact
-`/api/v1/chat/completions` path option for the installed Lemonade version; current
-upstream sources document that path, while the OpenAI API documentation also
-shows `/v1/chat/completions`. Verify the installed version before implementation.
-References: https://github.com/lemonade-sdk/lemonade/blob/main/docs/dev/getting-started.md
-and https://lemonade-server.ai/docs/api/openai/ . A remote route still needs TLS
-or a separately reviewed network exception. No path/network relaxation is made
-in this slice.
-
-Do not silently drop the usage check. A future operator-selected local accounting
-mode may reserve input UTF-8 bytes plus protocol overhead and cap output UTF-8
-bytes by the full reserved output allowance when provider usage is absent. No
-refunds; request/time/body/result limits and closed-schema validation still apply.
-Valid provider usage should remain recorded; malformed usage must get a fixed
-reason code rather than being guessed or silently accepted. Test this contract
-against Lemonade's actual nonstreaming responses and hostile/unknown-secret
-fixtures before enabling it.
-
-Primary/fallback routes must be pinned operator configuration bound into the
-receipt, with one original request/token/time ceiling and a route ID on each
-attempt. Definite failures can permit a later explicitly budgeted alternate
-route; unknown delivery/spend never automatically falls back. Disable/assess any
-server-side routing retries/offload that would multiply requests beyond this
-ledger. Native commercial structured-output transport remains a separate review.
+Use an OpenAI-compatible endpoint with the exact `/v1/chat/completions` path.
+Only HTTPS or explicitly enabled numeric loopback HTTP is accepted. Other paths
+or private-LAN HTTP require separately reviewed changes. Verify output and usage
+accounting against the chosen endpoint; never silently drop the usage check.
+Primary/fallback routes need pinned policy, one cumulative request/token/time budget
+and no automatic fallback after an uncertain outcome. Server-side retries must not
+multiply requests beyond the ledger. No fallback routing is activated here.
 
 ### Outbox reconciliation and visibility
 
@@ -584,12 +562,15 @@ remove receipts to hide a warning or blindly retry an uncertain publication.
 
 Operator decision: use a dedicated GitHub App or bot identity, separate from the
 Factory dispatcher. Host-only `[publisher]` has `enabled`, `allow_publish`, `key`,
-`login`, `kind` (`installation_token` or `bot_token`) and bounded HTTP settings.
+`login`, `kind` (`installation_token` or `bot_token`), `status_file`, `status_uid`
+and bounded HTTP settings. The dedicated [broker](investigation-publisher-broker.md)
+is canonical: it mints App tokens from an encrypted credential. This host-table
+CLI is an alternative explicit operator path with manually managed tokens.
 No install/apply/model/triage key reuse, shell `GH_TOKEN` fallback or `gh` login.
 The credential travels only on stdin to a clean trusted HTTP subprocess, never
 argv/env; no redirects/proxies/retries/raw error bodies. GitHub API host is fixed.
-Each sender instance permits at most12 requests,30 seconds by default,5 seconds
-per request,1MiB per response. Endpoint allowlist is read-only role verification,
+Each sender instance permits at most 12 requests, 30 seconds by default, 5 seconds
+per request, 1 MiB per response. Endpoint allowlist is read-only role verification,
 root-issue comment listing and fixed-template comment creation only.
 
 `factory verify-secrets --scope publisher --json` reports the logical token name
@@ -598,7 +579,8 @@ match login; App `/installation/repositories` must include the configured repo.
 `read_verified` for an App proves repository read access, not the bot login or
 Issues-write permission. Exact POST author/body confirmation and controlled live
 write acceptance remain separate gates. Installation tokens expire and require
-operator-managed minting/rotation; no App private-key/JWT automation is added.
+operator-managed minting/rotation in this alternative path. The dedicated broker
+automates in-memory App JWT signing and installation-token minting.
 
 `factory investigation-publish --incident ID --run RUN` defaults to counts only.
 `--preview` displays the fixed body and destination for operator review; no network.

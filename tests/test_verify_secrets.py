@@ -34,7 +34,7 @@ class VerifySecretsTest(unittest.TestCase):
 
     def test_sync_rows_flags_stale_and_missing_against_installed_units(self) -> None:
         """A key whose host-config value has moved on from what's baked into a unit reads STALE
-        (the SHA-182 / 2026-09-13 rotation shape); a unit `systemctl` can't find reads not installed.
+        (the / 2026-09-13 rotation shape); a unit `systemctl` can't find reads not installed.
         Triage is retired as a standalone unit -- it runs inside the unified dispatcher
         service's `-` prefixed ExecStart -- so only the dispatcher and optional dashboard
         units are checked."""

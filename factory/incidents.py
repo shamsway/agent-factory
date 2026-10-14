@@ -134,7 +134,7 @@ def write(path: Path, row: dict) -> None:
 
 
 def enqueue(factory: Path, repo: str, run: deploy.DeployRun, *, root_id: str | None = None) -> str:
-    """Idempotently attach a failed run. SHA-202 can supply its persisted root id."""
+    """Idempotently attach a failed run; a repair caller can supply its persisted root id."""
     if run.status != deploy.DeployStatus.FAILED:
         raise ValueError("only failed runs create incidents")
     if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)
@@ -190,10 +190,10 @@ def enqueue(factory: Path, repo: str, run: deploy.DeployRun, *, root_id: str | N
 def body(row: dict) -> str:
     lines = [marker(row["id"]), "## Deployment incident", "",
              f"Target: `{row['target']}`; original ticket: #{row['original_ticket']}.",
-             "", "Read-only investigation: gather evidence and report findings. Do not modify",
-             "tracked files, merge, apply, restart workloads or acknowledge a failed run.",
+             "", "Human review is required. Inspect the private evidence and assess next steps.",
+             "This incident does not authorize changes, merge, apply, workload restart or acknowledgement.",
              "Production repair remains subject to normal gates and human approval.", "",
-             "Investigation awaits the isolated SHA-201 investigator; hand this incident to a human.", "",
+             "Automated investigation is paused until an isolated investigator is installed and accepted; hand this incident to a human.", "",
              "### Correlated failed runs (latest 20)"]
     for run in row["runs"][-20:]:
         pr = f", PR #{run['pr']}" if run["pr"] else ""
@@ -267,7 +267,7 @@ class GitHub:
         new = old[:start] + body(row) + old[end + len(END):]
         payload = {"body": new}
         if len(row["runs"]) > row["published_runs"]:
-            # Until the isolated SHA-201 route is accepted, new/reopened roots
+            # Until the isolated route is accepted, new/reopened roots
             # go directly to humans, never back into the legacy worker lane.
             labels = [r["name"] for r in issue.get("labels", [])
                       if r["name"] not in {config.LABEL_INVESTIGATE, config.LABEL_AGENT}]

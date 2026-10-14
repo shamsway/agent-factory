@@ -1,4 +1,4 @@
-"""SHA-200 read-only, bounded, correlated diagnostic contracts."""
+"""read-only, bounded, correlated diagnostic contracts."""
 import json
 import contextlib
 import io

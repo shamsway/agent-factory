@@ -1,4 +1,4 @@
-"""SHA-201 broker/renderer security fixtures, no agents or live API calls."""
+"""broker/renderer security fixtures, no agents or live API calls."""
 from __future__ import annotations
 
 import copy
@@ -86,7 +86,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(rows[1]["cpu_exhausted"], 2)
         self.assertNotIn(SECRET, publication.render(projection, self.result(projection)))
 
-    def test_reader_does_not_write_or_call_network(self):
+    def test_reader_does_not_write_or_call_diagnostics_http(self):
         before = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in self.factory.rglob("*") if p.is_file()}
         with mock.patch.object(diagnostics.HTTP, "get", side_effect=AssertionError("no network")):
             self.read()

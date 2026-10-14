@@ -15,7 +15,9 @@ from .investigation_publisher import PublisherRefused, http_call
 
 
 def protected_read(path, *, maximum=32768, secret=False, owners=None):
-    """No symlinks or writable ancestors; optional explicit trusted owner UIDs.
+    """No symlinks or group/other-writable ancestors; explicit trusted owner UIDs.
+
+    Owner writes are allowed; the filesystem root is opened but not checked.
 
     Root-side operator readers must name the publisher UID from the protected
     policy. The default remains root/self, including for App credentials.
@@ -38,7 +40,8 @@ def protected_read(path, *, maximum=32768, secret=False, owners=None):
         with evidence.file_at(fd, (path.name,)) as handle:
             meta = os.fstat(handle.fileno())
             # systemd credentials may be root:root 0440 with a service-user ACL.
-            # Root-group readability is safe; secret files must never be writable.
+            # Group bits may be an ACL mask; gid 0 is assumed root-equivalent.
+            # Secret files reject mask 0o337 and group-read unless gid is 0.
             forbidden = 0o337 if secret else 0o022
             if (meta.st_uid not in owners or meta.st_mode & forbidden
                     or (secret and meta.st_mode & 0o040 and meta.st_gid != 0)):
