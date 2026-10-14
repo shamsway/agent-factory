@@ -1,6 +1,6 @@
 # Bounded deployment diagnostics
 
-SHA-200 adds read-only evidence collection. It does not diagnose a cause, execute
+The collector provides read-only evidence collection. It does not diagnose a cause, execute
 a repair, acknowledge a failed run, or change approval requirements.
 
 ## Enable a target
@@ -87,7 +87,7 @@ free-form task event messages, local apply error/output and Consul check Output
 are omitted from the bundle. Structured states/events remain. Enable logs only
 for an explicitly reviewed target; workload credentials injected by Nomad or
 templates are unknown to Factory and may survive redaction. Keep raw bundle
-text local; SHA-201 must not quote it or automatically publish it to GitHub.
+text local; investigators must not quote it or automatically publish it to GitHub.
 
 Task events are restricted to the failure window. Stdout/stderr and explicitly
 allowlisted `.log` files are bounded tails. Nomad logs do not guarantee
@@ -124,7 +124,7 @@ Only allowlisted job/allocation/check fields are retained. Job specs, environmen
 maps, driver configuration, host config, raw plans, state and Nomad variables
 are excluded. Known credential values and existing recognized token patterns
 are redacted before storage. Logs are untrusted input for the future investigator.
-Unknown secret shapes remain a limitation: SHA-238 is not solved.
+Unknown secret shapes remain a limitation: unknown secret formats are not fully covered.
 
 Collection is opt-in and read-only but can add up to its budget to a failed
 apply while locks are held. Keep the timeout small. Public artifact retention
@@ -142,6 +142,6 @@ break a healthy production workload to demonstrate collection.
 
 ### Diagnostic ACL verification boundary
 
-The optional diagnostic token verifier rejects every `variables` block, including read/list-only paths: stored secrets are outside diagnostic scope. It also rejects `read-fs` unless an operator has enabled logs and configured allowlisted application error-log paths on a diagnostic target. `read-logs` does not itself grant filesystem access. This conservative capability check is not proof that log/filesystem contents contain no secrets; unknown workload-secret formats remain SHA-238. Optional plan-lineage extraction failures log only their exception type and cannot stop terminal deployment recording.
+The optional diagnostic token verifier rejects every `variables` block, including read/list-only paths: stored secrets are outside diagnostic scope. It also rejects `read-fs` unless an operator has enabled logs and configured allowlisted application error-log paths on a diagnostic target. `read-logs` does not itself grant filesystem access. This conservative capability check is not proof that log/filesystem contents contain no secrets; unknown workload-secret formats remain an open limitation. Optional plan-lineage extraction failures log only their exception type and cannot stop terminal deployment recording.
 
 The verifier supports only its conservative HCL subset. JSON policy documents, although accepted by Nomad, are rejected as invalid; convert an operator-reviewed policy to supported HCL rather than bypassing verification.

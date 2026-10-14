@@ -1,5 +1,5 @@
 """Unit and contract tests for deployment lifecycle, target configuration,
-run persistence, and legacy event replay (SHA-186).
+run persistence, and legacy event replay.
 """
 
 from __future__ import annotations
@@ -409,7 +409,7 @@ class DeployApplyIntegrationTest(unittest.TestCase):
 
 
 class DeploySelectionAndAuthorizationTest(unittest.TestCase):
-    """Regression and contract tests for SHA-187:
+    """Regression and contract tests:
     overlapping passes, direct merges, old revisions, and multiple targets.
     """
 
@@ -693,7 +693,7 @@ backend_key = "shared_homelab"
 
 
 class DeployAdapterAndRecoveryTest(unittest.TestCase):
-    """Regression and contract tests for SHA-188:
+    """Regression and contract tests:
     - DeployAdapter prepare/check/execute/verify lifecycle hooks
     - Fake second adapter proving pluggability without external platform
     - Interrupted run recovery and reconciliation requirement

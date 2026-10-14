@@ -384,8 +384,8 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
                      "request_count": 0, "max_requests": p["max_requests"], "attempts": [], "resets": [],
                      "reserved_input_tokens": 0, "reserved_output_tokens": 0, "reserved_seconds": 0,
                      "token_budget": p["token_budget"], "time_budget_sec": p["timeout"] * p["max_requests"]}
-        # One request per invocation. Retryable delivery waits for a later pass
-        # or an explicit synthetic --resume, never an immediate second call.
+        # One request per invocation. Retryable delivery waits for an explicit later invocation
+        # (no scheduler calls investigate()) or a synthetic --resume, never an immediate second call.
         if state["request_count"] < min(state["max_requests"], p["max_requests"]):
             if (state["reserved_input_tokens"] + state["reserved_output_tokens"] + reserved + p["max_output_tokens"] > min(state["token_budget"], p["token_budget"])
                     or state["reserved_seconds"] + p["timeout"] > state["time_budget_sec"]):

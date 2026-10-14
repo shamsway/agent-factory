@@ -1,4 +1,4 @@
-"""Trusted, bounded SHA-201 evidence broker. No model/network/publication calls.
+"""Trusted, bounded evidence broker. No model/network/publication calls.
 
 This module is not a sandbox. Only its immutable projection may cross the future
 investigator boundary; the legacy worker must never receive the store or bundle.

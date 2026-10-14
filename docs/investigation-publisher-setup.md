@@ -1,26 +1,21 @@
-# Dedicated publisher operator setup (not executed)
+# Dedicated publisher operator setup
 
-Decision, 2026-10-07: keep the separate publisher Unix account; replace the proposed
-1Password service account/vault/materialization job with manual App-key delivery
-from the operator Private vault into a root-owned **systemd encrypted credential**.
-No unattended transfer or release is authorized by these instructions. Execute
-only after separately approving host provisioning and checking Barlow's installed
-systemd supports `systemd-creds` and `LoadCredentialEncrypted=` for system services.
+The canonical dedicated broker uses a separate publisher Unix account and a manually
+provisioned systemd encrypted App credential. Provisioning requires operator approval
+and support for `systemd-creds` and `LoadCredentialEncrypted=` on the target host.
+Consult your private host operator notes for host paths, key storage and accepted risks.
 
 ## Existing Factory configuration
 
-Barlow currently selects `/home/matt/.config/agent-factory/config.toml`. Confirm
-`config_path` via the reviewed interpreter's `factory inspect --json` before any
-edit. `/home/matt/.config/factory/config.toml` takes precedence if present; doctor
-warns when both files exist. Never create the preferred file just to add settings.
-Never print/read the shared host config by hand. The dedicated broker uses its
-own protected policy and **does not read either shared host file**.
+Confirm `config_path` using `factory inspect --json` before editing the existing
+host configuration. The preferred `~/.config/factory/config.toml` takes precedence
+over the legacy `~/.config/agent-factory/config.toml`; doctor warns if both exist.
+Never read/print shared host config by hand or create a second file to add settings.
+The dedicated broker uses its own protected policy and reads neither shared file.
 
-The App is `shamsway-factory-findings`, installed only on octant-private with
-Issues write/Metadata read. The manual token was used for the approved #101
-comment and expires; no manual token is copied into the new broker. Both shared
-host publication switches stay false. App key never enters `[install].env`,
-`[apply].env`, a Factory unit, worker environment or `matt`-readable path.
+Install an App named `<app-slug>` on `<owner>/<repo>` with Issues write/Metadata
+read only. Both shared publication switches stay false. Keep the App key out of
+install/apply environments, Factory units and worker-readable paths.
 
 ## 1. Prepare broker-only dependencies during release
 
@@ -39,7 +34,7 @@ publisher-venv/bin/python -m pip install --no-index --find-links publisher-wheel
 
 Archive wheel filenames/SHA-256, Python/architecture, pinned requirements file and
 Factory source/wheel digest with release artifacts. Verify the downloaded hashes
-again on Barlow. Install the reviewed Factory wheel with `--no-deps` into this
+again on the target host. Install the reviewed Factory wheel with `--no-deps` into this
 broker environment after separately supplying its ordinary pinned/hash-verified
 runtime dependencies (tomlkit, as in the release process). Run focused broker/RSA
 and missing-cryptography tests there, followed by metadata-only dependency checks.
@@ -48,10 +43,8 @@ they do not install cryptography into existing worker or service runtimes.
 
 ## 2. Encrypt and install the key, without a plaintext file
 
-Operator verification (2026-10-08): a 1Password SSH Key item can display the key in OpenSSH format in the UI while `op read` returns PEM (PKCS#8). For this App key and future rotations, retrieve the existing field with `op read` into the protected in-memory encryption path; never print its output, pass it in argv, or create a plaintext key file. Accept `BEGIN PRIVATE KEY` / `BEGIN RSA PRIVATE KEY`; do not infer from the UI header that it is the wrong stored key. Validate with `openssl pkey -check -noout` before encryption.
-
-Use a trusted **root operator terminal on Barlow**, never a `matt` worker shell or
-agent tool session. Obtain the PEM from the operator Private vault manually.
+Use a trusted root operator terminal, never a worker shell or agent tool session.
+Retrieve the PEM from the protected operator store specified in your private host operator notes.
 Do not export it into an environment variable, shell argument, clipboard log,
 shell history or terminal output. No local/remote plaintext key file is needed.
 Run this reviewed procedure by hand. It reads a hidden paste from `/dev/tty`, sends
@@ -129,7 +122,7 @@ when the unit stops; never copy it elsewhere.
 
 ## 3. Unit boundary and verification (separate approval required)
 
-The root-owned **system** unit (not `matt`'s user manager) must contain:
+The root-owned **system** unit (not `<operator-user>`'s user manager) must contain:
 
 ```ini
 [Service]
@@ -141,25 +134,25 @@ LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-k
 
 Only this unit references the credential. Root owns its executable, environment
 and policy; unprivileged workers cannot change them or start arbitrary commands
-as this user. On Barlow workers running as matt can escalate to root and bypass
-these controls, including decrypting the App key.
+as this user. Root-equivalent workers can bypass these controls; assess that risk
+explicitly using your private host operator notes.
 Keep both publisher-policy switches false. Set `key_file` to the credential mount
-for the reviewed unit; use the manager-provided `$CREDENTIALS_DIRECTORY` in a
-trusted launcher when wiring it, not a worker-supplied path. Systemd unit path
-and broker policy must agree. Do not grant `matt` membership in publisher groups,
+for the reviewed unit: `/run/credentials/<unit>/app-key`. The broker reads the
+policy `key_file` directly; it does not expand `$CREDENTIALS_DIRECTORY`. Systemd unit path
+and broker policy must agree. Do not grant `<operator-user>` membership in publisher groups,
 read ACLs, sudo/systemd rules for arbitrary publisher execution, or access to the
-publisher's process memory. Existing matt root escalation is accepted for SHA-201;
-these instructions do not require removing it. See investigation-option-b.md.
+publisher's process memory. Root-equivalence acceptance is a host decision; see
+your private host operator notes and [residual risk](investigation-option-b.md).
 
 Before any mint/write, perform separately approved local-only verification through
 a temporary check-only system unit with the same User and LoadCredentialEncrypted
 settings. Its trusted checker runs the same
 `protected_read(secret=True)` path as token minting, then `load_pem_private_key`
-and an RSA/minimum2048-bit check. It makes no network requests and prints only
+and an RSA/minimum 2048-bit check. It makes no network requests and prints only
 `key_loadable`, `type` and `bits` (null type/bits on failure). systemd may expose
-root:root0440 credentials with a service-user ACL; root-group read is allowed,
+root:root 0440 credentials with a service-user ACL; root-group read is allowed,
 any write bit, other permissions or non-root group read is refused. Directory
-checks remain unchanged. The encrypted on-disk credential remains root:root0600.
+checks remain unchanged. The encrypted on-disk credential remains root:root 0600.
 
 After installing the reviewed check unit, run it only with operator approval:
 
@@ -167,7 +160,7 @@ After installing the reviewed check unit, run it only with operator approval:
 sudo systemctl start --wait factory-publisher-check.service
 # ExecStart: /opt/factory-publisher/venv/bin/python -I -m factory.publisher_key_check
 
-sudo -u matt test ! -r /run/credentials/factory-publisher-check.service/app-key
+sudo -u <operator-user> test ! -r /run/credentials/factory-publisher-check.service/app-key
 sudo test ! -e /run/credentials/factory-publisher-check.service/app-key
 ```
 
@@ -180,14 +173,14 @@ fails or the mount remains, stop the check unit, investigate and keep publishing
 off. Never copy/decrypt the key out to troubleshoot. Key-check commands perform
 no GitHub/provider request and leave no plaintext file for shredding.
 
-This is a procedure for future provisioning, not a shipped or enabled service.
+The source implements this boundary; installing it does not enable a service.
 Trusted transfer design review is still required; a key mount alone does not
 activate the broker or prove producer authenticity.
 
 ## 4. Manual rotation
 
 After separately approving rotation, generate a replacement App key and keep it
-in the operator Private vault. Re-run the no-plaintext procedure above; `.new` is
+in the protected operator store. Re-run the no-plaintext procedure above; `.new` is
 encrypted and atomically replaces the installed encrypted file. Never overwrite a
 live plaintext mount. Re-run the local-only check unit, stop it, and verify cleanup.
 The next authorized broker invocation loads the new encrypted credential. Revoke
@@ -201,19 +194,11 @@ References: [systemd encrypted credentials](https://github.com/systemd/systemd/b
 
 ## 5. Option B account, storage and mapping installation
 
-This is an **operator-run provisioning plan**, not authorization to execute it.
-Use the immutable reviewed candidate paths/hashes recorded in REVIEW.md. Root
-creates a non-login `factory-publisher` system account with no sudo rights. The
-operator is trusted root. On Barlow matt is also root-equivalent through NOPASSWD
-sudo, docker membership and Nomad without ACLs. Verify key/credential/policy/state
-access is denied without escalation, and record those known escalation paths as
-accepted risk (SHA-113, SHA-245); they must not fail step A. The encrypted credential
-and dedicated user do not prevent matt from obtaining the key as root. No sudoers,
-group, Nomad or host-hardening change is authorized in SHA-201. Future real isolation
-requires removing NOPASSWD and docker membership and enabling Nomad ACLs (SHA-113).
-The App's authority is limited to Issues read/write on shamsway/octant-private;
-one-hour tokens and attributable/revocable identity reduce impact, not root access.
-Confirmation protects non-root mistakes/compromise, not root compromise.
+Provisioning is operator-run and requires explicit approval. Use immutable candidate
+paths and hashes recorded in your private host operator notes. Create a non-login publisher
+account without sudo rights. Root compromise defeats account and credential boundaries;
+record the host's accepted escalation risks before provisioning. Confirmation protects
+non-root mistakes and compromise. The App grants no code or deployment write authority.
 
 Example root-only directory provisioning, after checking names/UID conflicts:
 
@@ -223,14 +208,14 @@ groupadd --system factory-transfer
 usermod --append --groups factory-transfer factory-publisher
 install -d -o factory-publisher -g factory-publisher -m 0700 /var/lib/factory-publisher
 install -d -o factory-publisher -g factory-publisher -m 0700 /var/lib/factory-publisher/snapshots /var/lib/factory-publisher/state
-install -d -o matt -g factory-transfer -m 2750 /var/lib/factory-transfer
+install -d -o <operator-user> -g factory-transfer -m 2750 /var/lib/factory-transfer
 install -d -o factory-publisher -g factory-publisher -m 0755 /var/lib/factory-publisher-status
 install -d -o root -g factory-publisher -m 0750 /etc/factory-publisher
 install -d -o root -g factory-publisher -m 0750 /opt/factory-publisher
 ```
 
-The transfer group grants publisher read/traverse on matt's staging directory;
-without privilege escalation it grants matt **no** access to publisher state, key or executable. Export produces
+The transfer group grants publisher read/traverse on <operator-user>'s staging directory;
+without privilege escalation it grants <operator-user> **no** access to publisher state, key or executable. Export produces
 0640 files in this setgid directory. Check group inheritance/readability using a
 synthetic export before using real incident data. Root installs the broker v2
 policy example from investigation-publisher-broker.md, replacing the nonsecret
@@ -239,20 +224,19 @@ both switches false. Create the exact no-newline sentinel in snapshots, state an
 status directories, mode 0600 in the private stores, 0644 in the status directory:
 
 ```sh
-printf '%s' '{"repository":"shamsway/octant-private","version":1}' > /var/lib/factory-publisher/snapshots/broker-store.json
-printf '%s' '{"repository":"shamsway/octant-private","version":1}' > /var/lib/factory-publisher/state/broker-store.json
-printf '%s' '{"repository":"shamsway/octant-private","version":1}' > /var/lib/factory-publisher-status/broker-store.json
+printf '%s' '{"repository":"<owner>/<repo>","version":1}' > /var/lib/factory-publisher/snapshots/broker-store.json
+printf '%s' '{"repository":"<owner>/<repo>","version":1}' > /var/lib/factory-publisher/state/broker-store.json
+printf '%s' '{"repository":"<owner>/<repo>","version":1}' > /var/lib/factory-publisher-status/broker-store.json
 chown factory-publisher:factory-publisher /var/lib/factory-publisher/{snapshots,state}/broker-store.json /var/lib/factory-publisher-status/broker-store.json
 chmod 0600 /var/lib/factory-publisher/{snapshots,state}/broker-store.json
 chmod 0644 /var/lib/factory-publisher-status/broker-store.json
 ```
 
-Install the already accepted **scope v2** artifact as
-`/etc/factory-publisher/scope.json`, root:factory-publisher 0640. Record its SHA-256
-against the accepted artifact (14 namespace-default job/file mappings reviewed at
-25ae5fd). Root prepares a read-only Octant Git mirror at
-`/opt/factory-publisher/octant-private`, including the actual failed commit; no
-worker writable ancestors, alternate object stores, replace refs or symlinks.
+Install your operator-approved **scope v2** artifact at
+`/etc/factory-publisher/scope.json`, root:factory-publisher 0640. Record its digest
+against the accepted artifact. Your private host operator notes supply the reviewed mapping
+and provenance. Root prepares a read-only Git mirror at `/path/to/repository-mirror`,
+including the failed commit; no worker-writable ancestors, alternate stores or symlinks.
 Root refreshes it explicitly if a later failed commit is missing. The broker never
 fetches or uses worker Git credentials. A new job/path mapping needs operator
 approval; ordinary changes to contents do not change scope v2 approval.
@@ -262,7 +246,7 @@ under `/opt/factory-publisher/venv`; workers without privilege escalation cannot
 wheel SHA-256 values including Factory and tomlkit, install only reviewed hashes
 with `--no-index --require-hashes --only-binary=:all:` from an offline wheelhouse.
 The earlier broker dependency instructions are one part of this manifest; **do
-not** resolve/install ordinary dependencies online on Barlow. No worker runtime
+not** resolve/install ordinary dependencies online on the target host. No worker runtime
 or service venv is replaced during publisher provisioning.
 
 Root installs a **non-enabled oneshot** system service. No timer or socket. Use a
@@ -284,7 +268,7 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/factory-publisher /var/lib/factory-publisher-status
 LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-key.cred
-ExecStart=/opt/factory-publisher/venv/bin/factory investigation-broker --policy /etc/factory-publisher/policy.json --verify-token
+ExecStart=/opt/factory-publisher/venv/bin/python -I -m factory investigation-broker --policy /etc/factory-publisher/policy.json --verify-token
 ```
 
 `--verify-token` is a separately approved live GitHub operation, never a default
@@ -292,7 +276,7 @@ boot/start action. There is intentionally no `[Install]` section. Keep the unit
 stopped. Root manually changes ExecStart to one of the reviewed import/preview/
 confirmed-send invocations from the acceptance plan before starting it. Never
 read ExecStart arguments from staging/status files, accept an arbitrary command
-from matt, or install a service-start permission for workers. For preview/import,
+from <operator-user>, or install a service-start permission for workers. For preview/import,
 root can instead run the exact broker command as the publisher without loading a
 credential; those operations do not access the key. With no automatic sending,
 root edits the two policy switches only during the confirmed live test.
@@ -303,7 +287,7 @@ host config, set `publisher.status_file` to
 new numeric UID. Keep existing shared publisher switches off. Verify with
 `factory inspect --json` and doctor; neither should see a valid cached token.
 Missing/stale status is honest until an operator runs an import/preview/status
-refresh. Check all owner/mode metadata and negative access tests as matt; do not
+refresh. Check all owner/mode metadata and negative access tests as <operator-user>; do not
 print key material, host config, decrypted credentials or token responses.
 
 ## 6. Rollback and removal
@@ -321,63 +305,54 @@ whether a future restoration is needed. Revoke the App key in GitHub if retiring
 it; installation tokens may remain valid until expiry. Remove status config using
 the selected configuration path and report not configured. Archive durable state
 privately for dedupe/audit before any separately approved account/data deletion.
-Do not delete the old Private-vault key or vault content as part of this guide.
+Do not delete the old stored key or vault content as part of this guide.
 Manual key rotation remains section 4. The future authenticated transfer design
-is SHA-245; it is not required for this operator-confirmed release.
+is a separate follow-up; it is not required for this operator-confirmed release.
 
-## Conditional acceptance sequence
+## Host-specific operator scripts and acceptance
 
-The B/B2 acceptance plan now supports advance **conditional** approval for an exact
-repository/incident issue and unresolved failure. Root reviews and installs
-`scripts/manual-publish-investigation.sh` in a root-owned location, pins its candidate
-exporter and broker paths, and runs it manually in one terminal session. The script
-exports as matt, imports/previews as publisher, checks the pre-agreed destination,
-displays the complete body, and requires a local unresolved-failure confirmation.
-The transfer age stays 300 seconds. It creates a temporary root-owned ExecStart
-override for the already provisioned encrypted-credential publisher service and
-disables both switches in EXIT/INT/TERM/HUP cleanup, including errors. No worker
-can install/invoke it as root; no scheduled invocation or sudo grant is added.
-After SIGKILL/power loss, manually verify the stopped unit and disabled switches.
-The script is a future operator procedure, syntax-checked only, not host-tested
-or run by this source slice. See investigation-barlow-acceptance.md for approvals,
-cleanup and exact replay rules.
+Operator scripts live in your fork; host acceptance procedures belong in your
+private host operator notes. Consult those notes for script installation, pinned runtime parity, mirror refresh,
+metadata readers, conditional publication, abort rehearsal and replay procedures.
+Do not substitute a checkout or interactive PATH for the installed service runtime.
+Exporter and broker require matching full source/wheel provenance; version strings
+alone are insufficient. Runtime installation/rollout needs separate approval.
 
-## Step A exporter/broker source parity gate
+## Local-only credential check unit
 
-Before step A can complete, identify the **installed service runtime** using the
-reviewed interpreter's `factory inspect --json` metadata and pin its immutable
-absolute runtime directory in `manual-publish-investigation.sh` as `service_runtime`.
-The script intentionally ships with a refusing placeholder; do not point it at a
-development checkout, editable install, interactive PATH or a guessed runtime.
-Its exporter invocation is `<runtime>/bin/python -P -m factory investigation-export`
-as matt from the Octant repository. The publisher broker retains its separate
-root-owned environment.
+Install a root-owned oneshot unit after reviewing paths and the publisher UID:
 
-Verify exporter and broker were built from the **same full source SHA** before
-completing A: retain each source-to-wheel build manifest (source SHA + wheel
-SHA-256), verify those wheel hashes against the installed artifacts and compare
-installed Factory module hashes with that reviewed wheel's contents. Record both
-absolute interpreters, package/module locations, wheel hashes and the matching
-source SHA in the acceptance receipt. Version strings, path names and matching
-Git checkout HEADs alone are insufficient. If either provenance chain is missing,
-the SHA differs, the installed package is editable, or the service runtime lacks
-investigation-export, step A is incomplete. Stop for separately approved runtime
-installation/rollout; provisioning approval alone does not authorize a Factory
-service change. No such host verification has run in this source slice.
+```ini
+[Unit]
+Description=Local-only publisher key check
+[Service]
+Type=oneshot
+User=<publisher-user>
+Group=<publisher-user>
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=yes
+LoadCredentialEncrypted=app-key:/etc/credstore.encrypted/factory-publisher-app-key.cred
+ExecStart=/path/to/publisher-venv/bin/python -I -m factory.publisher_key_check
+```
 
-Each script invocation now retains its metadata under
-`/run/factory-publisher-acceptance/<UTC timestamp>/`; the root-owned parent can
-already exist. Do not archive/delete prior runs just to replay. Follow acceptance
-B's abort rehearsal and verify switches false, unit inactive and temporary
-override absent before B2; use the same script for separately approved B3 replay
-before recovery/diagnostics cleanup.
+The checker uses systemd's credential directory, validates RSA type/size locally and
+prints metadata only. No network request or key decryption to a terminal is needed.
 
+## Scope v2 example
 
-### Root operator metadata readers
+```json
+{
+  "version": 2,
+  "approved": true,
+  "repository": "<owner>/<repo>",
+  "approved_at": "<reviewed-commit-sha>",
+  "bindings": [
+    {"job": "<job-sha256>", "namespace": "<namespace-sha256>", "paths": ["service/main.tf"]}
+  ]
+}
+```
 
-Install `scripts/a2-fields.py` with the pinned acceptance scripts. Its root-side
-reads of the publisher-owned result, token audit and status explicitly trust
-`{0, publisher_uid}` from the protected broker policy. Default credential reads
-still trust only root/self; no-follow, bounded reads and unwritable ancestors
-remain required. Cleanup resets only failed units: an already inactive or
-unloaded successful oneshot needs no reset. Inactivity remains the final gate.
+`approved_at` contains a reviewed commit SHA, not a timestamp. Use actual hashed
+job/namespace identities and reviewed tracked paths; example placeholders refuse.
+The mapping grants no patch or production authority.

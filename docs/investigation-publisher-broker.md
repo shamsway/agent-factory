@@ -1,11 +1,9 @@
-# Dedicated publisher broker (inactive source integration)
+# Dedicated publisher broker
 
-The operator retains a separate Barlow publisher OS account. App key delivery
-is a manual root-owned systemd encrypted credential, provisioned from the operator
-Private vault and loaded only by the dedicated publisher system unit through
-`LoadCredentialEncrypted=`. This replaces the proposed 1Password service account,
-vault and materialization job. No accounts, credentials, units or hooks are
-created by this source. See [operator setup](investigation-publisher-setup.md).
+The dedicated broker is the canonical operator publication path. A separate
+publisher OS account loads a manually provisioned App key through a systemd
+encrypted credential. No accounts or services are created by source installation.
+See [operator setup](investigation-publisher-setup.md) and your private host operator notes.
 
 ## Configuration and access
 
@@ -24,7 +22,7 @@ Policy schema (replace IDs and paths during separately approved provisioning):
   "snapshots": "/var/lib/factory-publisher/snapshots",
   "state": "/var/lib/factory-publisher/state",
   "status_file": "/var/lib/factory-publisher-status/status.json",
-  "repository_root": "/opt/factory-publisher/octant-private",
+  "repository_root": "/path/to/repository-mirror",
   "scope_file": "/etc/factory-publisher/scope.json",
   "enabled": false,
   "allow_publish": false,
@@ -32,8 +30,8 @@ Policy schema (replace IDs and paths during separately approved provisioning):
     "app_id": 1,
     "installation_id": 2,
     "repository_id": 3,
-    "repository": "shamsway/octant-private",
-    "login": "shamsway-factory-findings[bot]",
+    "repository": "<owner>/<repo>",
+    "login": "<app-slug>[bot]",
     "key_file": "/run/credentials/factory-publisher.service/app-key"
   }
 }
@@ -41,15 +39,17 @@ Policy schema (replace IDs and paths during separately approved provisioning):
 
 `snapshots` and `state` are separate publisher-owned directories, with neither
 nested in the other. Each requires canonical `broker-store.json` bytes
-`{"repository":"shamsway/octant-private","version":1}` (no newline). The status
+`{"repository":"<owner>/<repo>","version":1}` (no newline). The status
 parent requires the same sentinel. No worker ownership, symlinks/devices or group/
 other writes are allowed. Recursive store scans are capped at 10,000 entries and
 two seconds. Both policy switches plus `--send --confirm-public-write` and a
 matching saved preview are required before a first POST. Preview makes no token
 request and never calls a model. Terminal replay returns without minting.
 
-The App key file must be private (no group/other permission) and all ancestors
-protected. The optional cryptography dependency signs RS256 in process; keys,
+The App key read rejects permission mask `0o337`; group-read is allowed only
+with gid 0 (assumed root-equivalent, including ACL mask semantics). The `owners`
+allowlist defaults to root/euid. Ancestors below `/` must be allowlisted-owner
+and not group/other-writable; owner writes are allowed. The optional cryptography dependency signs RS256 in process; keys,
 JWTs and installation tokens never enter shell argv or stdout. Token minting
 checks App ID/slug, installation account/permissions/suspension, then explicitly
 requests one repository ID with Issues write and Metadata read. Returned scope,
@@ -63,7 +63,7 @@ automatically.
 Status results contain only fixed metadata. See [Option B](investigation-option-b.md)
 for one-way status, import and the accepted unauthenticated evidence risk. There is
 no unattended operation. The encrypted key is manually provisioned by the operator;
-no 1Password service account, vault, sync job or token-vending interface is added.
+no secret-store sync job or token-vending interface is added.
 
 ## Approved source scope
 
@@ -75,13 +75,11 @@ paths at the actual failed revision: tracked regular blobs, approved extensions,
 no secrets/traversal and at most 1 MiB each. New merge commits and changed contents
 do not require approval; changed mappings (rename/new job/removed file) refuse
 with a fixed code and require operator re-approval. No revision equality or blob
-pins remain. The Octant artifact approves 14 own-file mappings, namespace default,
-reviewed at 25ae5fddb8949d2478578306adb5a9100cf40f2f. Approval authorizes no patch
-or production operation.
-
-Full failed-deployment → evidence → model → scoped proposal → publisher acceptance,
-manual encrypted-credential provisioning, cross-account transfer and service deployment remain
-unproven. Diagnostics stay off; PR3/PR4 stay draft until the applicable gates pass.
+pins remain. `approved_at` is the reviewed commit SHA, not a time. Concrete
+repository mappings and their review provenance belong in your private host operator notes.
+Approval authorizes no patch or production operation. Source integration includes
+transfer, scope validation, outbox and status; host acceptance requires separate
+runtime and end-to-end evidence, recorded in your private host operator notes.
 
 ### Token audit
 
@@ -89,7 +87,7 @@ Before each App identity/installation/mint request, the broker atomically writes
 `publisher-token-status.json` with reserved request count (maximum three), outcome,
 expiry and validity booleans only. Failure/ready states are recorded without
 provider error text or credentials. `investigation-broker --policy PATH --status`
-reads that closed schema without minting. Because tokens are never persisted, a
+refreshes the one-way status file and returns metadata without minting. Because tokens are never persisted, a
 later status command honestly reports no cached valid token even if the last
 mint's reported expiry is in the future. Shared inspect/doctor read only the publisher-owned status file. A failed/unknown mint is not retried
 within an invocation; any operator retry creates a new one-shot token budget.
@@ -106,4 +104,4 @@ Broker-only release dependencies are pinned with wheel SHA-256 hashes in
 requirements/publisher-wheels.txt. See the setup guide for isolated offline install.
 CI and scripts/test-linux.sh install those dependencies in disposable test environments;
 worker/service installs remain unchanged. The authenticated transfer design is
-deferred to SHA-245; current operator transfer is described in Option B.
+deferred to a separate follow-up; current operator transfer is described in Option B.

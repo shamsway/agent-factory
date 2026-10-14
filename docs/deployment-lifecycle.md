@@ -104,7 +104,7 @@ Legacy events (`applied` with `ok=true`/`ok=false`, `apply-escalate`) are parsed
 
 ## Safety Guarantees
 
-1. **Revision-Bound Human Approval:** Merged PRs require human review approval (`reviewDecision == "APPROVED"`). If review approval was on commit $A$ but an unapproved commit $B$ was merged, the deployment is rejected and escalated.
+1. **Revision-Bound Human Approval:** Merged PRs require `reviewDecision == "APPROVED"` plus an APPROVED review from a trusted human (OWNER/MEMBER/COLLABORATOR, excluding bots) at the exact head SHA, selected from `latestReviews(first:20)`. Dispatch merge also requires APPROVED. `trusted_reviewers` has no configuration wiring; this gate remains enforced when branch protection is unavailable. If review approval was on commit $A$ but an unapproved commit $B$ was merged, the deployment is rejected and escalated.
 2. **Unauthorized Direct Merge Refusal:** Any commit directly pushed or merged to `main` touching a target directory without an approved PR is flagged. `agent-factory` records a `deploy_unauthorized` audit event and halts execution for that target.
 3. **Topological Git Ordering:** Deployments are executed strictly in topological git commit order along `main`.
 4. **Idempotency & Notification Failure Isolation:** Durable disk recording (`deploy_run` with terminal status) occurs **before** GitHub notification posting. If GitHub API is down or fails, the deployment is never duplicate-executed on subsequent passes.
@@ -358,17 +358,13 @@ The dashboard remains subject to its existing loopback/access restrictions.
 
 Private plans remain in `.factory/private/<run_id>/` for recovery. Automated
 retention keeps the latest ten terminal runs per target plus protected runs (see below).
-Sanitizer coverage for unknown provider-emitted secret formats remains SHA-238.
+Sanitizer coverage for unknown provider-emitted secret formats remains a separate follow-up.
 
 Validation: `scripts/test-linux.sh`; browser fixture:
 `node scripts/test-deployment-browser.cjs` with Playwright and its Chromium
 browser installed. Set `BROWSER_CHANNEL=chrome` to use an installed Chrome.
 The fixture exercises pending, executing, verifying, failed, interrupted,
 superseded and successful runs, filtering, and safe artifact text display.
-
-The deployed Barlow runtime includes SHA-241's doctor checkout warning. Before activation,
-run doctor from the consumer checkout and require the configured main branch
-and no tracked edits; resolve any checkout warning before resuming scheduling.
 
 ### System-job health limitations
 
