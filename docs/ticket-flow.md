@@ -75,7 +75,7 @@ flowchart TB
   REPORTER -.->|"no watcher re-queues needs-info; a human relabels: decisions.apply"| NT
 
   %% Build
-  RFA -->|"open, unassigned, no open blockers: dispatch.frontier"| CLAIM
+  RFA -->|"open, unassigned, not ready-for-human, no open blockers: dispatch.frontier"| CLAIM
   RFA -->|"its PR's red CI completed before the release: no escalation, waits for a worker: manage.frontier_pass"| CLAIM
   RFA -->|"its PR's CI red after the release, or idle stale_days counted from the release: manage.frontier_pass, manage.released_at"| ESC
   CLAIM -->|"dispatch.process_ticket"| WR
@@ -109,7 +109,7 @@ flowchart TB
   MERGE -->|"dispatch.cleanup_after_merge"| MERGED
 
   %% Recovery
-  ESC -->|"ready-for-agent swapped for ready-for-human: dispatch.escalate"| RFH
+  ESC -->|"lane label (ready-for-agent or ready-for-investigation) swapped for ready-for-human: dispatch.escalate"| RFH
   UPSTREAM -->|"new issue: dispatch.sync_escalate"| RFH
   EXTPR -->|"review attempts exhausted, new issue: dispatch.review_intake_pass"| RFH
   RFH -->|"packet and manager rounds left: manage.escalation_pass"| MGR
@@ -141,11 +141,6 @@ flowchart TB
   `wontfix-proposal` label (`manage.apply`).
 - **`needs-info` has no re-entry.** Nothing watches for the reporter's answer; a human
   puts `needs-triage` back (`decisions.apply` or GitHub).
-- **Escalated investigations keep their lane label.** `dispatch.escalate` swaps
-  `ready-for-agent` for `ready-for-human`, so an investigation ticket escalated by
-  `dispatch.finish_investigation` or `dispatch.process_ticket` keeps
-  `ready-for-investigation`, is unassigned, and is offered again by
-  `frontier(LABEL_INVESTIGATE)` on the next pass.
 - **Data-driven labels.** Rows marked `*` below edit labels chosen at runtime:
   the triage decision, manager ROUTE, the viability opt-in label, the human
   decision, and the `chore` PR label `learn.chore_pr` passes.
@@ -161,7 +156,7 @@ One row per function that edits labels (`--add-label`, `--remove-label`, or
 | `decisions._plan_request` | `*` | `*` | Human action; labels limited to `decisions.ACT_LABELS`, `factory-approved` routed to `decisions._approve` |
 | `decisions._withdraw_approval` | `factory-approved` | — | Human approve step found the PR changed |
 | `dispatch.approve_pr` | `factory-approved` | `factory-approved` | Approve; withdraw again if the PR changed while labelling |
-| `dispatch.escalate` | `ready-for-agent` | `ready-for-human` | Every escalation |
+| `dispatch.escalate` | `ready-for-agent`, `ready-for-investigation` | `ready-for-human` | Every escalation; either lane label is dropped so the frontier cannot offer the ticket again |
 | `dispatch.finish_investigation` | `ready-for-investigation` | `ready-for-human` | Investigation findings posted; routed to a human |
 | `dispatch.merge_pass_locked` | `factory-approved` | — | CI fail, or cancel after steps ran; missing approval evidence |
 | `dispatch.push_and_pr` | — | `*` | Caller's PR label; ticket PRs pass none |

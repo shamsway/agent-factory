@@ -317,6 +317,9 @@ def frontier(label: str = LABEL_AGENT) -> list[dict]:
         if issue["assignees"]:
             log(f"#{n}: skipped (assigned)")
             continue
+        if any(label.get("name") == LABEL_HUMAN for label in issue.get("labels", [])):
+            log(f"#{n}: skipped (escalated to a human)")
+            continue
         blockers = open_blockers(n, issue.get("body", ""))
         if blockers:
             log(f"#{n}: skipped (blocked by {', '.join(f'#{b}' for b in blockers)})")
@@ -908,6 +911,8 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "") -> Non
             "@me",
             "--remove-label",
             LABEL_AGENT,
+            "--remove-label",
+            LABEL_INVESTIGATE,
             "--add-label",
             LABEL_HUMAN,
         ],
