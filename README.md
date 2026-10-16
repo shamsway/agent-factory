@@ -525,7 +525,9 @@ label timelines. Correction reads stop at 50 reviews, 50 threads of 50 comments,
    onto moved main; upstream sync bypasses this worker-only guard. Otherwise
    make protected changes outside the worker flow. Then `conflict-markers`,
    your `[[gate.check]]` list in order, and a `leak-scan`
-   run. Checks marked `exclusive` serialise on a host-wide lock. Every check
+   run. A check is arbitrary argv (a live-system health probe or a `terraform plan`
+   safety check works the same as a test command) with an optional per-check
+   `timeout` override. Checks marked `exclusive` serialise on a host-wide lock. Every check
    has a timeout. Checks with `when = "pr"` are skipped here and reported
    `SKIP (pr tier)`; this attempt gate is what the worker and the dispatcher run
    after each attempt, and what the merge-stage refresh re-runs.

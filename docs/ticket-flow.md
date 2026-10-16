@@ -141,6 +141,11 @@ flowchart TB
   `wontfix-proposal` label (`manage.apply`).
 - **`needs-info` has no re-entry.** Nothing watches for the reporter's answer; a human
   puts `needs-triage` back (`decisions.apply` or GitHub).
+- **Escalated investigations keep their lane label.** `dispatch.escalate` swaps
+  `ready-for-agent` for `ready-for-human`, so an investigation ticket escalated by
+  `dispatch.finish_investigation` or `dispatch.process_ticket` keeps
+  `ready-for-investigation`, is unassigned, and is offered again by
+  `frontier(LABEL_INVESTIGATE)` on the next pass.
 - **Data-driven labels.** Rows marked `*` below edit labels chosen at runtime:
   the triage decision, manager ROUTE, the viability opt-in label, the human
   decision, and the `chore` PR label `learn.chore_pr` passes.
@@ -157,6 +162,7 @@ One row per function that edits labels (`--add-label`, `--remove-label`, or
 | `decisions._withdraw_approval` | `factory-approved` | — | Human approve step found the PR changed |
 | `dispatch.approve_pr` | `factory-approved` | `factory-approved` | Approve; withdraw again if the PR changed while labelling |
 | `dispatch.escalate` | `ready-for-agent` | `ready-for-human` | Every escalation |
+| `dispatch.finish_investigation` | `ready-for-investigation` | `ready-for-human` | Investigation findings posted; routed to a human |
 | `dispatch.merge_pass_locked` | `factory-approved` | — | CI fail, or cancel after steps ran; missing approval evidence |
 | `dispatch.push_and_pr` | — | `*` | Caller's PR label; ticket PRs pass none |
 | `dispatch.refresh_pr_branch` | `factory-approved` | — | Behind main: approval withdrawn before refresh |
@@ -185,6 +191,7 @@ event. `{}` is a runtime value.
 | `dispatch.process_ticket` | ``REVISE verdict after {} review round(s)`` | review → escalate |
 | `dispatch.process_ticket` | ``pr checks failed`` | review → escalate |
 | `dispatch.process_ticket` | ``approval evidence, head, or human review state changed before approval`` | review → escalate |
+| `dispatch.finish_investigation` | ``investigation produced no findings report`` | investigation → escalate |
 | `dispatch.merge_pass_locked` | ``PR #{}: CI failed ({}); `{}` label removed`` | CI fail → escalate |
 | `dispatch.runner_unavailable` | ``PR #{}: CI runner unavailable ({}) in run {}; `{}` kept`` | CI no runner after rerun → escalate |
 | `dispatch.merge_pass_locked` | ``PR #{}: missing approval evidence bound to {}; `{}` label removed`` | CI pass, missing evidence → escalate |

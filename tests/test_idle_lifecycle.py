@@ -90,7 +90,8 @@ class IdlePasses(unittest.TestCase):
                 patch.dict(triage.__dict__), patch.object(config, "load", return_value=self.cfg), \
                 patch.object(dispatch, "frontier", wraps=dispatch.frontier) as frontier:
             if ready is not None:
-                frontier.side_effect = lambda: ready
+                # The investigation lane queries its own label; this pass only has agent work.
+                frontier.side_effect = lambda label=dispatch.LABEL_AGENT: ready if label == dispatch.LABEL_AGENT else []
             self.assertEqual(triage.main([]), 0)
             self.assertEqual(dispatch.main([]), 0)
 

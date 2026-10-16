@@ -219,6 +219,7 @@ class LookupAndServingTest(unittest.TestCase):
             (fx.run_dir / "apply.log").write_text(f"tampered {SECRET}")
             self.assertIsNone(artifacts.lookup(f, "default", rid, "apply.log"))
 
+    @unittest.skip("MAT-193: artifact serving moves to the workspace; upstream removed dashboard.Handler")
     def test_dashboard_serves_artifacts_but_never_private_files(self) -> None:
         from factory import dashboard
 
