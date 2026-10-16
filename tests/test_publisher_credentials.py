@@ -3,13 +3,13 @@ import copy
 import io
 import json
 import os
-from pathlib import Path
 import stat
 import tempfile
-from types import SimpleNamespace
 import unittest
-from unittest import mock
 from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from factory import investigation_evidence as evidence
 from factory import publisher_credentials as credentials
@@ -97,6 +97,7 @@ class ProtectedReadTests(unittest.TestCase):
     def test_real_checker_reads_and_parses_systemd_layout(self):
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
+
         from factory import publisher_key_check
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.path.chmod(0o600)
@@ -269,6 +270,7 @@ class AppTokenTests(unittest.TestCase):
     def test_rs256_claims_and_signature_without_key_persistence(self):
         self.jwt_patch.stop()
         import base64
+
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding, rsa
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

@@ -3,14 +3,16 @@
 Only freshly rendered fixed envelopes can enter. Caller supplies a separately
 reviewed publisher transport and identity; model output never supplies either.
 """
-from contextlib import contextmanager
 import fcntl
 import os
 import re
 import stat
 import time
+from contextlib import contextmanager
 
-from . import incidents, investigation_model as model, investigation_evidence as evidence
+from . import incidents
+from . import investigation_evidence as evidence
+from . import investigation_model as model
 
 
 @contextmanager

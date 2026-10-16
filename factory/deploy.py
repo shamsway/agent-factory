@@ -286,7 +286,7 @@ def replay_rows(rows: list[dict]) -> dict[str, TargetState]:
             tgt = str(row.get("target") or "default")
             if tgt not in states:
                 states[tgt] = TargetState(target=tgt)
-            if "run_id" in row and row["run_id"]:
+            if row.get("run_id"):
                 states[tgt].acknowledged_failures.add(str(row["run_id"]))
             elif "ticket" in row and row["ticket"] is not None:
                 # Legacy event without run_id: bind only to the latest failed run that preceded this event
@@ -895,7 +895,6 @@ class DeployAdapter:
 
     def cleanup(self, ctx: DeployContext) -> None:
         """Guaranteed cleanup of temporary resources."""
-        pass
 
     def reconcile(
         self,

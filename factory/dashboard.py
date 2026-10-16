@@ -6,7 +6,6 @@ import argparse
 import contextlib
 import errno
 import json
-import os
 import re
 import subprocess
 import sys
@@ -20,12 +19,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from factory import (
-    artifacts,
-    deployment_view,
     __version__,
+    artifacts,
     briefing,
     codebase,
     config,
+    deployment_view,
     dispatch,
     feedback,
     lifecycle,
@@ -34,7 +33,6 @@ from factory import (
     stats,
 )
 from factory.config import (
-    DASHBOARD_ALLOW_REMOTE_VAR,
     LABEL_AGENT,
     LABEL_APPROVED,
     LABEL_HUMAN,

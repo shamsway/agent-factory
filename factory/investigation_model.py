@@ -5,7 +5,6 @@ responses are untrusted: only publisher-validated closed JSON is persisted.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 import argparse
 import fcntl
 import json
@@ -18,8 +17,10 @@ import sys
 import time
 import urllib.parse
 import uuid
+from contextlib import contextmanager
 
-from . import config, incidents, investigation_evidence as evidence
+from . import config, incidents
+from . import investigation_evidence as evidence
 from . import investigation_publication as publication
 
 MAX_HTTP = 65536
@@ -591,6 +592,7 @@ def prepare(cfg, incident_id, run_id, *, now=None):
 def synthetic_fixture(cfg, root):
     """Construct new operator-owned synthetic evidence; never read live stores."""
     from dataclasses import replace
+
     from . import artifacts, deploy, diagnostics
     synthetic = replace(cfg, root=root, repo="factory/synthetic-acceptance")
     synthetic.factory.mkdir(mode=0o700)

@@ -27,8 +27,8 @@ from factory.config import (
     LABEL_INFO,
     LABEL_INVESTIGATE,
     LABEL_OPS,
-    LABEL_TRIAGE,
     LABEL_REVIEW,
+    LABEL_TRIAGE,
     LABEL_VIABILITY,
     Config,
 )

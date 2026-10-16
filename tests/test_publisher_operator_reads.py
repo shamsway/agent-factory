@@ -1,18 +1,18 @@
 """Operator ownership regressions, including real chown in the Linux harness."""
 import contextlib
-import io
-import time
-from unittest.mock import patch
 import importlib.util
+import io
 import json
 import os
-from pathlib import Path
 import tempfile
+import time
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from factory.publisher_credentials import protected_read
-from factory.investigation_publisher import PublisherRefused
 from factory.investigation_evidence import EvidenceRefused
+from factory.investigation_publisher import PublisherRefused
+from factory.publisher_credentials import protected_read
 
 
 class ExpectedOwnerTests(unittest.TestCase):

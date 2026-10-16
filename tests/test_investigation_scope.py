@@ -1,13 +1,15 @@
 """No patch generation: source scope derives from reviewed policy and git blobs."""
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
 from dataclasses import replace
+from pathlib import Path
+from unittest import mock
+
+from factory import investigation_evidence as evidence
+from factory import investigation_scope as scope
 from tests import test_investigation_boundary as fixtures
-from factory import investigation_evidence as evidence, investigation_scope as scope
 
 
 class ScopeTests(unittest.TestCase):

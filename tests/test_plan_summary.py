@@ -168,9 +168,9 @@ class GitHubHeadWaitTest(unittest.TestCase):
             mock.patch.object(dispatch, "gh_json", return_value=dict(headRefOid="old")),
             mock.patch.object(dispatch.time, "monotonic", side_effect=[0, 0, 11]),
             mock.patch.object(dispatch.time, "sleep") as sleep,
+            self.assertRaises(RuntimeError),
         ):
-            with self.assertRaises(RuntimeError):
-                dispatch.wait_for_pr_head("agent/1", "new")
+            dispatch.wait_for_pr_head("agent/1", "new")
         sleep.assert_called_once_with(0.5)
 
     def test_transient_api_failure_can_recover(self):

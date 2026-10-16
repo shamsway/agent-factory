@@ -4,10 +4,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from factory import artifacts, deploy, diagnostics, incidents, lifecycle

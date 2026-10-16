@@ -18,8 +18,9 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 MANIFEST_VERSION = 1
 MAX_LOG_BYTES = 20 * 1024 * 1024
@@ -28,7 +29,7 @@ SINKS = ("issue", "pr")
 REDACTED = "[REDACTED]"
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 TARGET_RE = RUN_ID_RE
-SECRET_NAME_RE = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL|AUTH", re.I)
+SECRET_NAME_RE = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|PRIVATE|CREDENTIAL|AUTH", re.IGNORECASE)
 MIN_SECRET_LEN = 6
 
 _PEM_BEGIN = re.compile(r"-----BEGIN[ A-Z]*PRIVATE KEY-----")

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
 from factory import artifacts, deploy, deployment_view
 
 
@@ -83,9 +84,8 @@ class HistoryAvailabilityTest(unittest.TestCase):
     def test_optional_projection_failure_is_isolated(self):
         with mock.patch.object(
             deployment_view, "project", side_effect=PermissionError("lock")
-        ):
-            with self.assertLogs("factory.deployment_view", level="WARNING"):
-                self.assertIsNone(deployment_view.safe_project(Path("."), []))
+        ), self.assertLogs("factory.deployment_view", level="WARNING"):
+            self.assertIsNone(deployment_view.safe_project(Path("."), []))
 
     def test_missing_start_timestamp_does_not_break_history(self):
         event = row("missing-start", "succeeded")

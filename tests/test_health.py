@@ -16,7 +16,6 @@ from pathlib import Path
 from unittest import mock
 
 from factory import apply, artifacts, config, deploy, dispatch, health
-
 from tests.test_factory import make_repo
 
 TOKEN = "nomad-acl-token-0123456789abcdef"

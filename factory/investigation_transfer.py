@@ -4,21 +4,23 @@ No logs/config/provider prose, sockets, signing identities or automatic sends.
 Hashes detect substitution, not coherent forgery by the exporting Factory service account.
 """
 import argparse
-from contextlib import contextmanager
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import stat
 import tempfile
 import time
-from types import SimpleNamespace
+from contextlib import contextmanager
+from pathlib import Path
 
-from . import artifacts, config, incidents, investigation_evidence as evidence
-from . import investigation_model as model, investigation_publication as publication
-from . import investigation_outbox as outbox, investigation_scope as scope
+from . import artifacts, config, incidents
+from . import investigation_evidence as evidence
+from . import investigation_model as model
+from . import investigation_outbox as outbox
+from . import investigation_publication as publication
+from . import investigation_scope as scope
 
 MAX_BUNDLE = 256 * 1024
 MAX_TRANSFER_AGE = 300
@@ -44,9 +46,8 @@ def key(repo, incident, run):
 
 def read_bundle(path):
     path = Path(path).absolute()
-    with evidence.directory(path.parent) as fd:
-        with evidence.file_at(fd, (path.name,)) as handle:
-            raw = handle.read(MAX_BUNDLE + 1)
+    with evidence.directory(path.parent) as fd, evidence.file_at(fd, (path.name,)) as handle:
+        raw = handle.read(MAX_BUNDLE + 1)
     evidence.require(len(raw) <= MAX_BUNDLE, 'transfer_budget')
     try:
         return json.loads(raw, object_pairs_hook=evidence.unique_pairs)

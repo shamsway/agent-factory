@@ -1,9 +1,8 @@
 """Linux shell cleanup regressions; no system manager or network calls."""
-import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 
 class PublisherScriptCleanupTests(unittest.TestCase):

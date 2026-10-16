@@ -18,16 +18,13 @@ dispatcher never sees (see docs/deployment-lifecycle.md).
 from __future__ import annotations
 
 import argparse
-import fcntl
-import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
 
-from factory import artifacts, config, deploy, diagnostics, dispatch, incidents, tf_plan_check
+from factory import artifacts, config, deploy, diagnostics, dispatch, incidents
 from factory.config import Config
 
 cfg: Config

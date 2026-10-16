@@ -21,7 +21,13 @@ import urllib.request
 from pathlib import Path
 
 from factory import __version__, config
-from factory.config import CONFIG_NAME, DASHBOARD_ALLOW_REMOTE_VAR, LABELS, LOOPBACK_HOSTS, ConfigError
+from factory.config import (
+    CONFIG_NAME,
+    DASHBOARD_ALLOW_REMOTE_VAR,
+    LABELS,
+    LOOPBACK_HOSTS,
+    ConfigError,
+)
 
 TEMPLATES = Path(__file__).with_name("templates")
 GITIGNORE_LINES = ("/.factory/", ".factory-prompt.md")

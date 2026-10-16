@@ -11,7 +11,6 @@ import unittest
 from pathlib import Path
 
 from factory import config
-
 from tests.test_factory import make_repo
 
 

@@ -26,17 +26,16 @@ class LegacyImportCompatTest(unittest.TestCase):
         """A proxy that copies globals (e.g. `from factory.dispatch import *`) would
         diverge the moment either side's module-level state changes. These must be
         the identical module object, not a lookalike."""
-        import factory.apply
-        import factory.config
-        import factory.deploy
-        import factory.dispatch
-        import factory.verify_secrets
-
         import agent_factory.apply
         import agent_factory.config
         import agent_factory.deploy
         import agent_factory.dispatch
         import agent_factory.verify_secrets
+        import factory.apply
+        import factory.config
+        import factory.deploy
+        import factory.dispatch
+        import factory.verify_secrets
 
         self.assertIs(agent_factory.config, factory.config)
         self.assertIs(agent_factory.dispatch, factory.dispatch)
@@ -53,10 +52,8 @@ class LegacyImportCompatTest(unittest.TestCase):
     def test_state_set_through_one_import_path_is_visible_through_the_other(self) -> None:
         """The concrete failure a copied-globals proxy would produce: configure()
         through one name, read the result through the other."""
-        import factory.dispatch
-
         import agent_factory.dispatch
-
+        import factory.dispatch
         from factory.config import Config
 
         sentinel = Config(root=ROOT, repo="acme/sentinel-widgets")

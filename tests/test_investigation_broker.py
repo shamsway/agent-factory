@@ -1,18 +1,21 @@
 """Publisher broker boundary; no real credentials, network or host config."""
-from contextlib import contextmanager, redirect_stdout
 import copy
 import io
 import json
 import os
-from pathlib import Path
 import stat
 import tempfile
-from types import SimpleNamespace
 import unittest
+from contextlib import contextmanager, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from factory import config, investigation_broker as broker, investigation_evidence as evidence
-from factory import investigation_outbox as outbox, investigation_model as model
+from factory import config
+from factory import investigation_broker as broker
+from factory import investigation_evidence as evidence
+from factory import investigation_model as model
+from factory import investigation_outbox as outbox
 from factory.investigation_publisher import PublisherRefused
 from tests.test_publisher_credentials import APP
 

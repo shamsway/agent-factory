@@ -11,7 +11,7 @@ import stat
 import time
 
 from . import config, incidents
-from .investigation_evidence import directory, read_incident, EvidenceRefused
+from .investigation_evidence import EvidenceRefused, directory, read_incident
 
 
 def inventory(factory):
@@ -69,6 +69,7 @@ def note_availability(cfg, available, record):
     as audit=uncertain and never repeated blindly. No private path/error text.
     """
     import fcntl
+
     from .investigation_evidence import read_json
     factory = cfg.factory.resolve()
     root = factory / "routing-handoffs"
@@ -165,6 +166,7 @@ def handoff(cfg, number, *, remote=None):
     Label edits are idempotent and retryable even if comment delivery is uncertain.
     """
     import fcntl
+
     from .investigation_evidence import read_json
     if type(number) is not int or number <= 0 or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", cfg.repo):
         raise ValueError("invalid routing issue")

@@ -1,7 +1,16 @@
 #!/usr/bin/python3
 """PREPARE ONLY: root imports one approved local bundle, never fetches a remote."""
-import argparse,fcntl,hashlib,json,os,pwd,re,stat,subprocess
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
 from pathlib import Path
+
 ROOT=Path('/opt/factory-publisher/octant-private')
 SCOPE=Path('/etc/factory-publisher/scope.json')
 SCOPE_SHA='4dbb4daeced6eaeeb78f275aec4ec607159ac294505871eb7f7b3a68252bcfa5'

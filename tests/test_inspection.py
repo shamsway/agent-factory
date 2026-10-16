@@ -1,14 +1,14 @@
 """Metadata verification must not leak credentials or mutate observed state."""
-from contextlib import redirect_stdout
 import fcntl
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from factory import config, deploy, inspection, lifecycle, verify_secrets

@@ -9,15 +9,25 @@ import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import stat
 import subprocess
 import sys
 import zlib
+from pathlib import Path
 
-from . import config, deploy, incidents, investigation_routing, investigation_model, investigation_outbox, publisher_status, lifecycle, verify_secrets
+from . import (
+    config,
+    deploy,
+    incidents,
+    investigation_model,
+    investigation_outbox,
+    investigation_routing,
+    lifecycle,
+    publisher_status,
+    verify_secrets,
+)
 
 LIMIT = 8 * 1024 * 1024
 PROPERTIES = "LoadState,ActiveState,SubState,UnitFileState,MainPID,ExecMainStartTimestampMonotonic,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment,ExecStart,WorkingDirectory,InvocationID"

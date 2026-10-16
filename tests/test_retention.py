@@ -124,17 +124,17 @@ class RetentionTest(unittest.TestCase):
             retention.prune(self.root, keep=0)
         with mock.patch.object(
             retention.lifecycle, "read_events", side_effect=OSError("unreadable")
-        ):
-            with self.assertRaises(OSError):
-                retention.prune(self.root, keep=1)
+        ), self.assertRaises(OSError):
+            retention.prune(self.root, keep=1)
         self.assertTrue((self.root / "private/old/plan").exists())
 
 
 class OptionalApplyRetentionTest(unittest.TestCase):
     def test_retention_failure_does_not_prevent_apply_selection(self):
+        import subprocess
+
         from factory import apply, config, dispatch
         from tests.test_factory import make_repo
-        import subprocess
 
         for error in (
             ValueError("malformed journal"),

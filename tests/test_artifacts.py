@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest import mock
 
 from factory import artifacts, config, deploy
-
 from tests.test_factory import make_repo
 
 SECRET = "s3cr3t-apply-value-123"

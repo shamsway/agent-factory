@@ -5,20 +5,20 @@ investigator boundary; the legacy worker must never receive the store or bundle.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import fcntl
 import gzip
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import stat
 import time
 import urllib.parse
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 from . import artifacts, deploy, incidents, lifecycle
 
@@ -68,7 +68,7 @@ def timestamp(value) -> float:
 
 
 def utc(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    return datetime.fromtimestamp(value, UTC).isoformat()
 
 
 def number(value) -> bool:

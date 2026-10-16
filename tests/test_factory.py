@@ -809,7 +809,7 @@ class HostConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
             stubs = stub_bin(Path(d), gh=gh, systemctl="echo inactive")
-            row = lambda: next(r for r in json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]  # noqa: E731
+            row = lambda: next(r for r in json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]
                                if r["label"] == "main checkout")
             self.assertEqual((row()["status"], row()["detail"]), ("PASS", "on main, clean"))
             (repo / "scratch.txt").write_text("untracked files are fine\n")
@@ -1330,7 +1330,6 @@ class DashboardTest(unittest.TestCase):
 
     @unittest.skip("MAT-193: loopback bind guard to be reconciled with the workspace access key")
     def test_dashboard_allows_non_loopback_with_escape_hatch(self) -> None:
-        from unittest import mock
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
@@ -1364,7 +1363,7 @@ class DashboardTest(unittest.TestCase):
         class FakeResponse:
             status = 200
 
-            def __enter__(self) -> "FakeResponse":
+            def __enter__(self) -> FakeResponse:
                 return self
 
             def __exit__(self, *exc: object) -> bool:

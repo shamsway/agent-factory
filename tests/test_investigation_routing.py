@@ -1,7 +1,7 @@
 """Deployment roots cannot reach legacy execution or free-form publication."""
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from factory import config, deploy, dispatch, incidents, investigation_routing

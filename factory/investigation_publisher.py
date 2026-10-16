@@ -8,7 +8,10 @@ import subprocess
 import sys
 import time
 
-from . import config, incidents, investigation_model as model, investigation_evidence as evidence, investigation_outbox as outbox
+from . import config, incidents
+from . import investigation_evidence as evidence
+from . import investigation_model as model
+from . import investigation_outbox as outbox
 
 KEY_NAME = "FACTORY_INVESTIGATION_PUBLISHER_TOKEN"
 

@@ -1,8 +1,8 @@
 """Operator mirror helper must work with its deliberately narrow PATH."""
 import ast
-from pathlib import Path
 import subprocess
 import unittest
+from pathlib import Path
 
 
 class MirrorHelperTests(unittest.TestCase):

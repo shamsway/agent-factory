@@ -5,10 +5,9 @@ Never loads Factory host config, shells, workers, or a shared GitHub credential.
 import base64
 import json
 import os
-from pathlib import Path
 import re
-import stat
 import time
+from pathlib import Path
 
 from . import investigation_evidence as evidence
 from .investigation_publisher import PublisherRefused, http_call

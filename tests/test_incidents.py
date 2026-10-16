@@ -4,13 +4,13 @@ from __future__ import annotations
 import copy
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from factory import config, deploy, incidents

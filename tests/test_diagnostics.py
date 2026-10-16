@@ -1,10 +1,10 @@
 """read-only, bounded, correlated diagnostic contracts."""
-import json
 import contextlib
 import io
+import json
+import subprocess
 import tempfile
 import time
-import subprocess
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -13,7 +13,6 @@ from unittest import mock
 from factory import apply, artifacts, config, deploy, diagnostics, dispatch
 from tests.test_factory import make_repo
 from tests.test_health import FakeNomad
-
 
 NOW = 1791054000
 TOKEN = "fixture-private-token-123456789"

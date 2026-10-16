@@ -1,11 +1,12 @@
 """Operator-approved job/file mappings checked against each failed revision."""
-from dataclasses import dataclass
 import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 
-from . import investigation_evidence as evidence, investigation_publication as publication
+from . import investigation_evidence as evidence
+from . import investigation_publication as publication
 
 
 @dataclass(frozen=True)

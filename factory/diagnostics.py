@@ -17,9 +17,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 from factory import artifacts
 
@@ -183,7 +182,7 @@ def seconds(value) -> float | None:
 
 
 def utc(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    return datetime.fromtimestamp(value, UTC).isoformat()
 
 
 def pick(row: dict, names: str) -> dict:
@@ -471,6 +470,7 @@ def collect(run, p: Policy, env: dict, *, collectors=None, transport=None, clock
 
 def main(argv: list[str]) -> int:
     import fcntl
+
     from factory import config, deploy
     parser = argparse.ArgumentParser(prog="factory diagnostics")
     parser.add_argument("--target", default="default")

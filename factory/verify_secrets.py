@@ -157,7 +157,7 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
                 status = "not_checked"
             rows.append({"scope": name, "key": key, "status": status})
     if scope in ("all", "investigation"):
-        from .investigation_model import credential_status, KEY_NAME, policy
+        from .investigation_model import KEY_NAME, credential_status, policy
         p = policy(cfg.investigation)
         if p["key"] or p["enabled"] or scope == "investigation":
             status = credential_status(cfg)
@@ -165,7 +165,10 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
                 status = "not_checked_shared" if status == "configured_shared" else "not_checked"  # Never spend/export evidence for an auth probe.
             rows.append({"scope": "investigation", "key": KEY_NAME, "status": status})
     if scope in ("all", "publisher"):
-        from .investigation_publisher import policy as publisher_policy, credential_status as publisher_status, verify_status, KEY_NAME as publisher_key
+        from .investigation_publisher import KEY_NAME as publisher_key
+        from .investigation_publisher import credential_status as publisher_status
+        from .investigation_publisher import policy as publisher_policy
+        from .investigation_publisher import verify_status
         p = publisher_policy(cfg.publisher)
         if p["key"] or p["enabled"] or scope == "publisher":
             status = verify_status(cfg) if live else publisher_status(cfg)

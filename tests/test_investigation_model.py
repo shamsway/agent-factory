@@ -2,15 +2,16 @@
 import copy
 import json
 import os
-from pathlib import Path
 import threading
 import time
 import unittest
-from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
-from factory import config, investigation_model as model, incidents, verify_secrets
+from factory import config, incidents, verify_secrets
 from factory import investigation_evidence as evidence
+from factory import investigation_model as model
 from tests import test_investigation_boundary as fixtures
 
 NOW, SECRET = fixtures.NOW, fixtures.SECRET
@@ -580,6 +581,7 @@ class ModelTests(unittest.TestCase):
 class ModelConfigurationTests(unittest.TestCase):
     def test_host_only_settings_and_no_key_repr(self):
         import tempfile
+
         from tests.test_factory import make_repo
         with tempfile.TemporaryDirectory() as folder:
             root = make_repo(Path(folder))

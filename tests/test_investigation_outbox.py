@@ -2,9 +2,12 @@
 import json
 import unittest
 from unittest import mock
-from tests import test_investigation_model as fixtures
-from factory import incidents, investigation_outbox as outbox, investigation_model as model
+
+from factory import incidents
 from factory import investigation_evidence as evidence
+from factory import investigation_model as model
+from factory import investigation_outbox as outbox
+from tests import test_investigation_model as fixtures
 
 
 class FakePublisher:

@@ -1,15 +1,15 @@
-import sys
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from factory.investigation_evidence import Projection
 from factory import investigation_isolation as isolation
+from factory.investigation_evidence import Projection
 
 
 def real_boundary(test):

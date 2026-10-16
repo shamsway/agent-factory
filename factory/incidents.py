@@ -7,16 +7,16 @@ after an uncertain create is not proof that GitHub did not accept it.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 from . import artifacts, config, deploy
 

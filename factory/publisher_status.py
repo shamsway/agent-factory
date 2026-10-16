@@ -1,12 +1,13 @@
 """Publisher-to-Factory metadata only. No credential or request channel."""
 import json
 import os
-from pathlib import Path
 import time
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
-from . import investigation_evidence as evidence, investigation_outbox as outbox
+from . import investigation_evidence as evidence
+from . import investigation_outbox as outbox
 
 STATES = {'queued', 'uncertain', 'blocked', 'failed', 'delivered'}
 OUTCOMES = {'not_requested', 'request_reserved', 'ready', 'refresh_failed', 'unavailable'}
@@ -104,7 +105,7 @@ def observe(cfg, *, now=None):
         age = now - evidence.timestamp(result['at'])
         evidence.require(age >= 0, 'publisher_status_invalid')
         return {'status': 'stale' if age > MAX_AGE else 'observed', **result}
-    except (FileNotFoundError,):
+    except FileNotFoundError:
         return {'status': 'missing'}
     except Exception:
         # file_at normalizes missing files; distinguish only actual absent pathname.
