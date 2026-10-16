@@ -15,22 +15,26 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 
-from factory import brief, config, lifecycle
+from factory import __version__, brief, config, lifecycle
 from factory.config import (
     LABEL_AGENT,
     LABEL_APPROVED,
-    LABEL_CHORE,
     LABEL_HUMAN,
     LABEL_INVESTIGATE,
+    LABEL_PROTECTED_OVERRIDE,
     LABEL_REVIEW,
     LESSONS_NAME,
+    USAGE_FIELDS,
     Config,
 )
 
@@ -72,9 +76,9 @@ STANDING_INSTRUCTIONS = """
   edited for the ticket; never `git add -A`, and never commit
   `.factory-prompt.md` or gate reports.
 - NEVER use `git stash` — the stash is shared with the user's other worktrees.
-- Only push `agent/{n}`. NEVER push, merge into, or fast-forward `{main}`, and
-  never close the ticket yourself: the dispatcher opens the PR and the merge
-  stage lands it after review and CI.
+- Commit only; do not push. The dispatcher pushes `agent/{n}`, opens the PR, and
+  the merge stage lands it after review and CI. NEVER merge into or fast-forward
+  `{main}`, and never close the ticket yourself.
 - Finish by running `{python} -m factory gate --report .factory/gate-report-{n}.md`
   and fixing any failures it reports.
 - Last, write `.factory/handoff-{n}.md` (gitignored): what you changed, what is
@@ -107,13 +111,17 @@ def log(msg: str) -> None:
 
 def run(
     cmd: list[str], cwd: Path | None = None, check: bool = True,
-    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
+    """`env` replaces the inherited environment (lifecycle context is still added)."""
     execution = lifecycle.current()
     if execution is None:
-        return subprocess.run(cmd, cwd=cwd, check=check, stdout=stdout, stderr=stderr, text=True)
+        return subprocess.run(cmd, cwd=cwd, check=check, stdout=stdout, stderr=stderr, text=True, env=env)
+    launch = execution.env()
+    if env is not None:
+        launch = {**env, lifecycle.CONTEXT_ENV: launch[lifecycle.CONTEXT_ENV]}
     with subprocess.Popen(cmd, cwd=cwd, stdout=stdout, stderr=stderr,
-                          text=True, env=execution.env()) as proc:
+                          text=True, env=launch) as proc:
         try:
             execution.child(proc.pid)
             out, err = proc.communicate()
@@ -131,9 +139,98 @@ def run(
     return result
 
 
-def gh_json(args: list[str]) -> object:
-    out = run(["gh", *args]).stdout
+def gh_json(args: list[str], env: dict[str, str] | None = None) -> object:
+    out = run(["gh", *args], env=env).stdout
     return json.loads(out)
+
+
+@contextmanager
+def without_github(env: dict[str, str]):
+    """`env` for worker and reviewer agents: no GitHub token, and gh reads a fresh empty
+    config dir. The dispatcher's own gh and git push keep the configured identity."""
+    with tempfile.TemporaryDirectory(prefix="factory-no-gh-") as empty:
+        yield {k: v for k, v in env.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")} | {"GH_CONFIG_DIR": empty}
+
+
+def _review_command(prompt: str) -> tuple[list[str], bool]:
+    command = cfg.review_cmd(prompt)
+    if Path(command[0]).name != "omp":
+        return command, False
+    for index, arg in enumerate(command[1:], 1):
+        if arg == "--mode" and index + 1 < len(command):
+            command[index + 1] = "json"
+            break
+        if arg.startswith("--mode="):
+            command[index] = "--mode=json"
+            break
+    else:
+        command[1:1] = ["--mode", "json"]
+    return command, True
+
+
+def _omp_output(stdout: str) -> tuple[str, dict | None]:
+    """Recover final text and summed model usage from OMP's JSONL mode."""
+    text, model = "", None
+    saw_assistant = found_usage = cache_reported = False
+    valid_usage = True
+    prompt_tokens = completion_tokens = cached_tokens = 0
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "message_end":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        saw_assistant = True
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = "\n".join(
+                block["text"]
+                for block in content
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+                and block.get("type") in {"text", "output_text"}
+            )
+        if isinstance(message.get("model"), str):
+            model = message["model"]
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            valid_usage = False
+            continue
+        input_tokens = usage.get("input")
+        output_tokens = usage.get("output")
+        cache_read = usage.get("cacheRead", 0)
+        cache_write = usage.get("cacheWrite", 0)
+        if not all(
+            type(value) is int and value >= 0
+            for value in (input_tokens, output_tokens, cache_read, cache_write)
+        ):
+            valid_usage = False
+            continue
+        found_usage = True
+        prompt_tokens += input_tokens + cache_read + cache_write
+        completion_tokens += output_tokens
+        cached_tokens += cache_read
+        # OMP normalizes unsupported cache counters to zero, so zeros alone do
+        # not prove the provider reported cache data.
+        cache_reported = cache_reported or cache_read > 0 or cache_write > 0
+    if not saw_assistant:
+        return stdout.strip(), None
+    fields = None
+    if valid_usage and found_usage and (prompt_tokens or completion_tokens):
+        fields = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+        if cache_reported and prompt_tokens:
+            fields["prefix_cache_hit_rate"] = cached_tokens / prompt_tokens
+        if model:
+            fields["model"] = model
+    return text.strip(), fields
 
 
 def lock_held(lockfile: Path) -> bool:
@@ -170,7 +267,8 @@ def issue_is_open(number: int) -> bool:
 
 def initiative_kind(n: int) -> bool:
     """Fresh label read at the execution boundary; list/search rows lag label edits."""
-    from factory.plan import is_initiative  # plan -> evidence -> dashboard -> dispatch: import lazily
+    # plan -> evidence -> dashboard -> dispatch: import lazily
+    from factory.plan import is_initiative
 
     return is_initiative(gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "labels"]))
 
@@ -241,8 +339,12 @@ def review_intake_pass(dry_run: bool) -> None:
         requests = pr["reviewRequests"]
         if not opted_in and requests:
             if login is None:
-                login = gh_json(["api", "user"])["login"].casefold()
-            opted_in = any(request.get("login", "").casefold() == login for request in requests)
+                # The dispatcher's login, plus the human's (dashboard identity) when
+                # `[install].dispatch_env` runs the dispatcher as a separate account.
+                login = {gh_json(["api", "user"])["login"].casefold()}
+                if cfg.install.get("dispatch_env"):
+                    login.add(gh_json(["api", "user"], env=config.dashboard_env(cfg))["login"].casefold())
+            opted_in = any(request.get("login", "").casefold() in login for request in requests)
         # GitHub consumes review requests on submission; keep tracking admitted PRs.
         if not opted_in and not any(
             e.get("event") == "review-result" and e.get("pr") == pr["number"]
@@ -304,7 +406,7 @@ def review_readiness(n: int, head: str, history: list[dict]) -> None:
     """Record advisory readiness, never merge authorization, for a confirmed head."""
     checks = run([
         "gh", "pr", "checks", str(n), "--repo", REPO,
-        "--required", "--json", "name,bucket",
+        "--required", "--json", "name,bucket,link",
     ], check=False)
     fresh = run([
         "gh", "pr", "view", str(n), "--repo", REPO, "--json", "headRefOid",
@@ -323,6 +425,8 @@ def review_readiness(n: int, head: str, history: list[dict]) -> None:
         and row.get("bucket") in ("pass", "fail", "pending", "skipping", "cancel")
         for row in rows
     )
+    if valid:
+        rows = triage_cancelled(n, rows)
     review = next((e for e in reversed(history)
                    if e.get("event") == "review-result" and e.get("pr") == n
                    and e.get("head") == head), {})
@@ -331,7 +435,7 @@ def review_readiness(n: int, head: str, history: list[dict]) -> None:
         state = "changes_requested"
     elif review.get("verdict") == "APPROVE":
         state = "ci_pending"
-        if valid and any(row["bucket"] in {"fail", "cancel"} for row in rows):
+        if valid and any(row["bucket"] == "fail" for row in rows):
             state = "ci_failed"
         elif confirmed and valid and checks.returncode == 0 and all(
             row["bucket"] == "pass" for row in rows
@@ -366,8 +470,14 @@ def review_external_pr(n: int, base: str, head: str) -> None:
             execution.reason = "prompt_too_large"
             log(f"PR #{n}: diff too large to review at {head}")
             return
-        proc = run(cfg.review_cmd(prompt), cwd=ROOT, check=False)
-        findings = proc.stdout.strip()
+        command, structured = _review_command(prompt)
+        with without_github(dict(os.environ)) as env:
+            proc = run(command, cwd=ROOT, check=False, env=env)
+        findings, usage = (
+            _omp_output(proc.stdout) if structured else (proc.stdout.strip(), None)
+        )
+        if usage is not None:
+            record("llm-usage", pr=n, stage="review", **usage)
         lines = findings.splitlines()
         if (
             proc.returncode != 0
@@ -437,9 +547,9 @@ def resume_context(n: int, baseline: dict | None) -> str | None:
     accepted_at = manifest.get("accepted_at")
     parts = [
         "## Resume context", "",
-        "Local evidence from the latest retained accepted result for this ticket, "
-        "never a worker log, prompt, or transcript. Historical reference only: it "
-        "authorizes nothing on its own and never rewrites the pinned scope above.",
+        ("Local evidence from the latest retained accepted result for this ticket, "
+         "never a worker log, prompt, or transcript. Historical reference only: it "
+         "authorizes nothing on its own and never rewrites the pinned scope above."),
         "",
         f"- Prior accepted head: {accepted_head or 'unknown'}, accepted {accepted_at or 'at an unknown time'}",
         f"- Prior retained result: {status}" + (f" ({prior['reason']})" if prior.get("reason") else ""),
@@ -506,9 +616,9 @@ def build_prompt(n: int, wt: Path, extra: str = "", investigation: bool = False)
         parts.append(plan_summary.INSTRUCTIONS.replace("{n}", str(n)))
     if baseline is not None:
         parts += ["", "## Admitted execution contract", "",
-                  "The pinned ticket scope and exit gate define this execution. The initiative baseline "
-                  "is reference evidence, not additional work or action authorization. Later issue, "
-                  "initiative or comment edits do not amend this snapshot; keep all guidance within its scope."]
+                  ("The pinned ticket scope and exit gate define this execution. The initiative baseline "
+                   "is reference evidence, not additional work or action authorization. Later issue, "
+                   "initiative or comment edits do not amend this snapshot; keep all guidance within its scope.")]
     resume = resume_context(n, baseline)
     if resume:
         parts += ["", resume]
@@ -563,16 +673,97 @@ def comment_receipt(n: int, kind: str, stdout: str, **fields: object) -> bool:
     return True
 
 
-def run_worker(cmd: list[str], wt: Path, logfile: Path) -> int:
+WATCH_POLL = 5.0  # seconds between worker activity checks
+# Which timeout stopped a worker -> the journal reason it records.
+TIMEOUT_REASONS = {"idle_timeout": "stuck", "exit_grace": "hung_after_done", "budget_min": "budget_exceeded"}
+
+
+def _activity(wt: Path, logfile: Path, handoff: Path) -> tuple:
+    """What a working worker changes: its log, HEAD, the worktree, and its handoff file."""
+    def stat(path: Path) -> tuple[int, int] | None:
+        with suppress(OSError):
+            st = path.stat()
+            return st.st_size, st.st_mtime_ns
+        return None
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "--no-optional-locks", "-C", str(wt), *args],
+                              capture_output=True, text=True, check=False).stdout
+
+    return (stat(logfile), git("rev-parse", "HEAD"),
+            git("status", "--porcelain", "--untracked-files=all"), stat(handoff))
+
+
+def _watch(proc: subprocess.Popen, wt: Path, logfile: Path, handoff: Path, deadline: float,
+           start: tuple) -> str | None:
+    """Wait for the worker to exit; None if it did, else the timeout that fired first."""
+    state, changed = start, time.monotonic()
+    while True:
+        try:
+            proc.wait(timeout=WATCH_POLL)
+            return None
+        except subprocess.TimeoutExpired:
+            pass
+        now, current = time.monotonic(), _activity(wt, logfile, handoff)
+        if current != state:
+            state, changed = current, now
+        quiet = now - changed
+        # Done: committed or wrote its handoff during this run. A done worker is never "stuck".
+        done = current[1] != start[1] or current[3] != start[3]
+        if now >= deadline:
+            return "budget_min"
+        if done and cfg.exit_grace and quiet >= cfg.exit_grace:
+            return "exit_grace"
+        if not done and cfg.idle_timeout and quiet >= cfg.idle_timeout * 60:
+            return "idle_timeout"
+
+
+def _stop(proc: subprocess.Popen) -> None:
+    """SIGTERM the worker's process group; SIGKILL whatever is left after 10 s."""
+    with suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    with suppress(subprocess.TimeoutExpired):
+        proc.wait(timeout=10)
+    with suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait()
+
+
+def run_worker(cmd: list[str], wt: Path, logfile: Path, handoff: Path,
+               deadline: float = float("inf")) -> tuple[int, str | None]:
+    """Run the worker; return its exit code and the timeout that stopped it, if any.
+
+    `idle_timeout`: no log output and no worktree change (stuck mid-work).
+    `exit_grace`: committed or wrote `handoff`, then stayed quiet without exiting.
+    `budget_min`: the ticket's overall wall-clock deadline passed.
+    """
     log(f"worker: {' '.join(cmd)} -> {logfile}")
     started = time.monotonic()
     with lifecycle.scope(EVENTS, "worker") as execution, logfile.open("a") as out:
-        code = run(cmd, cwd=wt, check=False, stdout=out, stderr=subprocess.STDOUT).returncode
+        start = _activity(wt, logfile, handoff)  # before launch: a fast handoff must count as done
+        # Own session, so a timeout stops the whole tree (tests, servers), not just the agent.
+        with without_github(execution.env()) as env:
+            proc = subprocess.Popen(cmd, cwd=wt, stdout=out, stderr=subprocess.STDOUT,
+                                    env=env, start_new_session=True)
+            try:
+                execution.child(proc.pid)
+                fired = _watch(proc, wt, logfile, handoff, deadline, start)
+            finally:
+                if proc.poll() is None:
+                    _stop(proc)
+                execution.child_done(proc.pid)
+        code = proc.returncode
+        if fired:
+            execution.emit("timeout", timeout=fired)
         execution.emit("result", returncode=code)
-        execution.outcome = "completed" if code == 0 else "unknown"
-        execution.reason = None if code == 0 else f"worker_exit:{code}"
-    log(f"worker exited {code} after {int(time.monotonic() - started)}s")
-    return code
+        if fired:
+            execution.outcome, execution.reason = "interrupted", TIMEOUT_REASONS[fired]
+        else:
+            execution.outcome = "completed" if code == 0 else "unknown"
+            execution.reason = None if code == 0 else f"worker_exit:{code}"
+    log(f"worker exited {code} after {int(time.monotonic() - started)}s"
+        + (f" ({fired} fired: {TIMEOUT_REASONS[fired]})" if fired else ""))
+    return code, fired
 
 
 def ensure_worktree(n: int) -> Path:
@@ -613,7 +804,9 @@ def commit_leftovers(wt: Path, n: int, title: str) -> None:
         run(["git", "commit", *flags, "-m", f"agent/{n}: {title}"], cwd=wt)
 
 
-def run_gate(wt: Path, n: int | str, skip: str = "") -> tuple[bool, str]:
+def run_gate(
+    wt: Path, n: int | str, skip: str = "", protected_override: bool = False, tier: str = "attempt",
+) -> tuple[bool, str]:
     report_rel = f".factory/gate-report-{n}.md"
     (wt / ".factory").mkdir(exist_ok=True)
     # GPU serialization is the gate's job: the gate flocks the exclusive lock
@@ -631,6 +824,10 @@ def run_gate(wt: Path, n: int | str, skip: str = "") -> tuple[bool, str]:
     if skip:
         cmd += ["--skip", skip]
     # The gate process records its own stage and check boundaries.
+    if protected_override:
+        cmd.append("--protected-override")
+    if tier != "attempt":
+        cmd += ["--tier", tier]
     proc = run(cmd, cwd=wt, check=False)
     report = wt / report_rel
     text = report.read_text() if report.exists() else proc.stdout + proc.stderr
@@ -646,19 +843,15 @@ def escalation_packet(
     artifact: str | None = None,
     extra: str = "",
 ) -> tuple[Path, int]:
-    events = [
-        json.loads(line)
-        for line in EVENTS.read_text().splitlines()
-        if line.strip()
-    ] if EVENTS.exists() else []
+    events = lifecycle.read_events(EVENTS)
     ticket_events = [event for event in events if event.get("ticket") == n]
     attempts = [event for event in ticket_events if event.get("event") == "attempt"]
     rows = [
         f"| {event.get('attempt', '')} | {event.get('gate') or 'not run'} | "
-        f"{event.get('worker_exit', '')} | {event.get('seconds', '')} | "
+        f"{event.get('worker_exit', '')} | {event.get('timeout') or ''} | {event.get('seconds', '')} | "
         f"`{event.get('log') or ''}` |"
         for event in attempts
-    ] or ["| — | — | — | — | none recorded |"]
+    ] or ["| — | — | — | — | — | none recorded |"]
     artifact = artifact or str(n)
     gate = wt / ".factory" / f"gate-report-{artifact}.md"
     review = FACTORY / f"review-{artifact}.md"
@@ -674,8 +867,8 @@ def escalation_packet(
         f"# Escalation #{n}\n\n"
         f"## Reason\n\n{reason}\n\n"
         "## Attempts\n\n"
-        "| Attempt | Gate | Worker exit | Seconds | Log |\n"
-        "|---:|---|---:|---:|---|\n"
+        "| Attempt | Gate | Worker exit | Timeout | Seconds | Log |\n"
+        "|---:|---|---:|---|---:|---|\n"
         + "\n".join(rows)
         + "\n\n## Last gate report\n\n"
         + ((gate.read_text() if gate.exists() else gate_detail).strip()[-6000:] or "(none recorded)")
@@ -825,8 +1018,15 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
         matches = []
         actual_head = before
         if before == expected_head:
-            proc = run(cfg.review_cmd(prompt), cwd=wt, check=False)
-            findings = (proc.stdout.strip() or proc.stderr.strip())
+            command, structured = _review_command(prompt)
+            with without_github(dict(os.environ)) as env:
+                proc = run(command, cwd=wt, check=False, env=env)
+            findings, usage = (
+                _omp_output(proc.stdout) if structured else (proc.stdout.strip(), None)
+            )
+            if usage is not None:
+                record("llm-usage", ticket=n, stage="review", **usage)
+            findings = findings or proc.stderr.strip()
             matches = list(re.finditer(r"(?m)^VERDICT: (APPROVE|REVISE)[ \t]*$", findings))
             verdict_lines = re.findall(r"(?m)^VERDICT:.*$", findings)
             parsed = (
@@ -894,9 +1094,54 @@ def update_pr_plan_summary(wt: Path, ticket: int) -> None:
     run(["gh", "pr", "edit", f"agent/{ticket}", "--repo", REPO, "--body-file", str(body_file)], cwd=wt)
 
 
-def push_and_pr(wt: Path, branch: str, title: str, body: str, label: str = "", ticket: int | None = None) -> bool:
+def pr_gate_and_review(
+    wt: Path, n: int, report: str, head: str, pr_runs: dict[str, tuple[bool, str]],
+) -> tuple[str, str, bool]:
+    """Run the `when = "pr"` checks once per head, then review with their report appended.
+
+    Returns (verdict, findings, pr_failed); a pr-tier FAIL skips review and its
+    report becomes the findings."""
+    if any(check.when == "pr" for check in cfg.checks):
+        if head not in pr_runs:
+            pr_runs[head] = run_gate(wt, f"{n}-pr", tier="pr")
+        ok, pr_report = pr_runs[head]
+        if not ok:
+            return "REVISE", pr_report, True
+        report = f"{report}\n{pr_report}"
+    verdict, findings = review(wt, n, report, head)
+    return verdict, findings, False
+
+
+def agent_lease(wt: Path, n: int) -> str:
+    """The remote `agent/<n>` sha to lease the next `push_agent` on, read before the worker runs:
+    "" when the branch is not on the remote. A remote head this worktree lacks (someone else
+    pushed) yields the local head instead, which never matches, so that push is refused."""
+    remote = (run(["git", "ls-remote", "origin", f"refs/heads/agent/{n}"], cwd=wt).stdout.split() or [""])[0]
+    if not remote or run(["git", "merge-base", "--is-ancestor", remote, "HEAD"], cwd=wt, check=False).returncode == 0:
+        return remote
+    return run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
+
+
+def push_agent(wt: Path, n: int, lease: str, check: bool = True) -> str | None:
+    """Force-push this worktree's HEAD to `agent/<n>`, never any other ref, only while the remote
+    still holds `lease`, the sha the dispatcher last fetched or pushed. A worker history rewrite
+    lands; anyone else's push since then is refused. Returns the pushed sha (the next lease),
+    or None when refused and `check` is False."""
+    head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
+    pushed = run(
+        ["git", "push", f"--force-with-lease=agent/{n}:{lease}", "origin", f"{head}:refs/heads/agent/{n}"],
+        cwd=wt, check=check,
+    )
+    return None if pushed.returncode else head
+
+
+def push_and_pr(
+    wt: Path, branch: str, title: str, body: str, label: str = "", ticket: int | None = None,
+    lease: str | None = None,
+) -> bool:
     """Push `branch` and open its PR. False if the branch adds nothing over
-    main (nothing to review; a worker that landed its work elsewhere)."""
+    main (nothing to review; a worker that landed its work elsewhere). With `ticket` and
+    `lease`, `branch` is `agent/<ticket>` and goes through `push_agent`; otherwise a plain push."""
     run(["git", "fetch", "origin", cfg.main], cwd=wt)
     ahead = run(["git", "rev-list", "--count", f"origin/{cfg.main}..HEAD"], cwd=wt).stdout
     if int(ahead) == 0:
@@ -910,7 +1155,10 @@ def push_and_pr(wt: Path, branch: str, title: str, body: str, label: str = "", t
             f"{existing[0].get('baseRefName')!r}, not {cfg.main!r}; not pushing"
         )
         return False
-    run(["git", "push", "-u", "origin", branch], cwd=wt)
+    if ticket is None or lease is None:
+        run(["git", "push", "-u", "origin", branch], cwd=wt)
+    else:
+        push_agent(wt, ticket, lease)
     if existing:
         if ticket is not None:
             update_pr_plan_summary(wt, ticket)
@@ -1219,7 +1467,7 @@ def sync_pass(dry_run: bool) -> None:
                     sync_record(upstream=tip, commits=count, result="conflict", issue=url)
                     log(f"upstream sync: merge conflict at {tip[:12]}; escalated {url}")
                     return
-            ok, report = run_gate(wt, "upstream", skip="leak-scan")
+            ok, report = run_gate(wt, "upstream", skip="leak-scan", protected_override=True)
             if not ok:
                 execution.outcome, execution.reason = "project_escalation", "upstream_gate_failed"
                 url = sync_escalate(tip, "gate failed", report)
@@ -1285,9 +1533,10 @@ def _head_evidence_matches(events: list[dict], n: int, head: str) -> bool:
     for event in events:
         if event.get("ticket") != n:
             continue
-        if event.get("event") == "attempt" and event.get("head") == head:
-            gate = event.get("gate") == "PASS" and event.get("actual_head") == head
-        elif event.get("event") == "refreshed" and event.get("gate_head") == head:
+        if (
+            event.get("event") == "attempt" and event.get("head") == head
+            or event.get("event") == "refreshed" and event.get("gate_head") == head
+        ):
             gate = event.get("gate") == "PASS" and event.get("actual_head") == head
         elif event.get("event") == "review" and event.get("head") == head:
             review_ok = (
@@ -1373,20 +1622,135 @@ def signoff() -> str:
 
 
 def pr_checks(pr: int) -> list[dict]:
-    """gh check rows [{name, bucket}]; bucket: pass/fail/pending/skipping/cancel.
+    """gh check rows [{name, bucket, link, completedAt}]; bucket: pass/fail/pending/skipping/cancel.
 
     `gh pr checks` exits nonzero for failing or pending checks; that is data
     here, not an error. Unparseable output returns [] which the caller treats
     as "no passing CI" and refuses to merge — fail closed.
     """
     proc = run(
-        ["gh", "pr", "checks", str(pr), "--repo", REPO, "--json", "name,bucket"],
+        ["gh", "pr", "checks", str(pr), "--repo", REPO, "--json", "name,bucket,link,completedAt"],
         check=False,
     )
     try:
         return json.loads(proc.stdout)
     except ValueError:
         return []
+
+
+def _infra_cancel(check: dict) -> dict | None:
+    """Evidence that a cancelled Actions job never got a runner; None means a real failure.
+
+    No steps run, no runner assigned, or GitHub's runner-acquisition annotation
+    each mark infra. A job that ran steps (e.g. its own `timeout-minutes`) may
+    be the code's fault. Unreadable job data is a failure: fail closed.
+    """
+    m = re.search(r"/actions/runs/(\d+)/job/(\d+)", check.get("link") or "")
+    if not m:
+        return None
+    try:
+        res = run(["gh", "api", f"repos/{REPO}/actions/jobs/{m[2]}"], check=False)
+        if res.returncode != 0:
+            return None
+        job = json.loads(res.stdout)
+        ran = any(s.get("conclusion") not in (None, "skipped") for s in job.get("steps") or [])
+        runner, note = job.get("runner_name") or None, ""
+        if ran and runner:
+            notes = json.loads(run(
+                ["gh", "api", f"repos/{REPO}/check-runs/{m[2]}/annotations"], check=False,
+            ).stdout)
+            note = next((a["message"] for a in notes
+                         if "not acquired by Runner" in (a.get("message") or "")), "")
+            if not note:
+                return None
+        return {"run": int(m[1]), "attempt": int(job.get("run_attempt") or 1),
+                "check": check["name"], "steps_run": ran, "runner": runner, "annotation": note}
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
+def _run_in_progress(run_id: int) -> bool:
+    """True while GitHub reports the workflow run active; it refuses to rerun one.
+
+    The caller's check rows can omit sibling jobs (`gh pr checks --required`).
+    Unreadable run data reads as finished: the rerun is attempted and, if refused,
+    escalates visibly instead of waiting forever.
+    """
+    res = run(["gh", "api", f"repos/{REPO}/actions/runs/{run_id}"], check=False)
+    try:
+        return res.returncode == 0 and json.loads(res.stdout).get("status") != "completed"
+    except (ValueError, AttributeError):
+        return False
+
+
+def triage_cancelled(pr: int, checks: list[dict], dry_run: bool = False) -> list[dict]:
+    """Rebucket `cancel` rows so a CI runner outage is not a code failure.
+
+    A cancel that ran steps becomes `fail`. An infra cancel reads `pending` while
+    any check in its run is still pending (GitHub refuses to rerun an in-progress
+    run); once the run finishes it reruns the run's failed jobs once (`gh run
+    rerun --failed`) and reads `pending` until the rerun attempt reports;
+    cancelled for infra again, it reads `infra`.
+    """
+    if not any(c.get("bucket") == "cancel" for c in checks):
+        return checks
+    events = lifecycle.read_events(EVENTS)
+    out, starved = [], {}
+    running = {int(m[1]) for c in checks if c.get("bucket") == "pending"
+               and (m := re.search(r"/actions/runs/(\d+)/", c.get("link") or ""))}
+    for c in checks:
+        infra = _infra_cancel(c) if c.get("bucket") == "cancel" else None
+        if infra:
+            starved.setdefault(infra["run"], []).append((c, infra))
+        else:
+            out.append({**c, "bucket": "fail"} if c.get("bucket") == "cancel" else c)
+    for run_id, rows in starved.items():
+        names = [c["name"] for c, _ in rows]
+        attempt = max(i["attempt"] for _, i in rows)
+        evidence = {"pr": pr, "run": run_id, "attempt": attempt, "checks": names,
+                    "evidence": [i for _, i in rows]}
+        rerun = next((e for e in reversed(events) if e.get("event") == "ci-rerun"
+                      and e.get("pr") == pr and e.get("run") == run_id), None)
+        if run_id in running or _run_in_progress(run_id):
+            bucket = "pending"  # retry on a later pass once the run has finished
+        elif rerun is None and dry_run:
+            log(f"PR #{pr}: would rerun CI run {run_id} (runner never acquired: {', '.join(names)})")
+            bucket = "pending"
+        elif rerun is None:
+            record("ci-infra", **evidence)
+            ok = run(["gh", "run", "rerun", str(run_id), "--failed", "--repo", REPO],
+                     check=False).returncode == 0
+            record("ci-rerun", pr=pr, run=run_id, attempt=attempt, checks=names, ok=ok)
+            bucket = "pending" if ok else "infra"
+        elif rerun.get("ok") and attempt <= rerun["attempt"]:
+            bucket = "pending"  # the rerun attempt is not visible yet
+        else:
+            bucket = "infra"
+            if not dry_run and not any(
+                e.get("event") == "ci-infra" and e.get("pr") == pr
+                and e.get("run") == run_id and e.get("attempt") == attempt for e in events
+            ):
+                record("ci-infra", **evidence)
+        out.extend({**c, "bucket": bucket, "run": run_id} for c, _ in rows)
+    return out
+
+
+def runner_unavailable(n: int, pr: int, starved: list[dict], dry_run: bool) -> bool:
+    """Escalate a rerun that still found no runner, once per run; `factory-approved` stays.
+
+    False when this outage is already escalated: the caller waits as if pending.
+    """
+    runs = ", ".join(sorted({str(c["run"]) for c in starved}))
+    reason = (f"PR #{pr}: CI runner unavailable ({', '.join(c['name'] for c in starved)}) "
+              f"in run {runs}; `{FACTORY_APPROVED}` kept")
+    if any(e.get("event") == "escalate" and e.get("ticket") == n and e.get("reason") == reason
+           for e in lifecycle.read_events(EVENTS)):
+        return False
+    if dry_run:
+        log(f"PR #{pr}: would escalate ({reason})")
+    else:
+        escalate(n, reason, None)
+    return True
 
 
 def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
@@ -1434,7 +1798,9 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         ":(exclude).factory-prompt.md", ":(exclude).factory",
     ]
     before_status = run(status_cmd, cwd=wt).stdout.strip()
-    ok, report = run_gate(wt, n)
+    issue = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "labels"])
+    override = LABEL_PROTECTED_OVERRIDE in {label["name"] for label in issue.get("labels", [])}
+    ok, report = run_gate(wt, n, protected_override=override)
     actual_head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
     after_status = run(status_cmd, cwd=wt).stdout.strip()
     if actual_head != head:
@@ -1447,11 +1813,7 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         pr_comment(n, f"Gate failed after {verb} onto current main:\n\n{report}")
         withdraw(f"gate failed after {verb} onto moved main")
         return False
-    pushed = run(
-        ["git", "push", "--force-with-lease", "origin", f"agent/{n}"],
-        cwd=wt, check=False,
-    )
-    if pushed.returncode:
+    if push_agent(wt, n, remote_head, check=False) is None:
         withdraw("remote head changed while refreshed evidence was being produced")
         return False
     record(
@@ -1577,11 +1939,11 @@ def merge_pass_locked(dry_run: bool) -> None:
                 if execution:
                     execution.outcome, execution.reason = "not_eligible", "initiative"
                 continue
-            checks = pr_checks(pr_num)
+            checks = triage_cancelled(pr_num, pr_checks(pr_num), dry_run)
             buckets: dict[str, int] = {}
             for c in checks:
                 buckets[c["bucket"]] = buckets.get(c["bucket"], 0) + 1
-            failed = [c["name"] for c in checks if c["bucket"] in ("fail", "cancel")]
+            failed = [c["name"] for c in checks if c["bucket"] == "fail"]
             if failed:
                 if dry_run:
                     log(f"PR #{pr_num}: would escalate (CI failed: {', '.join(failed)})")
@@ -1606,7 +1968,10 @@ def merge_pass_locked(dry_run: bool) -> None:
                     None,
                 )
                 continue
-            if buckets.get("pending"):
+            starved = [c for c in checks if c["bucket"] == "infra"]
+            if starved and runner_unavailable(n, pr_num, starved, dry_run):
+                continue
+            if buckets.get("pending") or starved:
                 log(f"PR #{pr_num}: CI pending {buckets}; waiting")
                 if execution:
                     execution.outcome, execution.reason = "not_eligible", "ci_pending"
@@ -1700,10 +2065,9 @@ def merge_pass_locked(dry_run: bool) -> None:
                 )
                 execution.outcome, execution.reason = "project_escalation", "state_changed"
                 continue
-            latest_checks = pr_checks(pr_num)
-            latest_failed = [
-                c["name"] for c in latest_checks if c["bucket"] in ("fail", "cancel")
-            ]
+            latest_checks = triage_cancelled(pr_num, pr_checks(pr_num))
+            latest_failed = [c["name"] for c in latest_checks if c["bucket"] == "fail"]
+            latest_starved = [c for c in latest_checks if c["bucket"] == "infra"]
             if latest_failed:
                 run(
                     ["gh", "pr", "edit", str(pr_num), "--repo", REPO,
@@ -1717,7 +2081,9 @@ def merge_pass_locked(dry_run: bool) -> None:
                     None,
                 )
                 continue
-            if any(c["bucket"] == "pending" for c in latest_checks):
+            if latest_starved and runner_unavailable(n, pr_num, latest_starved, False):
+                continue
+            if any(c["bucket"] in ("pending", "infra") for c in latest_checks):
                 execution.outcome, execution.reason = "not_eligible", "ci_pending"
                 execution.wait("ci_pending", mode="eligibility", pr=pr_num)
                 continue
@@ -1777,6 +2143,7 @@ def worker_round(
     extra: str,
     attempt: int,
     deadline: float,
+    selected_worker: str | None = None,
 ) -> tuple[bool, str, Path, str]:
     """One worker + gate cycle, bound to one immutable head."""
     from factory import results
@@ -1787,7 +2154,14 @@ def worker_round(
     promptfile.write_text(build_prompt(n, wt, extra))
     logfile = LOGS / f"{n}-attempt-{attempt}.log"
     started = time.monotonic()
-    code = run_worker(cfg.worker(labels, promptfile, wt), wt, logfile)
+    worker = cfg.worker_key({selected_worker} if selected_worker else labels)
+    code, fired = run_worker(
+        cfg.worker({worker}, promptfile, wt),
+        wt, logfile, wt / ".factory" / f"handoff-{n}.md", deadline,
+    )
+    timeout = {"timeout": fired, "reason": TIMEOUT_REASONS[fired]} if fired else {}
+    usage = worker_usage(logfile, cfg.worker_usage.get(worker))
+    record("llm-usage", ticket=n, stage="worker", attempt=attempt, **usage)
     commit_leftovers(wt, n, title)
     head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
     handoff = results.source_metadata(cfg, n)
@@ -1796,13 +2170,23 @@ def worker_round(
         ":(exclude).factory-prompt.md", ":(exclude).factory",
     ]
     before_status = run(status_cmd, cwd=wt).stdout.strip()
+    if fired == "idle_timeout":
+        # Stuck mid-work: a failed attempt for the normal retry path; the gate never ran.
+        record(
+            "attempt", ticket=n, attempt=attempt, worker_exit=code, gate=None,
+            log=str(logfile), head=head, handoff=handoff, **timeout,
+        )
+        return False, (
+            f"worker stuck: idle_timeout fired ({cfg.idle_timeout:g} min without worker "
+            "log output or worktree change); worker killed before the gate"
+        ), logfile, head
     if time.monotonic() > deadline:
         record(
             "attempt", ticket=n, attempt=attempt, worker_exit=code, gate=None,
-            log=str(logfile), head=head, handoff=handoff,
+            log=str(logfile), head=head, handoff=handoff, **timeout,
         )
         return False, "budget exceeded before gate", logfile, head
-    ok, report = run_gate(wt, n)
+    ok, report = run_gate(wt, n, protected_override=LABEL_PROTECTED_OVERRIDE in labels)
     actual_head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
     after_status = run(status_cmd, cwd=wt).stdout.strip()
     if actual_head != head:
@@ -1811,11 +2195,16 @@ def worker_round(
     if before_status or after_status:
         ok = False
         report += "\n\nGate evidence rejected: worktree was not clean for the gated commit."
+    if fired == "exit_grace":
+        report += (
+            f"\n\nWorker hung after done: exit_grace fired ({cfg.exit_grace:g} s quiet after "
+            "its commit or handoff without exiting); terminated, then gated."
+        )
     record(
         "attempt", ticket=n, attempt=attempt, worker_exit=code, gate="PASS" if ok else "FAIL",
-        seconds=int(time.monotonic() - started), cost=log_cost(logfile), log=str(logfile),
+        seconds=int(time.monotonic() - started), cost=usage["cost"], log=str(logfile),
         brief=brief_path(wt, n).exists(), head=head, actual_head=actual_head,
-        clean=not before_status and not after_status, handoff=handoff,
+        clean=not before_status and not after_status, handoff=handoff, **timeout,
     )
     return ok, report, logfile, head
 
@@ -1826,6 +2215,40 @@ def log_cost(logfile: Path) -> float | None:
         return None
     hits = re.findall(cfg.cost_pattern, logfile.read_text(errors="replace"))
     return round(sum(float(h) for h in hits), 4) if hits else None
+
+
+def _json_path(row: object, path: str) -> object:
+    for part in path.split("."):
+        if not isinstance(row, dict) or part not in row:
+            return None
+        row = row[part]
+    return row
+
+
+def worker_usage(logfile: Path, spec: dict | None) -> dict:
+    """Normalized usage the worker reported in its log; None = not reported, never guessed.
+
+    `spec` (a `[workers]` profile's `usage`) sums its JSON paths over every JSON-object
+    line whose `match` paths hold; cost falls back to `cost_pattern` when no path gives one.
+    """
+    usage: dict = dict.fromkeys(("model", *USAGE_FIELDS))
+    text = logfile.read_text(errors="replace") if spec else ""
+    for line in text.splitlines():
+        try:
+            row = json.loads(line) if line.startswith("{") else None
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict) or any(_json_path(row, k) != v for k, v in spec["match"].items()):
+            continue
+        if spec["model"] and isinstance(model := _json_path(row, spec["model"]), str):
+            usage["model"] = model
+        for field in USAGE_FIELDS:
+            for path in spec[field]:
+                value = _json_path(row, path)
+                if type(value) in (int, float) and value >= 0:
+                    usage[field] = (usage[field] or 0) + value
+    usage["cost"] = log_cost(logfile) if usage["cost"] is None else round(usage["cost"], 4)
+    return usage
 
 
 def process_ticket(
@@ -1967,6 +2390,7 @@ def process_ticket(
             run(["gh", "issue", "edit", str(n), "--repo", REPO, "--add-assignee", "@me"])
             record("claimed", ticket=n, title=title, labels=sorted(labels))
             wt = ensure_worktree(n)
+            lease = agent_lease(wt, n)
             LOGS.mkdir(parents=True, exist_ok=True)
 
             # Attempts 1..MAX_ATTEMPTS: worker + gate, feeding the failed report back.
@@ -1977,28 +2401,34 @@ def process_ticket(
                 )
                 if ok:
                     break
+                if "- protected-paths: FAIL" in report:
+                    escalate(n, "worker edited protected paths", logfile,
+                             extra="## Offending diff\n\n" + report)
+                    return
                 if time.monotonic() > deadline:
                     escalate(n, f"wall-clock budget ({budget_min} min) exceeded", logfile)
                     return
                 extra = f"## Previous gate report (attempt {attempt} failed)\n\n{report}"
             else:
-                escalate(
-                    n, f"gate failed {MAX_ATTEMPTS} times; worktree kept at {wt}", logfile
-                )
+                failed = (f"idle_timeout fired (worker stuck) on attempt {MAX_ATTEMPTS}"
+                          if report.startswith("worker stuck") else f"gate failed {MAX_ATTEMPTS} times")
+                escalate(n, f"{failed}; worktree kept at {wt}", logfile)
                 return
 
             body = f"Closes #{n}\n\n## Gate report\n\n{report}\n"
-            if not push_and_pr(wt, f"agent/{n}", f"agent/{n}: {title}", body, ticket=n):
+            if not push_and_pr(wt, f"agent/{n}", f"agent/{n}: {title}", body, ticket=n, lease=lease):
                 escalate(
                     n, f"agent/{n}: PR not published (no commits over {cfg.main} "
                     "or existing PR target mismatch); inspect dispatcher log", logfile,
                 )
                 return
+            lease = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
             execution.review_round = 1
-            verdict, findings = review(wt, n, report, gate_head)
+            pr_runs: dict[str, tuple[bool, str]] = {}
+            verdict, findings, pr_failed = pr_gate_and_review(wt, n, report, gate_head, pr_runs)
             pr_comment(n, findings)
-            # Review rounds: each REVISE goes back to the worker with the findings,
-            # then re-gate, push, re-review. `review_rounds` bounces max.
+            # Review rounds: each REVISE (or pr-tier FAIL) goes back to the worker with the
+            # findings, then re-gate, push, re-review. `review_rounds` bounces max.
             for bounce in range(1, cfg.review_rounds + 1):
                 if verdict == "APPROVE":
                     break
@@ -2011,6 +2441,8 @@ def process_ticket(
                     return
                 execution.review_round = bounce + 1
                 extra = (
+                    f"## PR-tier gate report, round {bounce} (failed)\n\n{findings}"
+                    if pr_failed else
                     f"## Reviewer findings, round {bounce}\n\n"
                     f"Address required fixes only; optional suggestions are not requirements.\n\n"
                     f"{findings}"
@@ -2018,16 +2450,23 @@ def process_ticket(
                 ok, report, logfile, gate_head = worker_round(
                     n, wt, labels, title, extra, MAX_ATTEMPTS + bounce, deadline
                 )
+                if "- protected-paths: FAIL" in report:
+                    escalate(n, "worker edited protected paths", logfile,
+                             extra="## Offending diff\n\n" + report)
+                    return
                 if not ok:
+                    failed = "idle_timeout fired (worker stuck)" if report.startswith("worker stuck") else "gate failed"
                     escalate(
-                        n, f"gate failed after review bounce {bounce}; worktree kept at {wt}", logfile
+                        n, f"{failed} after review bounce {bounce}; worktree kept at {wt}", logfile
                     )
                     return
-                run(["git", "push", "origin", f"agent/{n}"], cwd=wt)
+                lease = push_agent(wt, n, lease)
                 update_pr_plan_summary(wt, n)
-                verdict, findings = review(wt, n, report, gate_head)
+                verdict, findings, pr_failed = pr_gate_and_review(wt, n, report, gate_head, pr_runs)
                 pr_comment(n, findings)
-            if verdict != "APPROVE":
+            if verdict != "APPROVE" and pr_failed:
+                escalate(n, "pr checks failed", logfile, extra="## PR-tier gate report\n\n" + findings)
+            elif verdict != "APPROVE":
                 escalate(n, f"REVISE verdict after {cfg.review_rounds} review round(s)", logfile)
             elif approve_pr(n, gate_head):
                 log(f"#{n}: done (approved at {gate_head[:12]})")
@@ -2037,6 +2476,33 @@ def process_ticket(
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
             execution.resource("released", lock_path, scope="repository")
+
+
+def ticket_pass(budget_min: int, dry_run: bool) -> None:
+    """Claim up to capacity frontier tickets and work each one."""
+    with nullcontext() if dry_run else lifecycle.scope(EVENTS, "scheduling", lazy=True) as execution:
+        active = active_ticket_count()
+        capacity = MAX_ACTIVE - active
+        log(f"active tickets: {active}, capacity: {max(capacity, 0)}")
+        if capacity <= 0:
+            log("at capacity, nothing to do")
+            if execution:
+                execution.wait("capacity_reached", mode="admission", active=active, max_active=MAX_ACTIVE)
+            return
+        ready, seen = [], set()
+        for issue in frontier(LABEL_AGENT) + frontier(LABEL_INVESTIGATE):
+            if issue["number"] not in seen:
+                seen.add(issue["number"])
+                ready.append(issue)
+        if not ready:
+            log("frontier empty, nothing to do")
+            return
+        if execution:
+            execution.commit()  # claimable work: keep the scheduling trail
+        for issue in ready[:capacity]:
+            log(f"claimable: #{issue['number']} {issue['title']}")
+    for issue in ready[:capacity]:
+        process_ticket(issue, budget_min, dry_run)
 
 
 def main(argv: list[str]) -> int:
@@ -2058,7 +2524,11 @@ def main(argv: list[str]) -> int:
     if args.budget_min is None:
         args.budget_min = cfg.budget_min
 
-    with nullcontext() if args.dry_run else lifecycle.scope(EVENTS, "dispatcher", dispatcher=True):
+    # Lazy: an idle pass (nothing claimed, merged, waited on or failed) journals no lifecycle rows.
+    with nullcontext() if args.dry_run else lifecycle.scope(
+        EVENTS, "dispatcher", dispatcher=True, lazy=True,
+        engine_version=__version__, engine_commit=config.engine_commit(),
+    ):
         if not args.dry_run:
             from factory import results
 
@@ -2085,28 +2555,10 @@ def main(argv: list[str]) -> int:
 
         land_pass(args.dry_run)
         review_intake_pass(args.dry_run)
+        from factory.learn import learn_pass
         from factory.manage import manage_pass
 
         manage_pass(args.dry_run)
-        with nullcontext() if args.dry_run else lifecycle.scope(EVENTS, "scheduling") as execution:
-            active = active_ticket_count()
-            capacity = MAX_ACTIVE - active
-            log(f"active tickets: {active}, capacity: {max(capacity, 0)}")
-            if capacity <= 0:
-                log("at capacity, nothing to do")
-                if execution:
-                    execution.wait("capacity_reached", mode="admission", active=active, max_active=MAX_ACTIVE)
-                return 0
-            ready, seen = [], set()
-            for issue in frontier(LABEL_AGENT) + frontier(LABEL_INVESTIGATE):
-                if issue["number"] not in seen:
-                    seen.add(issue["number"])
-                    ready.append(issue)
-            if not ready:
-                log("frontier empty, nothing to do")
-                return 0
-            for issue in ready[:capacity]:
-                log(f"claimable: #{issue['number']} {issue['title']}")
-        for issue in ready[:capacity]:
-            process_ticket(issue, args.budget_min, args.dry_run)
+        ticket_pass(args.budget_min, args.dry_run)
+        learn_pass(args.dry_run)
         return 0
