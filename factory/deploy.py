@@ -1263,9 +1263,48 @@ ADAPTERS: dict[str, type[DeployAdapter]] = {
     "mock": FakeDeployAdapter,
 }
 
+# Installed packages can advertise extra adapters (for example a private,
+# site-specific one) without forking this module:
+#   [project.entry-points."factory.deploy_adapters"]
+#   my-adapter = "my_pkg.adapter:MyDeployAdapter"
+PLUGIN_GROUP = "factory.deploy_adapters"
+PLUGIN_ERRORS: list[str] = []
+_plugins_loaded = False
+
+
+def load_plugin_adapters() -> None:
+    """Register adapters from the `factory.deploy_adapters` entry point group, once.
+
+    Fails closed: a plugin that cannot be imported, is not a DeployAdapter
+    subclass, or tries to replace a built-in name is skipped and recorded in
+    PLUGIN_ERRORS, so a target naming it is rejected as unknown rather than
+    run by something else.
+    """
+    global _plugins_loaded
+    if _plugins_loaded:
+        return
+    _plugins_loaded = True
+    from importlib.metadata import entry_points
+
+    for ep in entry_points(group=PLUGIN_GROUP):
+        name = ep.name.lower()
+        if name in ADAPTERS:
+            PLUGIN_ERRORS.append(f"{ep.name}: name already registered; plugin ignored")
+            continue
+        try:
+            cls = ep.load()
+        except Exception as exc:  # noqa: BLE001 - any import failure must not crash apply
+            PLUGIN_ERRORS.append(f"{ep.name}: failed to load {ep.value}: {exc}")
+            continue
+        if not (isinstance(cls, type) and issubclass(cls, DeployAdapter)):
+            PLUGIN_ERRORS.append(f"{ep.name}: {ep.value} is not a DeployAdapter subclass")
+            continue
+        ADAPTERS[name] = cls
+
 
 def unknown_adapters(targets) -> list[str]:
     """`name: adapter` for each enabled target whose adapter is not registered."""
+    load_plugin_adapters()
     return [
         f"{t.name}: {t.adapter}"
         for t in targets
@@ -1280,6 +1319,7 @@ def get_adapter(name: str = "terraform") -> DeployAdapter:
     adapter that is not registered (a typo, or a plugin that failed to load)
     must not run `terraform apply` instead.
     """
+    load_plugin_adapters()
     try:
         cls = ADAPTERS[name.lower()]
     except KeyError:

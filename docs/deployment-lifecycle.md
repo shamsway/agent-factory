@@ -124,6 +124,15 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 
+An adapter can also live in a separate installed package (for example a private, site-specific one) by advertising it in the `factory.deploy_adapters` entry point group:
+
+```toml
+[project.entry-points."factory.deploy_adapters"]
+my-platform = "my_pkg.adapter:MyPlatformDeployAdapter"
+```
+
+Factory loads the group once, the first time it resolves an adapter. A plugin that fails to import, is not a `DeployAdapter` subclass, or reuses a built-in name is skipped and reported by `factory apply`; a target naming it is then rejected as unknown, like a typo.
+
 ---
 
 ## Post-apply Health Verification
