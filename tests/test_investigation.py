@@ -82,7 +82,7 @@ class InvestigationLaneTest(unittest.TestCase):
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "ensure_worktree", return_value=wt), \
                  mock.patch.object(dispatch, "build_prompt", return_value="prompt") as build_prompt_mock, \
-                 mock.patch.object(dispatch, "run_worker", return_value=0) as run_worker_mock, \
+                 mock.patch.object(dispatch, "run_worker", autospec=True, return_value=(0, None)) as run_worker_mock, \
                  mock.patch.object(dispatch, "finish_investigation") as finish_mock, \
                  mock.patch.object(dispatch, "admit_plan") as admit_plan_mock, \
                  mock.patch.object(dispatch, "push_and_pr") as push_and_pr_mock, \
@@ -99,6 +99,9 @@ class InvestigationLaneTest(unittest.TestCase):
 
             build_prompt_mock.assert_called_once_with(7, wt, investigation=True)
             run_worker_mock.assert_called_once()
+            # autospec enforces the real signature; the handoff path is the
+            # file finish_investigation reads, so the exit-grace watch sees it.
+            self.assertEqual(run_worker_mock.call_args.args[3], wt / ".factory" / "handoff-7.md")
             finish_mock.assert_called_once()
             self.assertEqual(finish_mock.call_args[0][0], 7)
             self.assertEqual(finish_mock.call_args[0][1], wt)
