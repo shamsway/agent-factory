@@ -1477,6 +1477,16 @@ class GateTest(unittest.TestCase):
                       "https://acme.atl\x61ssian.net/browse/GPU-1", "CONFIDENTI\x41L"):
             self.assertIsNotNone(leak.search(dirty), dirty)
 
+    def test_default_leak_pattern_matches_credential_shapes(self) -> None:
+        leak = re.compile(config.DEFAULT_LEAK_PATTERN, re.IGNORECASE)
+        # Assembled at runtime so no literal token shape sits in this file.
+        for prefix, body in (("gh" + "p_", "A1b2" * 9), ("gh" + "s_", "Z9y8" * 9),
+                             ("github" + "_pat_", "11ABCDEFG0" + "x_Y" * 8),
+                             ("sk" + "-ant-", "api03-" + "Q7w-" * 6), ("ops" + "_eyJ", "hbGciOi" * 4)):
+            self.assertIsNotNone(leak.search(f"GH_TOKEN={prefix}{body}"), prefix)
+        for clean in ("ghp_short", "sk-ant-", "the ops_team runbook", "github_pat_ rotation steps"):
+            self.assertIsNone(leak.search(clean), clean)
+
     def test_protected_edit_stops_gate_before_checks(self) -> None:
         toml = ('[gate]\nprotected_paths = [".factory.toml", "checks/**"]\n'
                 '[[gate.check]]\nname = "ran"\nrun = ["sh", "-c", "touch ran"]\n')

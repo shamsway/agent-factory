@@ -679,7 +679,7 @@ exclusive = true
 
 [leak_scan]
 # Default; "" disables it. `extra` terms are added to it, never replace it.
-pattern = "\\.(?:corp|internal|intranet|lan)\\b|\\bconfidential\\b|\\bproprietary\\b|\\bjira\\b|\\bconfluence\\b|\\.atlassian\\.net\\b"
+pattern = "\\.(?:corp|internal|intranet|lan)\\b|\\bconfidential\\b|\\bproprietary\\b|\\bjira\\b|\\bconfluence\\b|\\.atlassian\\.net\\b|AKIA[0-9A-Z]{16}|-----BEGIN[ A-Z]*PRIVATE KEY-----|\\bgh[pousr]_[A-Za-z0-9]{36,}|\\bgithub_pat_[A-Za-z0-9_]{22,}|\\bsk-ant-[A-Za-z0-9_-]{20,}|\\bops_eyJ[A-Za-z0-9_-]{20,}"
 extra = ["\\bmyproduct\\b"]   # regexes ORed onto the pattern
 
 [triage]
