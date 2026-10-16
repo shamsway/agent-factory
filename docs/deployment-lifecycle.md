@@ -121,6 +121,11 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 4. `verify(ctx)`: Post-apply health verification under the target's `verify` policy (see below). A failed verification, or a verifier that raises, records the run `FAILED`.
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
+7. `credential_checks(env, live)`: Optional report on the credentials the adapter needs from `[apply].env`.
+   - It returns rows of `key`, `status` and an optional `detail`. The detail describes scope, such as the account kind or the permissions granted.
+   - `factory verify-secrets --scope apply` and `factory inspect` list these rows beside the generic ones, tagged with the adapter name. `--live` allows network checks.
+   - A `missing`, `invalid` or `unavailable` row fails the report.
+   - Details are sanitized against every configured secret, and a check that raises becomes `unavailable` without its message.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 

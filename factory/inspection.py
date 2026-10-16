@@ -403,7 +403,7 @@ def inspect(cfg: config.Config, *, live: bool = False, candidates: bool = False,
         result["complete"] &= result["candidates"]["status"] == "observed" and result["candidates"].get("coverage") != "truncated"
     result["complete"] &= result["incident_routing"]["status"] == "observed" and result["incident_routing"]["receipt_status"] == "observed"
     result["complete"] &= result["investigation_outbox"]["status"] == "observed"
-    result["ok"] = bool(result["complete"] and not any(c["status"] in ("empty", "invalid", "unavailable") for c in result["credentials"]))
+    result["ok"] = bool(result["complete"] and not any(c["status"] in verify_secrets.BAD_STATUSES for c in result["credentials"]))
     for unit in units:
         if (unit["unit"] not in required and unit["status"] != "observed") or unit["unit"].endswith(".timer"):
             continue

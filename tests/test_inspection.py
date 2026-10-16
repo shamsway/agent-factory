@@ -45,6 +45,50 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "unavailable")
         self.assertNotIn(SECRET, json.dumps(rows))
 
+    def test_successful_live_check_reports_scope_detail_without_values(self):
+        with patch.dict(verify_secrets.LIVE_CHECKS, {"GH_TOKEN": lambda token: f"OK, scopes: repo, {token}"}, clear=True):
+            rows = verify_secrets.credential_rows(self.cfg, "apply", True)
+        gh = next(r for r in rows if r["key"] == "GH_TOKEN")
+        self.assertEqual(gh["status"], "valid")
+        self.assertTrue(gh["detail"].startswith("scopes: repo, "))
+        self.assertNotIn(SECRET, json.dumps(rows))
+
+    def test_adapter_credential_checks_join_the_apply_scope(self):
+        from factory import deploy
+
+        calls = []
+
+        class Checked(deploy.FakeDeployAdapter):
+            def credential_checks(self, env, live):
+                calls.append((sorted(env), live))
+                return [{"key": "REGISTRY_PASSWORD", "status": "valid", "detail": f"robot account, push only {SECRET}"},
+                        {"key": "REGISTRY_USERNAME", "status": "missing"}]
+
+        class Broken(deploy.FakeDeployAdapter):
+            def credential_checks(self, env, live):
+                raise RuntimeError(SECRET)
+
+        self.cfg.targets = {
+            "app": config.DeployTarget(name="app", dir="app", adapter="checked"),
+            "other": config.DeployTarget(name="other", dir="o", adapter="broken"),
+            "off": config.DeployTarget(name="off", dir="x", adapter="broken", enabled=False),
+        }
+        with patch.dict(deploy.ADAPTERS, {"checked": Checked, "broken": Broken}), \
+             patch.dict(verify_secrets.LIVE_CHECKS, {}, clear=True):
+            rows = verify_secrets.credential_rows(self.cfg, "apply", True)
+            output = io.StringIO()
+            with patch.object(config, "load", return_value=self.cfg), redirect_stdout(output):
+                code = verify_secrets.main(["--scope", "apply"])
+        adapter = [r for r in rows if r.get("adapter")]
+        self.assertEqual([(r["adapter"], r["key"], r["status"]) for r in adapter],
+                         [("broken", "*", "unavailable"), ("checked", "REGISTRY_PASSWORD", "valid"),
+                          ("checked", "REGISTRY_USERNAME", "missing")])
+        self.assertIn("robot account, push only", adapter[1]["detail"])
+        self.assertEqual(calls[0], (["GH_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"], True))
+        self.assertNotIn(SECRET, json.dumps(rows) + output.getvalue())
+        self.assertIn("apply (checked): REGISTRY_PASSWORD: valid -- robot account, push only", output.getvalue())
+        self.assertEqual(code, 1)  # missing and unavailable fail the report
+
     def test_op_rejection_does_not_print_provider_stderr(self):
         with patch.object(verify_secrets.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", SECRET)):
             self.assertNotIn(SECRET, verify_secrets.check_op_token(SECRET))

@@ -125,8 +125,42 @@ LIVE_CHECKS = {
 }
 
 
+BAD_STATUSES = ("empty", "invalid", "unavailable", "missing")
+
+
+def _detail(result: str, secrets: list[str]) -> str | None:
+    """Non-secret scope detail from a successful live check ("OK, scopes: repo" ->
+    "scopes: repo"). A failure's text is provider output and never escapes."""
+    if not result.startswith("OK"):
+        return None
+    from factory import artifacts
+    text = result[2:].lstrip(" ,").strip()
+    return artifacts.sanitize(text, secrets)[:200] or None
+
+
+def adapter_rows(cfg: config.Config, live: bool) -> list[dict]:
+    """Credential rows from each deploy adapter an enabled target uses."""
+    from factory import artifacts, deploy
+    secrets = artifacts.secret_values(cfg.apply_env, cfg.install["env"])
+    rows = []
+    for name in sorted({t.adapter for t in cfg.targets.values() if t.enabled}):
+        try:
+            found = deploy.get_adapter(name).credential_checks(dict(cfg.apply_env), live)
+        except Exception:  # noqa: BLE001 - a broken plugin check is a status, not a crash or a leak
+            rows.append({"scope": "apply", "adapter": name, "key": "*", "status": "unavailable"})
+            continue
+        for item in found or []:
+            row = {"scope": "apply", "adapter": name, "key": str(item.get("key", "*")),
+                   "status": str(item.get("status", "unavailable"))}
+            if item.get("detail"):
+                row["detail"] = artifacts.sanitize(str(item["detail"]), secrets)[:200]
+            rows.append(row)
+    return rows
+
+
 def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
-    """Only names/statuses escape this boundary; values and provider diagnostics never do."""
+    """Only names, statuses and sanitized scope details escape this boundary; values
+    and provider diagnostics never do."""
     scopes = {"install": cfg.install["env"], "apply": cfg.apply_env}
     rows = []
     for name, env in scopes.items():
@@ -147,15 +181,19 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
                 status = "empty" if key in LIVE_CHECKS else "empty_allowed"
             else:
                 status = "configured"
+            detail = None
             if live and key in LIVE_CHECKS and value:
                 try:
                     result = LIVE_CHECKS[key](str(value))
                     status = "valid" if result.startswith("OK") else "invalid"
+                    detail = _detail(result, [str(value)])
                 except (OSError, subprocess.SubprocessError, ValueError):
                     status = "unavailable"
             elif live and key not in LIVE_CHECKS and value:
                 status = "not_checked"
-            rows.append({"scope": name, "key": key, "status": status})
+            rows.append({"scope": name, "key": key, "status": status, **({"detail": detail} if detail else {})})
+        if name == "apply":
+            rows += adapter_rows(cfg, live)
     if scope in ("all", "investigation"):
         from .investigation_model import KEY_NAME, credential_status, policy
         p = policy(cfg.investigation)
@@ -208,7 +246,7 @@ def main(argv: list[str]) -> int:
         for unit, _, status in rows
     )
     credentials = credential_rows(cfg, args.scope, args.live)
-    bad |= any(row["status"] in ("empty", "invalid", "unavailable") for row in credentials)
+    bad |= any(row["status"] in BAD_STATUSES for row in credentials)
     # Compare configured roles only: the caller shell is not the dispatcher.
     # Actual unit/process boundaries are checked by `factory inspect`.
     # Shared variable names are legitimate when credentials differ.
@@ -227,7 +265,8 @@ def main(argv: list[str]) -> int:
         for row in report["units"]:
             print(f"  {row['unit']}: {row['key']}: {row['status']}")
         for row in credentials:
-            print(f"  {row['scope']}: {row['key']}: {row['status']}")
+            where = f"{row['scope']} ({row['adapter']})" if row.get("adapter") else row["scope"]
+            print(f"  {where}: {row['key']}: {row['status']}" + (f" -- {row['detail']}" if row.get("detail") else ""))
         for row in isolation:
             print(f"  apply isolation: {row['key']}: {row['status']}")
         if sync_error:
