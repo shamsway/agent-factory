@@ -66,16 +66,12 @@ DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--model", "anthropic/claude-fa
 DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
 DEFAULT_LLM_MODEL = "qwen3:30b"
 DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "python": None, "env": {}}
-# The dashboard's /api/act performs real GitHub mutations with the operator's
-# own `gh` credentials and has no authentication of its own -- policy is
-# loopback-only + SSH tunnel access, enforced by a hard refusal to bind
-# elsewhere (see dashboard.py's main()). Escape hatch for someone who
-# deliberately wants LAN/WAN exposure (and puts real auth in front of it,
-# e.g. a reverse proxy): set FACTORY_DASHBOARD_ALLOW_REMOTE=1 in
-# `[install].env` (host config) -- same mechanism used to reach any other
-# systemd-unit env var, see onboard.py's `units()`.
+# The workspace mutates GitHub with the operator's own `gh` credentials. Its
+# APIs require the workspace access key, but the fork still defaults the bind
+# to loopback (reach it via an SSH tunnel) and `factory doctor` warns on any
+# other address. Nothing refuses a non-loopback bind any more; whether the
+# fork's old hard refusal comes back alongside the access key is MAT-193.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-DASHBOARD_ALLOW_REMOTE_VAR = "FACTORY_DASHBOARD_ALLOW_REMOTE"
 
 # Host-side layer: `$XDG_CONFIG_HOME/factory/config.toml`, same table shapes
 # as `.factory.toml`. `[defaults.*]` < `[repo."owner/name".*]` < the repo file.

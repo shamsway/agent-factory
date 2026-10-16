@@ -23,7 +23,6 @@ from pathlib import Path
 from factory import __version__, config
 from factory.config import (
     CONFIG_NAME,
-    DASHBOARD_ALLOW_REMOTE_VAR,
     LABELS,
     LOOPBACK_HOSTS,
     ConfigError,
@@ -547,20 +546,13 @@ def doctor(argv: list[str]) -> int:
     report(port_ok, f"dashboard port {cfg.dashboard_port}", port_detail)
 
     host = cfg.install.get("host", "127.0.0.1")
-    allow_remote = DASHBOARD_ALLOW_REMOTE_VAR in cfg.install["env"]
     if host in LOOPBACK_HOSTS:
         report(True, "dashboard bind", f"{host} (loopback; reach it via an SSH tunnel)")
-    elif allow_remote:
-        report(
-            None, "dashboard bind",
-            f"{host} (non-loopback), {DASHBOARD_ALLOW_REMOTE_VAR} set -- confirm real "
-            "auth (e.g. a reverse proxy) actually sits in front of it",
-        )
     else:
         report(
-            False, "dashboard bind",
-            f"{host} (non-loopback) -- `factory dashboard` refuses to start without "
-            f"{DASHBOARD_ALLOW_REMOTE_VAR}=1 in [install].env",
+            None, "dashboard bind",
+            f"{host} (non-loopback) -- the workspace is reachable from the network and "
+            "only its access key guards the mutating APIs; prefer 127.0.0.1 plus an SSH tunnel",
         )
 
     if cfg.apply_enabled:
@@ -817,7 +809,8 @@ def install(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--host",
-        help="dashboard bind address; 0.0.0.0 exposes /api/act (mutates GitHub with your gh credentials) to the LAN",
+        help="dashboard bind address (default 127.0.0.1); 0.0.0.0 exposes the workspace, which mutates "
+        "GitHub with your gh credentials, to the LAN behind only its access key",
     )
     parser.add_argument("--print", action="store_true", help="print the units instead of installing them")
     parser.add_argument(

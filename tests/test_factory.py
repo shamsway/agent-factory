@@ -898,25 +898,22 @@ class HostConfigTest(unittest.TestCase):
             self.assertEqual(out["ok"], proc.returncode == 0)
 
     def test_doctor_flags_non_loopback_dashboard_bind(self) -> None:
-        """policy is loopback-only + SSH tunnel; doctor should FAIL a
-        non-loopback [install].host with no escape hatch, and only WARN (not
-        pass silently) once FACTORY_DASHBOARD_ALLOW_REMOTE is set."""
+        """loopback + SSH tunnel is the fork's default; a non-loopback
+        [install].host is guarded only by the workspace access key, so doctor
+        WARNs (never passes silently) and names the access key."""
         gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
             host_file('[repo."acme/widgets".install]\nhost = "0.0.0.0"\n')
             proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
             rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
-            self.assertEqual(rows["dashboard bind"]["status"], "FAIL")
-            self.assertIn("FACTORY_DASHBOARD_ALLOW_REMOTE", rows["dashboard bind"]["detail"])
+            self.assertEqual(rows["dashboard bind"]["status"], "WARN")
+            self.assertIn("access key", rows["dashboard bind"]["detail"])
 
-            host_file(
-                '[repo."acme/widgets".install]\nhost = "0.0.0.0"\n'
-                '[repo."acme/widgets".install.env]\nFACTORY_DASHBOARD_ALLOW_REMOTE = "1"\n'
-            )
+            host_file('[repo."acme/widgets".install]\nhost = "127.0.0.1"\n')
             proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
             rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
-            self.assertEqual(rows["dashboard bind"]["status"], "WARN")
+            self.assertEqual(rows["dashboard bind"]["status"], "PASS")
 
     def test_doctor_flags_leaked_apply_credential(self) -> None:
         from unittest import mock
@@ -1317,6 +1314,15 @@ unused = ["agent"]
 
 
 class DashboardTest(unittest.TestCase):
+    def test_dashboard_defaults_to_loopback_bind(self) -> None:
+        """the fork keeps loopback as the default bind even though upstream
+        defaults to 0.0.0.0 (MAT-193 reconciles the policy)."""
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            proc = factory(repo, "dashboard", "--help")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("default: 127.0.0.1", " ".join(proc.stdout.split()))
+
     @unittest.skip("MAT-193: loopback bind guard to be reconciled with the workspace access key")
     def test_dashboard_refuses_non_loopback_bind_without_escape_hatch(self) -> None:
         """/api/act mutates GitHub with the operator's own `gh`

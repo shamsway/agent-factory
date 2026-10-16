@@ -1276,8 +1276,9 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="bind address (default: 0.0.0.0); APIs require the workspace access key",
+        default="127.0.0.1",
+        help="bind address (default: 127.0.0.1); 0.0.0.0 exposes the workspace to the "
+        "network, where only the workspace access key guards its mutating APIs",
     )
     parser.add_argument(
         "--allowed-host", action="append", default=[],
