@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 from factory import artifacts, deploy, dispatch
 
@@ -86,8 +86,9 @@ def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -
                 name = entry.get("name", "")
                 if name not in ("summary.json", "apply.log"):
                     continue
-                run["artifacts"].append({"name": name, "url": "/api/artifacts/" + "/".join(
-                    quote(p, safe="") for p in (run["target"], run["run_id"], name))})
+                # The workspace adds the repository scope and fetches with the access key.
+                run["artifacts"].append({"name": name, "url": "/api/artifacts?" + urlencode(
+                    {"target": run["target"], "run": run["run_id"], "name": name})})
                 if name == "summary.json":
                     found = artifacts.lookup(factory, run["target"], run["run_id"], name)
                     if found:

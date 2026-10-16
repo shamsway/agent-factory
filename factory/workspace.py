@@ -25,7 +25,7 @@ from pathlib import Path
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlsplit
 
-from factory import briefing, config, flow, runtime_events, runtime_local, settings
+from factory import artifacts, briefing, config, flow, runtime_events, runtime_local, settings
 from factory.config import Config
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -75,6 +75,8 @@ SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 DECISION_ID = re.compile(r"[0-9a-f]{32}")
 SOURCE_ID = re.compile(r"S[0-9]{1,20}")
 ACCESS_KEY = re.compile(rb"[A-Za-z0-9_-]{32,128}")
+ARTIFACT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+ARTIFACT_BYTES = 8 * 1024 * 1024
 
 
 def _now() -> str:
@@ -993,6 +995,26 @@ class Workspace:
             raise WorkspaceError("theme_unavailable", "Configured repository theme is unavailable.", 503) from exc
         return value
 
+    def artifact(self, slug: str, target: str, run_id: str, name: str) -> tuple[bytes, str]:
+        """One sanitized deployment artifact: only a name listed in the run's manifest whose
+        sha256 still matches. Private plans, journals and unlisted files are never served."""
+        cfg = self.repository_config(slug)
+        if ARTIFACT_NAME.fullmatch(name) is None or name == "manifest.json":
+            raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404)
+        try:
+            path = artifacts.artifact_dir(cfg.factory, target, run_id) / name
+        except ValueError as exc:
+            raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404) from exc
+        try:
+            if path.lstat().st_size > ARTIFACT_BYTES:
+                raise WorkspaceError("artifact_too_large", "Artifact exceeds the serving limit.", 413)
+        except FileNotFoundError as exc:
+            raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404) from exc
+        found = artifacts.lookup(cfg.factory, target, run_id, name)
+        if found is None:
+            raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404)
+        return found
+
     def inspect(self, slug: str, number: int) -> dict:
         self.repository_config(slug)
         envelope, error = self._read_evidence(
@@ -1636,6 +1658,13 @@ class Handler(BaseHTTPRequestHandler):
                 if number >= 2**63:
                     raise WorkspaceError("invalid_request", "number is outside the evidence schema range")
                 self._json(200, self.workspace.inspect(self._repository(values), number))
+                return
+            if target.path == "/api/artifacts":
+                values = _query(target.query, required={"repository", "target", "run", "name"})
+                body, content_type = self.workspace.artifact(
+                    self._repository(values), values["target"], values["run"], values["name"]
+                )
+                self._send(200, content_type, body)
                 return
             if target.path == "/api/codebase":
                 values = _query(target.query, required={"repository"})

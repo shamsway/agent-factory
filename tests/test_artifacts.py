@@ -10,9 +10,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-import urllib.error
-import urllib.request
-from http.server import ThreadingHTTPServer
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -218,54 +216,80 @@ class LookupAndServingTest(unittest.TestCase):
             (fx.run_dir / "apply.log").write_text(f"tampered {SECRET}")
             self.assertIsNone(artifacts.lookup(f, "default", rid, "apply.log"))
 
-    @unittest.skip("MAT-193: artifact serving moves to the workspace; upstream removed dashboard.Handler")
-    def test_dashboard_serves_artifacts_but_never_private_files(self) -> None:
-        from factory import dashboard
+    def test_workspace_serves_artifacts_but_never_private_files(self) -> None:
+        import http.client
+        import os
 
-        with tempfile.TemporaryDirectory() as d:
+        from factory.workspace import Handler, Server, Workspace
+
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(Path(d) / "xdg")}):
             fx = RunFixture(Path(d))
             fx.run()
             rid = "deploy-default-deadbeef-1"
             f = fx.cfg.factory
             (f / "apply-checkout").mkdir()
             (f / "apply-checkout" / "terraform.tfstate").write_text(f"state {SECRET}")
-            (f / "logs" / "worker-1.log").write_text("worker ok")
             (f / "events.jsonl").write_text("pre-contract unsanitized output")
-            (f / "events.jsonl.1.gz").write_bytes(b"pre-contract rotated output")
             (f / "journal-alias").symlink_to(f / "events.jsonl")
-            with mock.patch.object(dashboard, "FACTORY", f, create=True):
-                srv = ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler)
-                threading.Thread(target=srv.serve_forever, daemon=True).start()
-                base = f"http://127.0.0.1:{srv.server_address[1]}"
+            (fx.run_dir / "alias.log").symlink_to(f / "events.jsonl")
+            workspace = Workspace(fx.cfg)
+            srv = Server(("127.0.0.1", 0), Handler, workspace)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            repo = urllib.parse.quote(fx.cfg.repo, safe="")
 
-                def get(path: str):
-                    try:
-                        with urllib.request.urlopen(base + path) as r:
-                            return r.status, r.read().decode()
-                    except urllib.error.HTTPError as e:
-                        e.close()
-                        return e.code, ""
-
+            def get(path: str, auth: bool = True) -> tuple[int, str, str]:
+                headers = {"Host": f"127.0.0.1:{srv.server_port}"}
+                if auth:
+                    headers["X-Factory-Access"] = workspace.access_key
+                connection = http.client.HTTPConnection(*srv.server_address, timeout=4)
                 try:
-                    code, body = get(f"/api/artifacts/default/{rid}/apply.log")
-                    self.assertEqual(code, 200)
-                    self.assertNotIn(SECRET, body)
-                    self.assertEqual(get(f"/api/artifacts/default/{rid}/nope")[0], 404)
-                    self.assertEqual(get("/api/artifacts/default/..%2f..%2fevents.jsonl")[0], 404)
-                    self.assertEqual(get("/api/file?path=logs/worker-1.log"), (200, "worker ok"))
-                    for private in (
-                        "events.jsonl", "events.jsonl.1.gz", "journal-alias",
-                        "apply-checkout/terraform.tfstate",
-                        f"private/{rid}/plan",
-                        f"artifacts/default/{rid}/manifest.json",
-                        "logs/terraform-apply-default-77.log",
-                        "logs/../private/" + rid + "/plan",
-                    ):
-                        self.assertEqual(get("/api/file?path=" + private)[0], 404, private)
+                    connection.request("GET", path, headers=headers)
+                    response = connection.getresponse()
+                    return response.status, response.getheader("Content-Type", ""), response.read().decode()
                 finally:
-                    srv.shutdown()
-                    srv.server_close()
+                    connection.close()
 
+            def artifact(target: str, run: str, name: str, auth: bool = True) -> tuple[int, str, str]:
+                query = urllib.parse.urlencode({"repository": fx.cfg.repo, "target": target, "run": run, "name": name})
+                return get("/api/artifacts?" + query, auth)
+
+            try:
+                code, ctype, body = artifact("default", rid, "apply.log")
+                self.assertEqual((code, ctype), (200, "text/plain; charset=utf-8"))
+                self.assertIn("Apply complete!", body)
+                self.assertNotIn(SECRET, body)
+                code, ctype, body = artifact("default", rid, "summary.json")
+                self.assertEqual((code, json.loads(body)["run_id"]), (200, rid))
+                self.assertEqual(artifact("default", rid, "apply.log", auth=False)[0], 401)
+                for target, run, name in (
+                    ("default", rid, "nope"),
+                    ("default", rid, "manifest.json"),
+                    ("default", rid, "alias.log"),
+                    ("default", rid, "../../events.jsonl"),
+                    ("default", rid, "..%2f..%2fevents.jsonl"),
+                    ("default", "../private/" + rid, "plan"),
+                    ("..", rid, "summary.json"),
+                ):
+                    self.assertEqual(artifact(target, run, name)[0], 404, (target, run, name))
+                # The query form must name the repository and nothing else.
+                self.assertEqual(get(f"/api/artifacts?target=default&run={rid}&name=apply.log")[0], 400)
+                self.assertEqual(get(f"/api/artifacts?repository={repo}&target=default&run={rid}"
+                                     "&name=apply.log&path=events.jsonl")[0], 400)
+                # The workspace has no generic file route that could reach private state.
+                for private in (
+                    "events.jsonl", "journal-alias", "apply-checkout/terraform.tfstate",
+                    f"private/{rid}/plan", f"artifacts/default/{rid}/manifest.json",
+                    "logs/terraform-apply-default-77.log",
+                ):
+                    self.assertEqual(get(f"/api/file?repository={repo}&path=" + private)[0], 404, private)
+                # Tampering after the manifest was written stops serving.
+                (fx.run_dir / "apply.log").write_text(f"tampered {SECRET}")
+                self.assertEqual(artifact("default", rid, "apply.log")[0], 404)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                workspace.close()
 
 if __name__ == "__main__":
     unittest.main()

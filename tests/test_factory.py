@@ -5,6 +5,7 @@ Run: python -m unittest discover -s tests
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -224,6 +225,7 @@ class ConfigTest(unittest.TestCase):
             self.assertGreater(path.stat().st_size, 1024 * 1024)
             self.assertFalse((path.parent / "events.jsonl.1.gz").exists())
             code = """
+import io
 import json
 from pathlib import Path
 from factory import config, lifecycle
@@ -1316,44 +1318,36 @@ unused = ["agent"]
 class DashboardTest(unittest.TestCase):
     def test_dashboard_defaults_to_loopback_bind(self) -> None:
         """the fork keeps loopback as the default bind even though upstream
-        defaults to 0.0.0.0 (MAT-193 reconciles the policy). Checks the parsed
-        value, not the help text, so the two cannot drift apart unnoticed."""
+        defaults to 0.0.0.0. Checks the parsed value, not the help text, so the
+        two cannot drift apart unnoticed."""
         from factory import dashboard
 
         self.assertEqual(dashboard._parser().parse_args([]).host, "127.0.0.1")
 
-    @unittest.skip("MAT-193: loopback bind guard to be reconciled with the workspace access key")
-    def test_dashboard_refuses_non_loopback_bind_without_escape_hatch(self) -> None:
-        """/api/act mutates GitHub with the operator's own `gh`
-        credentials and the dashboard has no auth of its own -- binding
-        beyond loopback must be a hard refusal, not just a --help warning."""
-        with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d))
-            proc = factory(repo, "dashboard", "--host", "0.0.0.0", "--no-open")
-            self.assertEqual(proc.returncode, 1)
-            self.assertIn("refusing to bind", proc.stderr)
-            self.assertIn("FACTORY_DASHBOARD_ALLOW_REMOTE", proc.stderr)
+    def test_dashboard_serves_a_non_loopback_bind_behind_the_access_key(self) -> None:
+        """There is one bind policy: the workspace access key and Host checks guard every
+        API route, so a non-loopback bind starts (doctor WARNs) instead of being refused.
+        The route-level guarantees are in test_workspace."""
+        from types import SimpleNamespace
+        from unittest import mock
 
-    @unittest.skip("MAT-193: loopback bind guard to be reconciled with the workspace access key")
-    def test_dashboard_allows_non_loopback_with_escape_hatch(self) -> None:
+        from factory import dashboard
 
-        with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d))
-            env = {**os.environ, "PYTHONPATH": str(ROOT), "FACTORY_DASHBOARD_ALLOW_REMOTE": "1"}
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "factory", "dashboard", "--host", "127.0.0.1", "--port", "0", "--no-open"],
-                cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-            )
-            try:
-                line = proc.stdout.readline()
-                self.assertIn("listening on 127.0.0.1:0", line)
-            finally:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
+        cfg = SimpleNamespace(dashboard_port=8123, repo="acme/widgets", root=Path("/nonexistent"))
+        server = mock.MagicMock(server_address=("0.0.0.0", 8123))
+        with mock.patch.object(dashboard.config, "load", return_value=cfg), \
+             mock.patch.object(dashboard, "configure"), \
+             mock.patch.object(dashboard, "cfg", cfg, create=True), \
+             mock.patch.object(dashboard, "REPO", cfg.repo, create=True), \
+             mock.patch.object(dashboard, "FACTORY", Path("/nonexistent/.factory"), create=True), \
+             mock.patch.object(dashboard, "CodebaseMonitor"), \
+             mock.patch("factory.workspace.Workspace"), \
+             mock.patch("factory.workspace.Server", return_value=server) as server_class, \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(dashboard.main(["--host", "0.0.0.0", "--no-open"]), 0)
+        self.assertEqual(server_class.call_args.args[0], ("0.0.0.0", 8123))
+        server.serve_forever.assert_called_once()
+        self.assertIn("listening on 0.0.0.0:8123", stdout.getvalue())
 
     def test_triage_llm_online_sends_bearer_header_only_when_key_configured(self) -> None:
         """Same gap as call_llm() and doctor()'s endpoint check, found in a
