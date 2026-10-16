@@ -1714,6 +1714,105 @@ print("Apply complete! Resources: 1 added, 0 changed, 0 destroyed.", flush=True)
 """
 
 
+class ObservationTest(unittest.TestCase):
+    """Post-run observations are evidence only: recorded, deduplicated, projected,
+    and never a change to a terminal run or a reason to select its ticket again."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        toml = '[apply]\nenabled = true\n\n[apply.targets.app]\ndir = "deploy/app"\nadapter = "observing"\n'
+        self.cfg = config.load(make_repo(Path(self.tmp.name), toml))
+        dispatch.configure(self.cfg)
+        apply.configure(self.cfg)
+        self.cfg.factory.mkdir(parents=True, exist_ok=True)
+        self.events = dispatch.EVENTS
+        self.answers: list[list[dict]] = []
+        self.seen: list[str] = []
+        test = self
+
+        class Observing(deploy.FakeDeployAdapter):
+            def observe(self, target, run, env):
+                test.seen.append(run.run_id)
+                answer = test.answers.pop(0) if test.answers else []
+                if answer == "boom":
+                    raise RuntimeError("platform unreachable")
+                return answer
+
+        self.adapters = mock.patch.dict(deploy.ADAPTERS, {"observing": Observing})
+        self.adapters.start()
+        self.addCleanup(self.adapters.stop)
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.run = deploy.DeployRun(run_id="deploy-app-c0ffee00-1", target="app", commit="c0ffee00" * 5, ticket=7,
+                                    attempt=1, pr=3, status=deploy.DeployStatus.SUCCEEDED, started_at=now,
+                                    completed_at=now)
+        deploy.record_deploy_run(self.run, events_path=self.events)
+        self.candidate = {"pr": 3, "ticket": 7, "commit": self.run.commit, "head_commit": self.run.commit,
+                          "reviewDecision": "APPROVED",
+                          "latestReviews": [{"state": "APPROVED", "commit": {"oid": self.run.commit}}]}
+
+    def apply_pass(self, *args: str):
+        with mock.patch.object(config, "load", return_value=self.cfg), \
+             mock.patch.object(dispatch, "run"), \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=[self.candidate]), \
+             mock.patch.object(apply, "touches_target_dir", return_value=True), \
+             mock.patch.object(deploy, "find_unauthorized_direct_merges", return_value=[]), \
+             mock.patch.object(apply, "apply_one") as apply_one, \
+             mock.patch.object(apply, "log") as log:
+            apply.main(list(args))
+        apply_one.assert_not_called()  # the observed ticket is terminal and never re-selected
+        return " ".join(str(c.args[0]) for c in log.call_args_list)
+
+    def observations(self) -> list[dict]:
+        return deploy.observations_by_run(lifecycle.read_events(self.events)).get(self.run.run_id, [])
+
+    def test_records_changes_only_and_stops_after_a_final_observation(self) -> None:
+        merged = {"kind": "platform_pr", "state": "merged", "url": "https://example.test/pr/9"}
+        closed = {"kind": "rollout", "state": "failed", "detail": "rollout failed", "attention": True, "final": True}
+        self.answers = [[merged], [merged], [closed], [merged]]
+        self.apply_pass()
+        self.apply_pass()
+        lines = self.apply_pass()
+        self.apply_pass()
+        self.assertIn("observed rollout failed for deploy-app-c0ffee00-1 (needs attention)", lines)
+        self.assertEqual([(o["kind"], o["state"]) for o in self.observations()],
+                         [("platform_pr", "merged"), ("rollout", "failed")])
+        self.assertEqual(len(self.seen), 3)  # nothing is asked after the final observation
+
+        state = deploy.get_target_state("app", events_path=self.events)
+        self.assertEqual(state.latest_run.status, deploy.DeployStatus.SUCCEEDED)
+        self.assertIn(7, state.terminal_tickets)
+        self.assertNotIn(7, state.unacknowledged_failed_tickets)
+
+        from factory import deployment_view
+        view = deployment_view.project(self.cfg.factory, lifecycle.read_events(self.events))
+        (shown,) = view["runs"]
+        self.assertEqual((shown["status"], shown["needs_attention"], view["attention"]), ("succeeded", True, 1))
+        self.assertEqual([o["state"] for o in shown["observations"]], ["merged", "failed"])
+
+    def test_adapter_errors_are_logged_and_never_stop_the_pass(self) -> None:
+        self.answers = ["boom"]
+        lines = self.apply_pass()
+        self.assertIn("observations skipped: RuntimeError: platform unreachable", lines)
+        self.assertEqual(self.observations(), [])
+
+    def test_dry_run_and_old_or_unsuccessful_runs_are_not_observed(self) -> None:
+        self.apply_pass("--dry-run")
+        self.assertEqual(self.seen, [])
+        state = deploy.get_target_state("app", events_path=self.events)
+        later = time.time() + deploy.OBSERVE_WINDOW_SEC + 60
+        self.assertEqual(deploy.runs_to_observe(state, {}, now=later), [])
+        failed = deploy.DeployRun(run_id="deploy-app-0badf00d-1", target="app", commit="0badf00d", ticket=8,
+                                  attempt=1, status=deploy.DeployStatus.FAILED, started_at=self.run.started_at,
+                                  completed_at=self.run.completed_at)
+        deploy.record_deploy_run(failed, events_path=self.events)
+        state = deploy.get_target_state("app", events_path=self.events)
+        self.assertEqual([r.run_id for r in deploy.runs_to_observe(state, {})], [self.run.run_id])
+
+    def test_base_adapter_observes_nothing(self) -> None:
+        self.assertEqual(deploy.TerraformDeployAdapter().observe(None, self.run, {}), [])
+
+
 class UnknownAdapterTest(unittest.TestCase):
     """An unregistered adapter name must never fall back to Terraform."""
 

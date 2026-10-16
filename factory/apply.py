@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from factory import artifacts, config, deploy, diagnostics, dispatch, incidents
+from factory import artifacts, config, deploy, diagnostics, dispatch, incidents, lifecycle
 from factory.config import Config
 
 cfg: Config
@@ -328,6 +328,23 @@ def apply_escalate(
     except Exception as exc:  # noqa: BLE001 - notifications are best-effort after escalation is recorded
         log(f"#{n}: notification failed: {exc}")
     log(f"#{n}: apply escalated ({reason})")
+
+
+def observe_recent_runs(target: config.DeployTarget, tstate: deploy.TargetState) -> None:
+    """Record adapter observations about recent finished runs. Evidence only: a
+    failure here is logged and never stops the pass or touches run status."""
+    try:
+        adapter = deploy.get_adapter(target.adapter)
+        observed = deploy.observations_by_run(lifecycle.read_events(dispatch.EVENTS))
+        for run in deploy.runs_to_observe(tstate, observed):
+            found = adapter.observe(target, run, apply_env())
+            for row in deploy.record_observations(run, found or [], observed.get(run.run_id, []),
+                                                  events_path=dispatch.EVENTS):
+                flag = " (needs attention)" if row["attention"] else ""
+                log(f"#{run.ticket}: observed {row['kind']} {row['state']} for {run.run_id}{flag}")
+    except Exception as exc:  # noqa: BLE001 - observations are optional evidence
+        detail = artifacts.sanitize(str(exc), artifacts.secret_values(cfg.apply_env, os.environ))
+        log(f"target `{target.name}`: observations skipped: {type(exc).__name__}: {detail}")
 
 
 def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: deploy.DeployAdapter | None = None) -> bool:
@@ -673,6 +690,9 @@ def main(argv: list[str]) -> int:
                         continue
                     log(f"target `{target_name}`: {rec_msg}")
                     tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
+
+                if not args.dry_run:
+                    observe_recent_runs(target, tstate)
 
                 if tstate.unacknowledged_failed_tickets and cfg.apply_supersession == "sequential":
                     log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.unacknowledged_failed_tickets)})")

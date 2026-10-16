@@ -23,6 +23,9 @@ const deployments = {
     verification:{verdict:status==='succeeded'?'healthy':'unhealthy',elapsed_sec:3,timeout_sec:60,
                   items:[{kind:'check',name:'healthz',state:'healthy',detail:'first line\n<img src=x onerror=alert(1)>'}]},
     result:null,publication:{pr:{status:'ok'}},
+    needs_attention:status==='succeeded',
+    observations:status==='succeeded'?[{at:'2026-10-17T00:00:00Z',kind:'platform_pr',state:'closed',
+      detail:'closed without merge <b>x</b>',url:'https://github.com/o/r/pull/9',attention:true,final:true}]:[],
     artifacts:[{name:'apply.log',url:'/api/artifacts?target=default&run=fixture-'+status+'&name=apply.log'},
                {name:'evil',url:'https://example.invalid/steal'}]}))
 };
@@ -54,7 +57,10 @@ const deployments = {
     await runs.first().waitFor();
     assert.equal(await runs.count(), 7);
     for (const state of states) assert.equal(await page.locator(`details.deploy-run summary .signal:text-is("${state}")`).count(), 1, state);
-    assert.equal(await page.locator('details.deploy-run[open]').count(), 1, 'only the unresolved failure opens');
+    assert.equal(await page.locator('details.deploy-run[open]').count(), 2, 'the unresolved failure and the run needing attention open');
+    assert.equal(await page.locator('details.deploy-run summary:has-text("needs attention")').count(), 1);
+    assert.ok((await page.locator('details.deploy-run[open]').last().textContent()).includes('closed without merge <b>x</b>'));
+    assert.equal(await page.locator('details.deploy-run b:text-is("x")').count(), 0, 'observation detail is escaped');
     assert.equal(await page.locator('img').count(), 0, 'verification detail is escaped');
     assert.equal(await page.locator('[data-artifact-name="evil"]').count(), 0, 'non-workspace artifact URLs are dropped');
     await page.selectOption('[data-deploy-filter="status"]', 'failed');
@@ -73,6 +79,6 @@ const deployments = {
     assert.equal(await page.locator('details.deploy-run summary .signal').textContent(), 'succeeded');
     assert.deepEqual(errors, []);
     if (process.env.SCREENSHOT) await page.screenshot({path:process.env.SCREENSHOT, fullPage:true});
-    console.log('PASS: workspace Deployments view: seven states, filters, scoped artifact viewer and text safety');
+    console.log('PASS: workspace Deployments view: seven states, observations, filters, scoped artifact viewer and text safety');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exit(1); });

@@ -121,6 +121,32 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 4. `verify(ctx)`: Post-apply health verification under the target's `verify` policy (see below). A failed verification, or a verifier that raises, records the run `FAILED`.
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
+7. `observe(target, run, env)`: Optional post-run observations (see below). The base adapter observes nothing.
+
+### Post-run observations
+
+Some targets finish their run before the change is live, for example an adapter whose
+`SUCCEEDED` means "a PR is open for a human to merge". On each later non-dry-run apply pass,
+Factory calls `observe()` for every `SUCCEEDED` run on the target that:
+
+- completed within the last 7 days (`deploy.OBSERVE_WINDOW_SEC`), and
+- has no final observation yet.
+
+Each observation is a dict:
+
+- `kind` and `state` (required)
+- optional `detail` and `url`
+- `attention`: a human should look, for example a PR closed without merge
+- `final`: stop observing the run
+
+Factory appends a `deploy_observation` journal row only when the `(kind, state)` pair changes.
+The deployment projection lists the rows under the run, and the latest observation per kind
+sets `needs_attention`. Such a run stays in the open part of the history, and the workspace
+Deployments view shows it expanded.
+
+Observations are evidence only. They never change the run's status, never feed target-state
+replay, and never make the ticket selectable again. An adapter that raises is logged, and
+the pass continues.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 

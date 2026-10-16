@@ -9,6 +9,7 @@ auto-retried.
 
 from __future__ import annotations
 
+import calendar
 import fcntl
 import os
 import re
@@ -905,6 +906,17 @@ class DeployAdapter:
         """Inspect and reconcile an interrupted run."""
         return False, f"interrupted run {interrupted_run.run_id} requires operator reconciliation"
 
+    def observe(self, target: Any, run: DeployRun, env: dict[str, str]) -> list[dict]:
+        """Observations about a recent SUCCEEDED run, made on a later apply pass.
+
+        For targets whose run ends before the change is live, such as a PR left
+        for a human merge. Each observation is a dict with `kind` and `state`, plus
+        optional `detail`, `url`, `attention` (a human should look) and `final`
+        (stop observing this run). Observations are evidence only. They never
+        change the run's status and never make its ticket selectable again.
+        """
+        return []
+
 
 def _safe_decode_stream(stream: Any) -> str:
     """Safely decode bytes or string stream into a string without TypeError."""
@@ -1121,6 +1133,64 @@ class FakeDeployAdapter(DeployAdapter):
             )
             return True, "interrupted run reconciled automatically by fake adapter"
         return False, f"fake adapter requires operator reconciliation for {interrupted_run.run_id}"
+
+
+OBSERVE_WINDOW_SEC = 7 * 24 * 3600
+OBSERVATION_KEYS = ("kind", "state", "detail", "url", "attention", "final")
+
+
+def observations_by_run(rows: list[dict]) -> dict[str, list[dict]]:
+    """Recorded `deploy_observation` rows per run, oldest first."""
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get("event") == "deploy_observation" and row.get("run_id"):
+            out.setdefault(str(row["run_id"]), []).append(row)
+    return out
+
+
+def runs_to_observe(state: TargetState, observed: dict[str, list[dict]], now: float | None = None) -> list[DeployRun]:
+    """SUCCEEDED runs that completed inside the window and have no final observation."""
+    now = time.time() if now is None else now
+    out = []
+    for run in state.runs:
+        if run.status != DeployStatus.SUCCEEDED or not run.completed_at:
+            continue
+        try:
+            completed = calendar.timegm(time.strptime(run.completed_at, "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            continue
+        if now - completed > OBSERVE_WINDOW_SEC:
+            continue
+        if any(row.get("final") for row in observed.get(run.run_id, [])):
+            continue
+        out.append(run)
+    return out
+
+
+def record_observations(run: DeployRun, found: list[dict], observed: list[dict],
+                        events_path: Path | None = None) -> list[dict]:
+    """Append each observation whose (kind, state) differs from the last one recorded
+    for its kind on this run. Returns the rows written."""
+    last = {row.get("kind"): row.get("state") for row in observed}
+    written = []
+    for item in found:
+        if not isinstance(item, dict) or not item.get("kind") or not item.get("state"):
+            continue
+        if last.get(item["kind"]) == item["state"]:
+            continue
+        row = {"event": "deploy_observation", "run_id": run.run_id, "target": run.target, "ticket": run.ticket,
+               **{key: item[key] for key in OBSERVATION_KEYS if key in item}}
+        row["attention"] = bool(row.get("attention"))
+        row["final"] = bool(row.get("final"))
+        if events_path is not None:
+            lifecycle.append(events_path, {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **row})
+        else:
+            from factory import dispatch
+            dispatch.record(row.pop("event"), **row)
+            row["event"] = "deploy_observation"
+        last[item["kind"]] = item["state"]
+        written.append(row)
+    return written
 
 
 def reconcile_interrupted_run(
