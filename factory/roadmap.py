@@ -708,6 +708,15 @@ def collect(cfg, number: int | None = None, *, deadline: float | None = None) ->
                                         if event["baseline"]["initiative"] == initiative}) > plan.LINKS:
             _notice(result, f"Initiative #{initiative} implementation evidence stops after {plan.LINKS} tickets.")
 
+        delivery = row["delivery"]
+        if isinstance(delivery.get("verified"), dict) and isinstance(canonical, dict):
+            delivery["verified"] = outcomes.verified_delivery(
+                canonical["sha256"],
+                {ticket: (accepted_rows[ticket]["baseline"].get("sha256") if ticket in accepted_rows else None)
+                 for ticket in linked},
+                events,
+            )
+
         for ticket in linked:
             if time.monotonic() >= stop:
                 failed(scratch, EvidenceError("collection_timeout", "Roadmap collection deadline exceeded.", "roadmap"))

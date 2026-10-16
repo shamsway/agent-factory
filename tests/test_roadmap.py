@@ -393,6 +393,36 @@ class RoadmapTest(unittest.TestCase):
         self.assertEqual(recovered["sections"]["Plan"], "Revised live plan")
         self.assertEqual(recovered["drift"][0]["status"], "changed")
 
+    def test_verified_deploy_run_of_a_bound_slice_sets_verified_deployment(self):
+        from factory import deploy
+
+        parent = issue(50, initiative_body("Plan"), labels=("initiative",), title="Parent")
+        baseline = binding.from_issue(self.cfg, 50, parent)
+        ticket_body = binding.render(baseline)
+        self.accepted(baseline, ticket_body)
+        child = issue(7, ticket_body, labels=(), title="Slice", state="closed")
+        deploy.record_deploy_run(deploy.DeployRun(
+            run_id="deploy-app-00000007-1", target="app", commit="c" * 40, ticket=7, attempt=1,
+            status=deploy.DeployStatus.SUCCEEDED, started_at=AT, completed_at=AT,
+            verification={"version": 1, "verdict": "healthy", "items": [{"kind": "check", "state": "healthy"}]},
+        ), events_path=self.cfg.factory / "events.jsonl")
+        responses = {
+            f"repos/{REPO}/issues/50": parent,
+            f"repos/{REPO}/issues/7": child,
+            f"repos/{REPO}/issues/7/dependencies/blocked_by": [],
+        }
+        verified = self.collect(responses, 50)["plans"][0]["delivery"]["verified"]
+        self.assertEqual(verified["deployment"]["status"], "verified")
+        self.assertEqual(verified["health"]["status"], "verified")
+        self.assertEqual(verified["deployment"]["evidence"][0]["run_id"], "deploy-app-00000007-1")
+
+        # A revised plan makes the same deployment evidence for a stale revision.
+        responses[f"repos/{REPO}/issues/50"] = issue(50, initiative_body("Revised plan"), labels=("initiative",),
+                                                     title="Parent")
+        stale = self.collect(responses, 50)["plans"][0]["delivery"]["verified"]
+        self.assertEqual(stale["deployment"]["status"], "unknown")
+        self.assertEqual(stale["deployment"]["evidence"][0]["binding"], "stale_revision")
+
     def test_owner_outcomes_keep_comment_coverage_and_machine_verification_separate(self):
         parent = issue(
             50,

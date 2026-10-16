@@ -857,6 +857,15 @@ branches, or merge state.
   declared owner's GitHub identity. They are not machine deployment/health proof
   or permission to publish/install. Missing, partial, edited or superseded evidence
   cannot establish current acceptance.
+  Machine verification comes from recorded deployments instead
+  (`outcomes.verified_delivery`). For each ticket linked to the initiative, the
+  latest `deploy_run` per target counts only if the ticket's accepted plan binding
+  matches the current canonical revision. Deployment is `verified` only when every
+  counted run succeeded with a healthy, non-empty verification record. One failed
+  or pending run makes it `failed` or `pending`, and a success without health
+  evidence makes it `unverified`. Superseded, acknowledged, skipped, stale-revision
+  and unbound runs stay in the evidence list but never count. Each evidence row
+  links its `summary.json` artifact.
 
   Theme choices persist in this browser: Cyberpunk, GPUFlo, District, Factory,
   ROCm, Porcelain, Sandstone, Slate and Forest. Motion respects reduced-motion

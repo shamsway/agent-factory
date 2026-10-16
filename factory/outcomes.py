@@ -5,9 +5,9 @@ import json
 import re
 import unicodedata
 from datetime import datetime
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
-from factory import binding, config, plan
+from factory import binding, config, deploy, plan
 
 KINDS = ("released", "installed", "healthy", "accepted")
 MARKER = "<!-- factory-outcome:v1 -->"
@@ -429,4 +429,64 @@ def project(cfg: config.Config, raw_issue: object, comments: object, *, complete
             "marker_comments": marker_comments,
             "reason": coverage_reason,
         },
+    }
+
+
+def _run_state(run: deploy.DeployRun) -> str:
+    verification = run.verification if isinstance(run.verification, dict) else {}
+    observed = verification.get("verdict") == "healthy" and bool(verification.get("items"))
+    if run.status == deploy.DeployStatus.SUCCEEDED:
+        return "verified" if observed else "unverified"
+    if run.status == deploy.DeployStatus.FAILED:
+        return "failed"
+    if run.status in (deploy.DeployStatus.PENDING, deploy.DeployStatus.RUNNING):
+        return "pending"
+    return run.status.value  # skipped, superseded, acknowledged: no deployment of this revision
+
+
+def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None], rows: list[dict]) -> dict:
+    """Machine deployment and health verification for one initiative.
+
+    ``bindings`` maps each linked ticket to the canonical plan revision it was admitted
+    against (None when no accepted binding is retained). ``rows`` is the journal. Only
+    the latest recorded run per (ticket, target) is considered, and it counts only when
+    the ticket is bound to the current canonical revision. A deployment is verified when
+    it succeeded and its recorded health evidence says healthy. Failed, pending,
+    superseded, skipped or unobserved runs never read as verified.
+    """
+    evidence = []
+    for target, state in sorted(deploy.replay_rows(rows).items()):
+        for ticket, runs in sorted(state.runs_by_ticket.items()):
+            if ticket not in bindings or not runs:
+                continue
+            run = runs[-1]
+            bound = bindings[ticket]
+            verification = run.verification if isinstance(run.verification, dict) else {}
+            evidence.append({
+                "ticket": ticket, "target": target, "run_id": run.run_id, "commit": run.commit,
+                "outcome": run.status.value, "verdict": verification.get("verdict"),
+                "completed_at": run.completed_at, "state": _run_state(run),
+                "binding": "unbound" if bound is None else "current" if bound == canonical_sha256 else "stale_revision",
+                "summary_url": "/api/artifacts?" + urlencode({"target": target, "run": run.run_id, "name": "summary.json"}),
+            })
+    counted = [item for item in evidence
+               if item["binding"] == "current" and item["state"] in ("verified", "unverified", "failed", "pending")]
+    states = {item["state"] for item in counted}
+    if not counted:
+        deployment = "unknown"
+    elif "failed" in states:
+        deployment = "failed"
+    elif "pending" in states:
+        deployment = "pending"
+    elif states == {"verified"}:
+        deployment = "verified"
+    else:
+        deployment = "unverified"
+    verdicts = {item["verdict"] for item in counted}
+    health = ("unhealthy" if "unhealthy" in verdicts
+              else "verified" if deployment == "verified"
+              else "unknown")
+    return {
+        "deployment": {"status": deployment, "evidence": evidence},
+        "health": {"status": health, "evidence": [item for item in counted if item["verdict"]]},
     }

@@ -212,5 +212,69 @@ class OutcomeTest(unittest.TestCase):
         self.assertTrue(all(value["status"] == "unknown" for value in missing["attributed"].values()))
 
 
+
+class VerifiedDeliveryTest(unittest.TestCase):
+    """Recorded deploy_run evidence feeds the outcome's machine-verified deployment state."""
+
+    CURRENT, OLD = "a" * 64, "b" * 64
+
+    @staticmethod
+    def run_row(ticket, status, *, target="app", attempt=1, verdict=None, items=True):
+        from factory import deploy
+
+        run = deploy.DeployRun(
+            run_id=f"deploy-{target}-{ticket:08d}-{attempt}", target=target, commit=f"{ticket:040d}",
+            ticket=ticket, attempt=attempt, status=deploy.DeployStatus(status),
+            started_at="2026-10-16T00:00:00Z", completed_at="2026-10-16T00:05:00Z",
+            verification=({"version": 1, "verdict": verdict, "items": [{"kind": "check", "state": verdict}] if items else []}
+                          if verdict else None),
+        )
+        return {"event": "deploy_run", "at": "2026-10-16T00:05:00Z", **run.to_dict()}
+
+    def verified(self, bindings, rows):
+        return outcomes.verified_delivery(self.CURRENT, bindings, rows)
+
+    def test_healthy_run_for_a_current_binding_is_verified_with_evidence_links(self) -> None:
+        result = self.verified({7: self.CURRENT}, [self.run_row(7, "succeeded", verdict="healthy")])
+        self.assertEqual(result["deployment"]["status"], "verified")
+        self.assertEqual(result["health"]["status"], "verified")
+        (item,) = result["deployment"]["evidence"]
+        self.assertEqual((item["ticket"], item["target"], item["state"], item["binding"]), (7, "app", "verified", "current"))
+        self.assertEqual(item["summary_url"],
+                         "/api/artifacts?target=app&run=deploy-app-00000007-1&name=summary.json")
+
+    def test_failed_superseded_and_unverified_runs_never_read_as_verified(self) -> None:
+        cases = {
+            "failed": ([self.run_row(7, "failed", verdict="unhealthy")], "failed", "unhealthy"),
+            "no health evidence": ([self.run_row(7, "succeeded")], "unverified", "unknown"),
+            "nothing observed": ([self.run_row(7, "succeeded", verdict="healthy", items=False)], "unverified", "unknown"),
+            "superseded": ([self.run_row(7, "superseded")], "unknown", "unknown"),
+            "acknowledged": ([self.run_row(7, "acknowledged")], "unknown", "unknown"),
+            "skipped": ([self.run_row(7, "skipped")], "unknown", "unknown"),
+            "running": ([self.run_row(7, "running")], "pending", "unknown"),
+            "latest run failed after a verified one": (
+                [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(7, "failed", attempt=2)], "failed", "unknown"),
+            "one of two tickets unverified": (
+                [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(8, "succeeded")], "unverified", "unknown"),
+        }
+        for name, (rows, deployment, health) in cases.items():
+            with self.subTest(name):
+                result = self.verified({7: self.CURRENT, 8: self.CURRENT}, rows)
+                self.assertEqual(result["deployment"]["status"], deployment)
+                self.assertEqual(result["health"]["status"], health)
+
+    def test_stale_or_unbound_revisions_do_not_count(self) -> None:
+        rows = [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(8, "succeeded", verdict="healthy")]
+        result = self.verified({7: self.OLD, 8: None}, rows)
+        self.assertEqual(result["deployment"]["status"], "unknown")
+        self.assertEqual({i["ticket"]: i["binding"] for i in result["deployment"]["evidence"]},
+                         {7: "stale_revision", 8: "unbound"})
+        self.assertEqual(result["health"], {"status": "unknown", "evidence": []})
+
+    def test_runs_for_unlinked_tickets_are_ignored(self) -> None:
+        result = self.verified({7: self.CURRENT}, [self.run_row(9, "succeeded", verdict="healthy")])
+        self.assertEqual(result["deployment"], {"status": "unknown", "evidence": []})
+
+
 if __name__ == "__main__":
     unittest.main()
