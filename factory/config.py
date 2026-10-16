@@ -59,7 +59,11 @@ LABELS = {
 # Word-bounded strong signals only: bare words like "internal"/"private" are ordinary English.
 DEFAULT_LEAK_PATTERN = (r"\.(?:corp|internal|intranet|lan)\b|\bconfidential\b|\bproprietary\b"
                         r"|\bjira\b|\bconfluence\b|\.atlassian\.net\b"
-                        r"|AKIA[0-9A-Z]{16}|-----BEGIN[ A-Z]*PRIVATE KEY-----")
+                        r"|AKIA[0-9A-Z]{16}|-----BEGIN[ A-Z]*PRIVATE KEY-----"
+                        # Credential shapes Factory hosts hold: GitHub classic/fine-grained
+                        # tokens, Anthropic keys, 1Password service-account tokens.
+                        r"|\bgh[pousr]_[A-Za-z0-9]{36,}|\bgithub_pat_[A-Za-z0-9_]{22,}"
+                        r"|\bsk-ant-[A-Za-z0-9_-]{20,}|\bops_eyJ[A-Za-z0-9_-]{20,}")
 DEFAULT_WORKER = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
 DEFAULT_CHORE_WORKER = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
