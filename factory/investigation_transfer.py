@@ -4,21 +4,23 @@ No logs/config/provider prose, sockets, signing identities or automatic sends.
 Hashes detect substitution, not coherent forgery by the exporting Factory service account.
 """
 import argparse
-from contextlib import contextmanager
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import stat
 import tempfile
 import time
-from types import SimpleNamespace
+from contextlib import contextmanager
+from pathlib import Path
 
-from . import artifacts, config, incidents, investigation_evidence as evidence
-from . import investigation_model as model, investigation_publication as publication
-from . import investigation_outbox as outbox, investigation_scope as scope
+from . import artifacts, config, incidents
+from . import investigation_evidence as evidence
+from . import investigation_model as model
+from . import investigation_outbox as outbox
+from . import investigation_publication as publication
+from . import investigation_scope as scope
 
 MAX_BUNDLE = 256 * 1024
 MAX_TRANSFER_AGE = 300
@@ -44,15 +46,14 @@ def key(repo, incident, run):
 
 def read_bundle(path):
     path = Path(path).absolute()
-    with evidence.directory(path.parent) as fd:
-        with evidence.file_at(fd, (path.name,)) as handle:
-            raw = handle.read(MAX_BUNDLE + 1)
+    with evidence.directory(path.parent) as fd, evidence.file_at(fd, (path.name,)) as handle:
+        raw = handle.read(MAX_BUNDLE + 1)
     evidence.require(len(raw) <= MAX_BUNDLE, 'transfer_budget')
     try:
         return json.loads(raw, object_pairs_hook=evidence.unique_pairs)
     except evidence.EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any decode error must fail closed
         raise evidence.EvidenceRefused('transfer_invalid') from None
 
 
@@ -286,7 +287,7 @@ def main(argv):
     except evidence.EvidenceRefused as error:
         code = str(error)
         result, exit_code = {'ok': False, 'code': code if code in EXPORT_FAILURE_CODES else 'transfer_unavailable'}, 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - withhold raw export errors
         result, exit_code = {'ok': False, 'code': 'transfer_unavailable'}, 1
     print(json.dumps(result))
     return exit_code

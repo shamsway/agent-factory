@@ -4,13 +4,13 @@ from __future__ import annotations
 import copy
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from factory import config, deploy, incidents
@@ -115,7 +115,7 @@ class IncidentTest(unittest.TestCase):
         def first():
             try:
                 self.deliver()
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - record any thread failure for the main thread to assert
                 failures.append(exc)
 
         self.client.before_create = block
@@ -182,7 +182,8 @@ class IncidentTest(unittest.TestCase):
             with self.subTest(status=status):
                 other = failed(ticket=status, target=f"target-{status}")
                 rid = incidents.enqueue(self.factory, self.client.repo, other)
-                self.client.before_create = lambda: (_ for _ in ()).throw(incidents.RequestRefused(status))
+                self.client.before_create = lambda *, status=status: (
+                    (_ for _ in ()).throw(incidents.RequestRefused(status)))
                 incidents.deliver(self.factory, self.client, only=rid)
                 row = incidents.read(self.factory / "incidents" / (rid + ".json"))
                 self.assertFalse(row["uncertain"])
@@ -335,10 +336,13 @@ class TransportTest(unittest.TestCase):
     def test_transport_and_server_errors_keep_unknown_create_outcome(self):
         client = incidents.GitHub(SimpleNamespace(repo="acme/widgets"))
         for message in ("network lost PRIVATE", "gh: server failure (HTTP 503)"):
-            with self.subTest(message=message), mock.patch.object(incidents.subprocess, "run", return_value=
-                    subprocess.CompletedProcess([], 1, "", message)):
-                with self.assertRaises(RuntimeError):
-                    client.api("repos/acme/widgets/issues", {}, "POST")
+            with (
+                self.subTest(message=message),
+                mock.patch.object(incidents.subprocess, "run",
+                                  return_value=subprocess.CompletedProcess([], 1, "", message)),
+                self.assertRaises(RuntimeError),
+            ):
+                client.api("repos/acme/widgets/issues", {}, "POST")
 
     def test_identity_is_process_environment_not_install_credentials(self):
         cfg = SimpleNamespace(repo="acme/widgets", install={"env": {"GH_TOKEN": "DISPATCHER"}},

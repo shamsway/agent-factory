@@ -1,8 +1,15 @@
 """Root-only metadata checks. Never opens key; never emits provider/config text."""
-import hashlib,json,os,stat,sys,time
+import hashlib
+import json
+import stat
+import sys
+import time
 from pathlib import Path
+
+from factory import investigation_evidence as e
+from factory import publisher_status
 from factory.publisher_credentials import protected_read
-from factory import investigation_evidence as e,publisher_status
+
 POLICY=Path('/etc/factory-publisher/policy.json')
 STATE=Path('/var/lib/factory-publisher/state')
 LOGIN='shamsway-factory-findings[bot]'
@@ -56,5 +63,5 @@ def after(work):
 if __name__=='__main__':
     try:
         {'before':before,'after':after}[sys.argv[1]](Path(sys.argv[2]))
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail closed with a fixed refusal; never echo error text
         print('{"state":"refused","code":"a2_metadata_check_failed"}',file=sys.stderr);sys.exit(1)

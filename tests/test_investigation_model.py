@@ -2,15 +2,16 @@
 import copy
 import json
 import os
-from pathlib import Path
 import threading
 import time
 import unittest
-from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
-from factory import config, investigation_model as model, incidents, verify_secrets
+from factory import config, incidents, verify_secrets
 from factory import investigation_evidence as evidence
+from factory import investigation_model as model
 from tests import test_investigation_boundary as fixtures
 
 NOW, SECRET = fixtures.NOW, fixtures.SECRET
@@ -108,7 +109,7 @@ class ModelTests(unittest.TestCase):
         for case in ("content_not_json", "fenced", "usage_shape", "usage_total",
                      "finish_reason", "hash_mismatch", "schema", "refs"):
             with self.subTest(case=case):
-                state = self.call(client=lambda _, payload: mutate(case, payload))
+                state = self.call(client=lambda _, payload, *, case=case: mutate(case, payload))
                 self.assertEqual(state["state"], "failed")
                 self.assertEqual(state["code"], "invalid_response")
                 self.assertEqual(state["attempts"][-1]["validation_reason"], case)
@@ -157,7 +158,7 @@ class ModelTests(unittest.TestCase):
         for mutation in ({"text": SECRET}, {"action": "curl secret"},
                          {"findings": [{"code": "OOM_EVENT", "refs": ["e0001"]}]}):
             with self.subTest(mutation=mutation):
-                def hostile(p, payload):
+                def hostile(p, payload, *, mutation=mutation):
                     result = {"projection_sha256": json.loads(payload["messages"][1]["content"])["projection_sha256"],
                               "outcome": "proposal", "findings": [{"code": "OOM_EVENT", "refs": ["e0004"]}],
                               "action": "REVIEW_OOM", **mutation}
@@ -217,7 +218,7 @@ class ModelTests(unittest.TestCase):
     def test_definite_transient_retry_and_cumulative_budget(self):
         for code in sorted(model.RETRYABLE):
             calls = []
-            def provider(p, payload):
+            def provider(p, payload, *, code=code, calls=calls):
                 calls.append(payload)
                 return {"status": "retryable", "code": code} if len(calls) == 1 else self.wire(payload)
             state = self.call(client=provider)
@@ -247,7 +248,7 @@ class ModelTests(unittest.TestCase):
         state = self.call(client=lambda *_: {"status": "uncertain", "code": "transport_timeout"})
         path = next((self.cfg.factory / "investigations").glob("*.json"))
         original = path.read_bytes()
-        kwargs = dict(reason="provider_configuration", now=NOW + 2)
+        kwargs = {"reason": "provider_configuration", "now": NOW + 2}
         with self.assertRaisesRegex(model.ModelRefused, "uncertain_spend_ack_required"):
             model.reset(self.cfg, self.fixture.root_id, self.fixture.run.run_id, **kwargs)
         self.cfg.investigation.update(model="corrected-model", max_requests=3, token_budget=262144)
@@ -264,7 +265,7 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(result["resets"][0]["acknowledge_uncertain"])
 
     def test_invalid_answer_has_honest_escalation_and_manual_recovery(self):
-        state = self.call(client=lambda *_: {"status": "failed", "code": "http_rejected"})
+        self.call(client=lambda *_: {"status": "failed", "code": "http_rejected"})
         body = model.prepare(self.cfg, self.fixture.root_id, self.fixture.run.run_id, now=NOW + 2).body
         self.assertIn("model request failed", body)
         self.assertNotIn("Evidence is insufficient", body)
@@ -482,7 +483,7 @@ class ModelTests(unittest.TestCase):
 
     def test_provider_tokens_model_tool_calls_and_size_validated(self):
         for mutation in ("tokens", "model", "tool", "length", "size"):
-            def invalid(p, payload):
+            def invalid(p, payload, *, mutation=mutation):
                 wire = self.wire(payload)
                 body = json.loads(wire["body"])
                 if mutation == "tokens": body["usage"]["completion_tokens"] = 99999
@@ -498,7 +499,7 @@ class ModelTests(unittest.TestCase):
         for code, action, ref in (("PLACEMENT_CONSTRAINTS", "REVIEW_CONSTRAINTS", "e0002"),
                                  ("RESOURCE_CPU", "REVIEW_CPU", "e0002"),
                                  ("RESOURCE_MEMORY", "REVIEW_MEMORY", "e0002")):
-            def supported(p, payload):
+            def supported(p, payload, *, code=code, action=action, ref=ref):
                 return self.wire(payload, {"projection_sha256": json.loads(payload["messages"][1]["content"])["projection_sha256"],
                     "outcome": "proposal", "findings": [{"code": code, "refs": [ref]}], "action": action})
             self.assertEqual(self.call(client=supported)["state"], "complete")
@@ -580,6 +581,7 @@ class ModelTests(unittest.TestCase):
 class ModelConfigurationTests(unittest.TestCase):
     def test_host_only_settings_and_no_key_repr(self):
         import tempfile
+
         from tests.test_factory import make_repo
         with tempfile.TemporaryDirectory() as folder:
             root = make_repo(Path(folder))

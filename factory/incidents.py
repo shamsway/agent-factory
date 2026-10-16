@@ -7,16 +7,16 @@ after an uncertain create is not proof that GitHub did not accept it.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
+from pathlib import Path
 
 from . import artifacts, config, deploy
 
@@ -151,7 +151,7 @@ def enqueue(factory: Path, repo: str, run: deploy.DeployRun, *, root_id: str | N
         for existing in store.glob("incident-*.json"):
             try:
                 prior = read(existing)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - bad records are reported by status projection
                 # Status projection reports bad records; preserve them for the
                 # operator without preventing unrelated roots from being queued.
                 continue
@@ -226,7 +226,8 @@ class GitHub:
         if payload is not None:
             cmd.extend(["--input", "-"])
         proc = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
-                              env=self.env, capture_output=True, text=True, timeout=min(20, remaining))
+                              env=self.env, capture_output=True, text=True, timeout=min(20, remaining),
+                              check=False)
         if proc.returncode:
             status = re.search(r"\(HTTP (4\d\d)\)", proc.stderr or "")
             if status:
@@ -242,7 +243,7 @@ class GitHub:
         for page in range(1, 11):
             rows = self.api(f"repos/{self.repo}/issues?state=all&per_page=100&page={page}")
             if not isinstance(rows, list):
-                raise ValueError("invalid GitHub list response")
+                raise ValueError("invalid GitHub list response")  # noqa: TRY004 - type is audited
             found.extend(r for r in rows if not r.get("pull_request")
                          and marker(row["id"]) in (r.get("body") or ""))
             if len(rows) < 100:
@@ -329,7 +330,7 @@ def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[d
                         raise
                     row.update(issue=number, status="delivered", uncertain=False,
                                published_runs=len(row["runs"]))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - record failures are kept per row
                 if row is None:
                     results.append({"id": path.stem if ID_RE.fullmatch(path.stem) else "invalid_record",
                                     "status": "unavailable", "last_error": type(exc).__name__})
@@ -360,13 +361,13 @@ def snapshot(factory: Path) -> dict:
         for path in sorted(store.glob("incident-*.json")):
             try:
                 rows.append(metadata(read(path)))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - unreadable records degrade the snapshot
                 errors.append({"id": path.stem if ID_RE.fullmatch(path.stem) else "invalid_record",
                                "error_type": type(exc).__name__})
         return {"status": "degraded" if errors else "observed", "incidents": rows, "errors": errors,
                 "pending": sum(r["status"] in {"pending", "uncertain"} for r in rows),
                 "failed": sum(r["status"] == "failed" for r in rows)}
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - withhold raw store errors
         return {"status": "unavailable", "incidents": [], "error_type": type(exc).__name__}
 
 
@@ -402,7 +403,7 @@ def sync_failed(cfg: config.Config) -> list[dict]:
             if run.status == deploy.DeployStatus.FAILED and run.run_id.startswith("deploy-"):
                 try:
                     enqueue(cfg.factory, cfg.repo, run)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - one failed enqueue must not block others
                     errors.append({"run_id": run.run_id, "error_type": type(exc).__name__})
     return errors
 
@@ -450,6 +451,6 @@ def main(argv: list[str]) -> int:
                 raise ValueError("incident not found")
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "observed" else 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI reports only the error type
         print(json.dumps({"status": "unavailable", "error_type": type(exc).__name__}))
         return 1

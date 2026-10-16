@@ -17,9 +17,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 from factory import artifacts
 
@@ -110,7 +109,7 @@ class HTTP:
             result = subprocess.run([sys.executable, "-P", "-c",
                 "from factory.diagnostics import http_worker; http_worker()"],
                 input=json.dumps({"url": url, "headers": headers, "deadline": deadline, "limit": limit}).encode(),
-                capture_output=True, env=env, timeout=remaining)
+                capture_output=True, env=env, timeout=remaining, check=False)
         except subprocess.TimeoutExpired:
             raise Unavailable("budget_expired") from None
         if result.returncode:
@@ -164,7 +163,7 @@ def http_worker():
     except Unavailable as exc:
         sys.stderr.write(str(exc))
         raise SystemExit(1)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any worker failure maps to a fixed transport_unavailable reason
         sys.stderr.write("transport_unavailable")
         raise SystemExit(1)
     sys.stdout.buffer.write(value)
@@ -173,7 +172,7 @@ def http_worker():
 def seconds(value) -> float | None:
     try:
         if isinstance(value, str):
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))  # noqa: FURB162 - replaces every Z, not only a suffix
             return parsed.timestamp() if parsed.tzinfo else None
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return value / 1e9 if value > 1e12 else float(value)
@@ -183,7 +182,7 @@ def seconds(value) -> float | None:
 
 
 def utc(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    return datetime.fromtimestamp(value, UTC).isoformat()
 
 
 def pick(row: dict, names: str) -> dict:
@@ -268,7 +267,7 @@ class Context:
             return value
         except Unavailable as exc:
             self.add(source, str(exc), lineage=lineage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one failed observation is recorded, not raised
             # Messages can contain raw payloads or private URLs; type only.
             self.add(source, type(exc).__name__, lineage=lineage)
         return None
@@ -298,12 +297,12 @@ def nomad(ctx: Context):
     for job in ctx.jobs:
         jid = urllib.parse.quote(job["id"], safe="")
         params = {"namespace": job["namespace"], "region": job["region"]}
-        def read(path, extra=None, text=False):
+        def read(path, extra=None, text=False, params=params):
             return ctx.get(base, path, {**params, **(extra or {})}, token=token, text=text)
-        ctx.observe(f"nomad/job/{jid}/current", lambda: pick(read(f"/v1/job/{jid}"), "ID Namespace Version Status Type Stop"),
+        ctx.observe(f"nomad/job/{jid}/current", lambda jid=jid: pick(read(f"/v1/job/{jid}"), "ID Namespace Version Status Type Stop"),
                     lineage={**job, "relation": "current_state_only"})
         lineage = {**job, "relation": "recorded_health_version"}
-        def evals():
+        def evals(jid=jid, job=job):
             rows = read(f"/v1/job/{jid}/evaluations")
             return [pick(r, "ID JobID Namespace JobModifyIndex Status StatusDescription TriggeredBy PreviousEval NextEval BlockedEval DeploymentID CreateTime ModifyTime FailedTGAllocs")
                     for r in rows if r.get("JobID") == job["id"] and r.get("Namespace", "default") == job["namespace"]
@@ -314,10 +313,10 @@ def nomad(ctx: Context):
         if type(job["version"]) is not int:
             ctx.add(f"nomad/job/{jid}", "version_unavailable", lineage=job)
             continue
-        ctx.observe(f"nomad/job/{jid}/deployments", lambda: [pick(r, "ID JobID Namespace JobVersion Status StatusDescription CreateIndex ModifyIndex")
+        ctx.observe(f"nomad/job/{jid}/deployments", lambda jid=jid, job=job: [pick(r, "ID JobID Namespace JobVersion Status StatusDescription CreateIndex ModifyIndex")
                     for r in read(f"/v1/job/{jid}/deployments") if r.get("JobVersion") == job["version"]
                     and r.get("JobID") == job["id"] and r.get("Namespace", "default") == job["namespace"]][:50], lineage=lineage)
-        rows = ctx.observe(f"nomad/job/{jid}/allocations", lambda: [pick(r, "ID JobID Namespace JobVersion EvalID DeploymentID PreviousAllocation NextAllocation NodeID TaskGroup ClientStatus DesiredStatus CreateTime ModifyTime")
+        rows = ctx.observe(f"nomad/job/{jid}/allocations", lambda jid=jid, job=job: [pick(r, "ID JobID Namespace JobVersion EvalID DeploymentID PreviousAllocation NextAllocation NodeID TaskGroup ClientStatus DesiredStatus CreateTime ModifyTime")
                     for r in read(f"/v1/job/{jid}/allocations", {"all": "true"})
                     if r.get("JobVersion") == job["version"] and r.get("JobID") == job["id"]
                     and r.get("Namespace", "default") == job["namespace"]
@@ -326,7 +325,7 @@ def nomad(ctx: Context):
         for row in rows[:8]:
             aid = urllib.parse.quote(row["ID"], safe="")
             alloc_lineage = {**lineage, **pick(row, "EvalID DeploymentID PreviousAllocation NextAllocation"), "allocation": row["ID"]}
-            def allocation():
+            def allocation(aid=aid, job=job):
                 value = read(f"/v1/allocation/{aid}")
                 if value.get("JobID") != job["id"] or value.get("Job", {}).get("Version") != job["version"] or value.get("Namespace", "default") != job["namespace"]:
                     raise Unavailable("lineage_mismatch")
@@ -356,12 +355,12 @@ def nomad(ctx: Context):
                 # tail as context, not proof it belongs to the failure window.
                 for stream in ("stdout", "stderr"):
                     ctx.observe(f"nomad/allocation/{aid}/{task}/{stream}",
-                                lambda t=task, s=stream: {"text": read(f"/v1/client/fs/logs/{aid}",
+                                lambda t=task, s=stream, aid=aid: {"text": read(f"/v1/client/fs/logs/{aid}",
                                     {"task": t, "type": s, "follow": "false", "plain": "true", "origin": "end", "offset": min(8192, ctx.p.response_bytes)}, text=True),
                                     "time_coverage": "untimestamped_bounded_tail"}, lineage=alloc_lineage)
             if details:
                 for path in ctx.p.error_logs:
-                    def error_log(path=path):
+                    def error_log(path=path, aid=aid):
                         stat = read(f"/v1/client/fs/stat/{aid}", {"path": path})
                         size = stat.get("Size")
                         if type(size) is not int or size < 0 or stat.get("IsDir"):
@@ -379,7 +378,7 @@ def consul(ctx: Context):
     for service in ctx.p.services:
         path = "/v1/health/checks/" + urllib.parse.quote(service, safe="")
         fields = "Node CheckID Name Status ServiceID ServiceName" + (" Output" if ctx.p.logs else "")
-        ctx.observe("consul/health/" + service, lambda p=path: [pick(r, fields)
+        ctx.observe("consul/health/" + service, lambda p=path, fields=fields: [pick(r, fields)
             for r in ctx.get(ctx.p.consul_addr, p, token=ctx.env.get("CONSUL_HTTP_TOKEN", ""), header="X-Consul-Token")][:50],
             lineage={"relation": "current_state_only"})
 
@@ -443,7 +442,7 @@ def verify_nomad_token(cfg, token: str) -> str:
                 return "invalid"
         get("/v1/jobs")
         return "valid"
-    except Exception:
+    except Exception:  # noqa: BLE001 - token checks fail closed without exposing errors
         return "unavailable"
 
 
@@ -455,7 +454,7 @@ def collect(run, p: Policy, env: dict, *, collectors=None, transport=None, clock
             continue
         try:
             collector(ctx)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a collector failure must not abort the bundle
             ctx.add(collector.__name__, type(exc).__name__)
     return artifacts.sanitize_tree({"version": 1, "run_id": run.run_id, "target": run.target, "commit": run.commit,
         "collected_at": utc(ctx.wall()), "window": {"start": utc(ctx.start), "end": utc(ctx.end), "known": ctx.window_known},
@@ -471,6 +470,7 @@ def collect(run, p: Policy, env: dict, *, collectors=None, transport=None, clock
 
 def main(argv: list[str]) -> int:
     import fcntl
+
     from factory import config, deploy
     parser = argparse.ArgumentParser(prog="factory diagnostics")
     parser.add_argument("--target", default="default")

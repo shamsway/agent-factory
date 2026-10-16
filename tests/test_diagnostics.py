@@ -1,10 +1,10 @@
 """read-only, bounded, correlated diagnostic contracts."""
-import json
 import contextlib
 import io
+import json
+import subprocess
 import tempfile
 import time
-import subprocess
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -13,7 +13,6 @@ from unittest import mock
 from factory import apply, artifacts, config, deploy, diagnostics, dispatch
 from tests.test_factory import make_repo
 from tests.test_health import FakeNomad
-
 
 NOW = 1791054000
 TOKEN = "fixture-private-token-123456789"
@@ -461,9 +460,11 @@ class DiagnosticTests(unittest.TestCase):
             fake.close()
 
     def test_transport_timeout_bounds_dns_and_keeps_credentials_out_of_argv(self):
-        with mock.patch.object(diagnostics.subprocess, "run", side_effect=subprocess.TimeoutExpired("reader", 1)) as process:
-            with self.assertRaisesRegex(diagnostics.Unavailable, "budget_expired"):
-                diagnostics.HTTP().get("http://nomad/v1/job/worker", {"X-Nomad-Token": TOKEN}, time.monotonic() + 1, 1024)
+        with (
+            mock.patch.object(diagnostics.subprocess, "run", side_effect=subprocess.TimeoutExpired("reader", 1)) as process,
+            self.assertRaisesRegex(diagnostics.Unavailable, "budget_expired"),
+        ):
+            diagnostics.HTTP().get("http://nomad/v1/job/worker", {"X-Nomad-Token": TOKEN}, time.monotonic() + 1, 1024)
         call = process.call_args
         self.assertNotIn(TOKEN, " ".join(call.args[0]))
         self.assertIn(TOKEN.encode(), call.kwargs["input"])

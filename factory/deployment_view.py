@@ -54,8 +54,8 @@ def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -
             queue_sec = None
             try:
                 if run.queued_at:
-                    queue_sec = max(0, (datetime.fromisoformat(run.started_at.replace("Z", "+00:00"))
-                                       - datetime.fromisoformat(run.queued_at.replace("Z", "+00:00"))).total_seconds())
+                    queue_sec = max(0, (datetime.fromisoformat(run.started_at)
+                                       - datetime.fromisoformat(run.queued_at)).total_seconds())
             except (AttributeError, ValueError, TypeError):
                 pass
             runs.append({

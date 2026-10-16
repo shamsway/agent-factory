@@ -11,7 +11,7 @@ import stat
 import time
 
 from . import config, incidents
-from .investigation_evidence import directory, read_incident, EvidenceRefused
+from .investigation_evidence import EvidenceRefused, directory, read_incident
 
 
 def inventory(factory):
@@ -69,6 +69,7 @@ def note_availability(cfg, available, record):
     as audit=uncertain and never repeated blindly. No private path/error text.
     """
     import fcntl
+
     from .investigation_evidence import read_json
     factory = cfg.factory.resolve()
     root = factory / "routing-handoffs"
@@ -142,7 +143,7 @@ def snapshot(factory):
                         raise ValueError()
                     result["handoffs"].append({"issue": issue, "comment": state["comment"], "done": state["done"], "last_error": error})
         result["handoffs"].sort(key=lambda r: r["issue"])
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable receipts report unavailable
         result["receipt_status"] = "unavailable"
         result["handoffs"] = []
         result["last_transition"] = None
@@ -165,6 +166,7 @@ def handoff(cfg, number, *, remote=None):
     Label edits are idempotent and retryable even if comment delivery is uncertain.
     """
     import fcntl
+
     from .investigation_evidence import read_json
     if type(number) is not int or number <= 0 or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", cfg.repo):
         raise ValueError("invalid routing issue")
@@ -202,7 +204,7 @@ def handoff(cfg, number, *, remote=None):
             for page in range(1, 11):
                 rows = remote.api(endpoint + f"/comments?per_page=100&page={page}")
                 if not isinstance(rows, list):
-                    raise ValueError("invalid routing response")
+                    raise ValueError("invalid routing response")  # noqa: TRY004 - callers catch it
                 if any(marker in (r.get("body") or "") for r in rows):
                     found = True
                     break
@@ -222,7 +224,7 @@ def handoff(cfg, number, *, remote=None):
                     state["comment"] = "failed"
                     state["last_error"] = f"HTTP{exc.status}"
                     incidents.write(path, state)
-                except Exception:
+                except Exception:  # noqa: BLE001, S110 - unknown outcome; never repeat POST
                     pass  # unknown outcome: never repeat POST, still hand to human
                 else:
                     state["comment"] = "confirmed"

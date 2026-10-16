@@ -2,14 +2,15 @@
 import copy
 import io
 import json
-import os
 import subprocess
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
+
+from factory import config, incidents, verify_secrets
+from factory import investigation_outbox as outbox
+from factory import investigation_publisher as publisher
 from tests import test_investigation_model as fixtures
-from factory import config, incidents, investigation_outbox as outbox
-from factory import investigation_publisher as publisher, verify_secrets
 
 
 class PublisherTests(unittest.TestCase):
@@ -133,8 +134,9 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(investigation_model.credential_status(self.cfg), "invalid")
 
     def test_host_only_loader_and_secret_repr(self):
-        from pathlib import Path
         import tempfile
+        from pathlib import Path
+
         from tests.test_factory import make_repo
         with tempfile.TemporaryDirectory() as folder:
             root = make_repo(Path(folder))

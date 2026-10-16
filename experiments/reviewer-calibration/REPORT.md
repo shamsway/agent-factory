@@ -197,6 +197,95 @@ coverage in precisely the case it was meant to flag. A defensible line needs a s
 is independent of the reviewer's self-report; none of the evidence gathered here supplies
 one, and SWE-Gate does not either (§1).
 
+## Corpus growth (splits.json v2)
+
+Grew the Pilot 1 corpus from **4** cases (2 tickets × before/after) to **11** cases
+across **5** tickets, without moving any case out of lockbox.
+
+| Split | Cases | Notes |
+|---|---|---|
+| `train` | `12-before`, `12-after`, `62-before`, `62-after`, `9-approve`, `8-approve` | Climber-visible. Adds multi-file #62 defect/fixed pair + two correct-but-narrow APPROVE heads chosen to provoke over-strictness. |
+| `lockbox` | `20-before`, `20-after`, `79-before`, `79-after`, `87-approve` | Sealed. Prior #20 membership retained; adds multi-file #79 defect/fixed pair + one sealed APPROVE. |
+
+New case oracles (independent source reads; historical REVISE/APPROVE used only to *discover* candidates):
+
+| Case | Issue | Head | Gate | Oracle |
+|---|---|---|---|---|
+| `62-before` | #62 | `cfbdb6f9…` | PASS (real) | REVISE — D1 profile-guidance drop in `templates/factory.toml`; D2 `stats` counts `manager_failed` as escalation |
+| `62-after` | #62 | `68b5d164…` | PASS (real) | APPROVE — D1/D2 fixed in `6d9e4d2` / merge head |
+| `79-before` | #79 | `7bd58052…` | PASS (real) | REVISE — D1 REST reviews read missing `updated_at` (should use GraphQL `updatedAt`) |
+| `79-after` | #79 | `e20ebcd5…` | PASS (real) | APPROVE — GraphQL `REVIEW_QUERY` + `updatedAt` |
+| `9-approve` | #9 | `f46b7676…` | PASS (real) | APPROVE — external PR review-queue visibility in the dashboard |
+| `8-approve` | #8 | `b1defa4c…` | PASS (real) | APPROVE — fail-closed CI/merge readiness for opt-in review lane |
+| `87-approve` | #87 | `19bd4681…` | PASS (real) | APPROVE — evidence reader build/schema identity |
+
+Freeze helper: `scripts/freeze_case.py` (shared throwaway `--shared` clone, real `factory gate`,
+hashed provenance). Human re-adjudication checklist: [`ADJUDICATION-CHECKLIST.md`](ADJUDICATION-CHECKLIST.md).
+
+**Rescoring status.** On 2026-10-02 `python run_calibration.py runs/main 2` was re-run against all 11 membership cases (2 contracts × 11 cases × 2 samples). One `issue36` / `79-before` sample hit the harness `--max-time 300` deadline with an empty output (`Deadline exceeded`) and was retried once through the same `review()` path (rc 0, 156.9s). `runs/main/results.json` and the per-run markdown now cover all 11 cases, every run rc 0. Literal `VERDICT:` lines versus `expected_verdict`: baseline 15/22, issue36 18/22. `runs/main/adjudication.json` now lists all 44 cells; noise below is from `score.py` on that file. `runs/tools` is unchanged. No production reviewer-policy change; no auto-promotion.
+
+```json
+{
+  "baseline": {
+    "train": {
+      "cases_per_repeat": 6,
+      "repeats": 2,
+      "missed_blocking": 3,
+      "unnecessary_revise": 0,
+      "quality_per_repeat": [
+        0.8333333333333334,
+        0.6666666666666667
+      ],
+      "noise_pstdev": 0.0833
+    },
+    "lockbox": {
+      "cases_per_repeat": 5,
+      "repeats": 2,
+      "missed_blocking": 2,
+      "unnecessary_revise": 2,
+      "quality_per_repeat": [
+        0.6,
+        0.6
+      ],
+      "noise_pstdev": 0.0
+    }
+  },
+  "issue36": {
+    "train": {
+      "cases_per_repeat": 6,
+      "repeats": 2,
+      "missed_blocking": 2,
+      "unnecessary_revise": 0,
+      "quality_per_repeat": [
+        0.8333333333333334,
+        0.8333333333333334
+      ],
+      "noise_pstdev": 0.0
+    },
+    "lockbox": {
+      "cases_per_repeat": 5,
+      "repeats": 2,
+      "missed_blocking": 2,
+      "unnecessary_revise": 2,
+      "quality_per_repeat": [
+        0.6,
+        0.6
+      ],
+      "noise_pstdev": 0.0
+    }
+  }
+}
+```
+
+## Promotion contract (#126)
+
+This harness is Pilot 1 of the [eval promotion contract](../../docs/eval-promotion-contract.md).
+Split membership is frozen in [`splits.json`](splits.json) **v2** (train: #12+#62+#9+#8;
+lockbox: #20+#79+#87 — prior lockbox #20 retained). `python score.py runs/main/adjudication.json`
+reports `missed_blocking` and `unnecessary_revise` separately per arm and split with repeat
+noise. Hand-adjudicated baseline for the original four cases in `runs/main/adjudication.json` (2 repeats): both
+arms 2 missed-blocking / 0 unnecessary-REVISE on each split, noise 0. Those figures are the original four cases only. The 44-cell noise is the `score.py` block under Rescoring status, not a promotion claim.
+
 ## 7. Comparison readiness
 
 Ready and already exercised against #36, whose contract is byte-identical to `main` as

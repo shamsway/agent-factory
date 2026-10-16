@@ -8,14 +8,32 @@ the raw reviewer output. Adjudication against cases/<id>/oracle.json is done sep
 usage: run_calibration.py <out-dir> <samples> [contract ...]
 """
 import concurrent.futures as cf
-import hashlib, json, pathlib, subprocess, sys, tempfile, threading, time
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 
 EXP = pathlib.Path(__file__).parent
 REPO = "/home/mike/dev/mikeroysoft/factory"
 CHECKOUT_ROOT = pathlib.Path("/tmp/cal-checkout")
 CONTRACTS = {"baseline": "cadb9981524ab5506693e27f56ff8ac4ef911da6",
              "issue36": "1947fc4e3de23e71f64342f2c9cd2570d845db5e"}
-CASES = ["12-before", "12-after", "20-before", "20-after"]
+def _cases_from_splits() -> list[str]:
+    splits = json.loads((EXP / "splits.json").read_text())["splits"]
+    # Stable order: train then lockbox, preserving membership order.
+    seen, out = set(), []
+    for name in ("train", "selection", "lockbox", "fresh"):
+        for case in splits.get(name, []):
+            if case not in seen:
+                seen.add(case); out.append(case)
+    return out
+
+
+CASES = _cases_from_splits()
 MODEL = "anthropic/claude-fable-5-1"          # the repo's configured reviewer model
 FLAGS = ["-p", "--mode", "text", "--no-session", "--no-tools", "--no-extensions",
          "--no-skills", "--no-rules", "--no-lsp", "--no-pty", "--no-title",
@@ -42,7 +60,7 @@ def checkout(commit: str) -> pathlib.Path:
             subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", REPO, str(dest)],
                            check=True, capture_output=True)
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=dest,
-                              capture_output=True, text=True).stdout.strip()
+                              capture_output=True, text=True, check=False).stdout.strip()
         if head != commit:
             subprocess.run(["git", "checkout", "--quiet", "--detach", commit], cwd=dest,
                            check=True, capture_output=True)
@@ -71,7 +89,7 @@ def review(contract: str, case: str, sample: int) -> dict:
         started = time.monotonic()
         proc = subprocess.run(["omp", *FLAGS, "--model", MODEL, "@" + str(path)],
                               cwd=d, capture_output=True, text=True, timeout=TIMEOUT,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, check=False)
         elapsed = round(time.monotonic() - started, 1)
     return {"contract": contract, "contract_commit": CONTRACTS[contract], "case": case,
             "sample": sample, "returncode": proc.returncode, "seconds": elapsed,
