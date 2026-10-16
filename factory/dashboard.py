@@ -1267,7 +1267,7 @@ codebase_monitor: CodebaseMonitor | None = None
 
 
 
-def main(argv: list[str]) -> int:
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="factory dashboard", description="Factory outcome-control workspace"
     )
@@ -1299,6 +1299,11 @@ def main(argv: list[str]) -> int:
         default=80,
         help="recent first-parent commits to visualize (default: 80)",
     )
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    parser = _parser()
     args = parser.parse_args(argv)
     if args.codebase_limit < 1:
         parser.error("--codebase-limit must be positive")
