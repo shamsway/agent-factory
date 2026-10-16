@@ -330,6 +330,20 @@ def apply_escalate(
     log(f"#{n}: apply escalated ({reason})")
 
 
+def supersede(candidate: dict, newest: dict, target: str) -> None:
+    """Latest-wins: record an older candidate SUPERSEDED and tell its ticket why."""
+    run = deploy.supersede_candidate(target, candidate, newest, events_path=dispatch.EVENTS)
+    log(f"#{candidate['ticket']}: superseded on `{target}` by #{newest['ticket']} ({run.run_id})")
+    body = (f"`factory apply` did not deploy this revision on its own: target `{target}` deploys only "
+            f"the newest approved revision, #{newest['ticket']} ({str(newest.get('commit', ''))[:8]}), "
+            "which includes this change.")
+    try:
+        dispatch.run(["gh", "issue", "comment", str(candidate["ticket"]), "--repo", cfg.repo, "--body", body],
+                     check=False)
+    except Exception as exc:  # noqa: BLE001 - the recorded supersession is authoritative
+        log(f"#{candidate['ticket']}: notification failed: {exc}")
+
+
 def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: deploy.DeployAdapter | None = None) -> bool:
     n, pr, commit = ticket["ticket"], ticket["pr"], ticket["commit"]
     attempt = deploy.next_attempt(target, n, commit, events_path=dispatch.EVENTS)
@@ -660,6 +674,7 @@ def main(argv: list[str]) -> int:
                 deploy.release_lock(t_fd)
                 continue
 
+            mode = target.supersession or cfg.apply_supersession
             try:
                 tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
                 if tstate.has_interrupted_run:
@@ -674,7 +689,7 @@ def main(argv: list[str]) -> int:
                     log(f"target `{target_name}`: {rec_msg}")
                     tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
 
-                if tstate.unacknowledged_failed_tickets and cfg.apply_supersession == "sequential":
+                if tstate.unacknowledged_failed_tickets and mode == "sequential":
                     log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.unacknowledged_failed_tickets)})")
                     has_errors = True
                     continue
@@ -693,7 +708,7 @@ def main(argv: list[str]) -> int:
                     baseline=cfg.apply_baseline,
                     events_path=dispatch.EVENTS,
                     touches_fn=check_touch,
-                    supersession=cfg.apply_supersession,
+                    supersession=mode,
                     repo=cfg.repo,
                 )
 
@@ -709,6 +724,15 @@ def main(argv: list[str]) -> int:
                 if not candidates:
                     continue
 
+                if mode == "latest":
+                    newest, older = deploy.latest_wins(candidates)
+                    for stale in older:
+                        if args.dry_run:
+                            log(f"#{stale['ticket']}: would supersede (newer approved #{newest['ticket']} deploys instead)")
+                        else:
+                            supersede(stale, newest, target_name)
+                    candidates = [c for c in candidates if c is newest or "unauthorized_reason" in c]
+
                 any_candidates_found = True
                 for candidate in candidates:
                     if "unauthorized_reason" in candidate:
@@ -717,7 +741,7 @@ def main(argv: list[str]) -> int:
                         if not args.dry_run:
                             apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name, dry_run=args.dry_run)
                         has_errors = True
-                        if cfg.apply_supersession == "sequential":
+                        if mode == "sequential":
                             log(f"target `{target_name}`: stopping further applies after unauthorized revision #{candidate['ticket']}")
                             break
                         continue
@@ -730,7 +754,7 @@ def main(argv: list[str]) -> int:
                         is_failed = (success is False)
                     if is_failed:
                         has_errors = True
-                        if cfg.apply_supersession == "sequential":
+                        if mode == "sequential":
                             log(f"target `{target_name}`: stopping further applies after failure of #{candidate['ticket']}")
                             break
             finally:

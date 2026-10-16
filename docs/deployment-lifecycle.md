@@ -64,7 +64,18 @@ adapter = "terraform"
 
 * `backend_key`: Serializes deployment across multiple targets that share a common state backend (e.g. shared S3 state lock or Consul cluster), preventing overlapping apply passes.
 * `adapter`: Pluggable deployment adapter (`"terraform"`, `"fake"`, etc.). An enabled target naming an adapter that is not registered stops the whole `factory apply` pass before any lock, fetch or deployment; it never falls back to Terraform.
-* `supersession`: `"sequential"` enforces that tickets apply strictly in git topological commit order. A failure halts the target until resolved; subsequent commits are never applied out of order.
+* `supersession`: how a target treats several pending approved revisions. Set it in `[apply]`
+  for every target, or per target to override (an unknown value is a config error).
+  * `"sequential"` (default): tickets apply strictly in git topological commit order. A failure
+    halts the target until resolved; subsequent commits are never applied out of order.
+  * `"none"`: commit order, but an unacknowledged failure does not halt later candidates.
+  * `"latest"`: only the newest authorized candidate deploys. Each older pending authorized
+    candidate is recorded as a terminal `SUPERSEDED` run naming the newer ticket, and its ticket
+    gets a comment. It is never selected again, so N merges deploy once. Unauthorized candidates
+    still escalate and are never superseded. Use this only where each revision is a complete
+    desired state that includes everything before it (an app manifest that a platform PR
+    replaces wholesale), never for Terraform roots that must apply every change in order.
+    A failure does not halt later candidates.
 
 ---
 

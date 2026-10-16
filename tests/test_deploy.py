@@ -1714,6 +1714,121 @@ print("Apply complete! Resources: 1 added, 0 changed, 0 destroyed.", flush=True)
 """
 
 
+class LatestWinsTest(unittest.TestCase):
+    """`supersession = "latest"`: N approved merges deploy once, newest only."""
+
+    TOML = """
+[apply]
+enabled = true
+
+[[apply.targets]]
+name = "app"
+dir = "deploy/app"
+supersession = "latest"
+
+[[apply.targets]]
+name = "infra"
+dir = "terraform"
+"""
+
+    def setup_repo(self, d: str):
+        from tests.test_factory import git
+
+        repo = make_repo(Path(d), self.TOML)
+        cfg = config.load(repo)
+        dispatch.configure(cfg)
+        apply.configure(cfg)
+        cfg.factory.mkdir(parents=True, exist_ok=True)
+        prs = []
+        for i, sub in enumerate(("deploy/app", "deploy/app", "deploy/app"), start=1):
+            (repo / sub).mkdir(parents=True, exist_ok=True)
+            (repo / sub / f"v{i}.yaml").write_text(f"v{i}\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", f"app v{i}")
+            sha = git(repo, "rev-parse", "HEAD")
+            prs.append({"pr": i, "ticket": 10 + i, "commit": sha, "head_commit": sha, "reviewDecision": "APPROVED",
+                        "latestReviews": [{"state": "APPROVED", "author": {"login": "human"},
+                                           "authorAssociation": "MEMBER", "commit": {"oid": sha}}]})
+        return repo, cfg, prs
+
+    def run_pass(self, cfg, prs, args=()):
+        def fake_apply_one(candidate, dry_run, target="default"):
+            if dry_run:
+                return True
+            deploy.record_deploy_run(deploy.DeployRun(
+                run_id=f"deploy-{target}-{candidate['commit'][:8]}-1", target=target, commit=candidate["commit"],
+                ticket=candidate["ticket"], attempt=1, status=deploy.DeployStatus.SUCCEEDED,
+                started_at="2026-10-16T00:00:00Z"))
+            return True
+
+        with mock.patch.object(config, "load", return_value=cfg), \
+             mock.patch.object(dispatch, "run") as run, \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=prs[::-1]), \
+             mock.patch.object(apply, "touches_target_dir", side_effect=lambda c, d: d == "deploy/app"), \
+             mock.patch.object(apply, "apply_one", side_effect=fake_apply_one) as apply_one:
+            ret = apply.main(list(args))
+        return ret, apply_one, run
+
+    def test_config_modes_and_target_override(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), self.TOML)
+            cfg = config.load(repo)
+            self.assertEqual((cfg.apply_supersession, cfg.targets["app"].supersession, cfg.targets["infra"].supersession),
+                             ("sequential", "latest", ""))
+        for bad in ('[apply]\nsupersession = "newest"\n',
+                    '[apply]\n[apply.targets.x]\ndir = "x"\nsupersession = "LATEST"\n'):
+            with self.subTest(toml=bad), tempfile.TemporaryDirectory() as d:
+                repo = make_repo(Path(d), bad)
+                self.assertRaisesRegex(config.ConfigError, "must be one of sequential, none, latest", config.load, repo)
+
+    def test_only_the_newest_deploys_and_older_are_superseded(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            ret, apply_one, run = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [13])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            by_ticket = {t: runs[-1] for t, runs in state.runs_by_ticket.items()}
+            self.assertEqual({t: r.status.value for t, r in by_ticket.items()},
+                             {11: "superseded", 12: "superseded", 13: "succeeded"})
+            self.assertIn("superseded by #13", by_ticket[11].error)
+            self.assertEqual(state.unacknowledged_failed_tickets, set())
+            comments = [c.args[0] for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "comment"]]
+            self.assertEqual(sorted(c[3] for c in comments), ["11", "12"])
+
+            # The superseded tickets are terminal: the next pass has nothing to do.
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            apply_one.assert_not_called()
+
+    def test_dry_run_reports_supersession_without_recording(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            with mock.patch.object(apply, "log") as log:
+                self.run_pass(cfg, prs, ["--dry-run"])
+            lines = " ".join(str(c.args[0]) for c in log.call_args_list)
+            self.assertIn("#11: would supersede (newer approved #13 deploys instead)", lines)
+            self.assertEqual(deploy.get_target_state("app", events_path=dispatch.EVENTS).runs, [])
+
+    def test_unauthorized_candidates_are_never_superseded_or_deployed(self) -> None:
+        newest, older = deploy.latest_wins([
+            {"ticket": 1, "commit": "a"}, {"ticket": 2, "commit": "b", "unauthorized_reason": "x"},
+            {"ticket": 3, "commit": "c"}, {"ticket": 4, "commit": "d", "unauthorized_reason": "y"},
+        ])
+        self.assertEqual((newest["ticket"], [c["ticket"] for c in older]), (3, [1]))
+        self.assertEqual(deploy.latest_wins([{"ticket": 1, "unauthorized_reason": "x"}]), (None, []))
+
+    def test_sequential_targets_are_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            cfg.targets["app"].supersession = ""
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [11, 12, 13])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertNotIn("superseded", {r.status.value for r in state.runs})
+
+
 class UnknownAdapterTest(unittest.TestCase):
     """An unregistered adapter name must never fall back to Terraform."""
 

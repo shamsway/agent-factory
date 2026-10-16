@@ -1123,6 +1123,39 @@ class FakeDeployAdapter(DeployAdapter):
         return False, f"fake adapter requires operator reconciliation for {interrupted_run.run_id}"
 
 
+def latest_wins(candidates: list[dict]) -> tuple[dict | None, list[dict]]:
+    """Split topologically ordered candidates into the newest authorized one and
+    the older authorized ones it supersedes. Unauthorized candidates are neither."""
+    authorized = [c for c in candidates if "unauthorized_reason" not in c]
+    if not authorized:
+        return None, []
+    return authorized[-1], authorized[:-1]
+
+
+def supersede_candidate(target: str, candidate: dict, newest: dict, events_path: Path | None = None) -> DeployRun:
+    """Record an older pending candidate as SUPERSEDED without running it. The run is
+    terminal, so the candidate is never selected again."""
+    commit = candidate.get("commit", "")
+    attempt = next_attempt(target, int(candidate["ticket"]), commit, events_path=events_path)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    run = DeployRun(
+        run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+        target=target,
+        commit=commit,
+        ticket=int(candidate["ticket"]),
+        attempt=attempt,
+        status=DeployStatus.SUPERSEDED,
+        started_at=now,
+        completed_at=now,
+        pr=candidate.get("pr"),
+        error=(f"superseded by #{newest['ticket']} ({str(newest.get('commit', ''))[:8]}), "
+               "a newer approved revision that includes it (latest-wins)"),
+        version=CONTRACT_VERSION,
+    )
+    record_deploy_run(run, events_path=events_path)
+    return run
+
+
 def reconcile_interrupted_run(
     target: str,
     run_id: str,

@@ -142,6 +142,7 @@ class DeployTarget:
     adapter: str = "terraform"
     verify: VerifyPolicy | None = None
     diagnostics: dict | None = None
+    supersession: str = ""  # overrides [apply].supersession for this target when set
 
 
 @dataclass
@@ -161,6 +162,22 @@ class VerifyPolicy:
     @property
     def active(self) -> bool:
         return self.nomad or bool(self.checks)
+
+
+# sequential: strict commit order; a failure halts the target until acknowledged.
+# none: commit order, but a failure does not halt later candidates.
+# latest: only the newest authorized candidate deploys; older pending ones are
+#   recorded SUPERSEDED. For targets whose revision is a full desired state.
+SUPERSESSION_MODES = ("sequential", "none", "latest")
+
+
+def supersession_mode(value: object, where: str) -> str:
+    """A supersession mode; "" (inherit) is allowed only for a target override."""
+    if value == "" and where.startswith("apply.targets."):
+        return ""
+    if value not in SUPERSESSION_MODES:
+        raise ConfigError(f"{where} must be one of {', '.join(SUPERSESSION_MODES)}")
+    return str(value)
 
 
 def _positive_int(value: object, where: str) -> int:
@@ -287,7 +304,7 @@ class Config:
     apply_env: dict = field(default_factory=dict)  # env for `factory apply` only; never the dispatcher's
     targets: dict[str, DeployTarget] = field(default_factory=dict)  # deployment targets, keyed by name
     apply_baseline: str | None = None  # commit SHA or PR number prior to which deployments are ignored
-    apply_supersession: str = "sequential"  # "sequential" (strict commit order) or "none"
+    apply_supersession: str = "sequential"  # one of SUPERSESSION_MODES
     raw_repo: dict = field(default_factory=dict)  # the committed file alone, before host layering
 
     @property
@@ -691,7 +708,7 @@ def load(start: Path | None = None) -> Config:
     cfg.apply_dir = apply_t.get("dir", cfg.apply_dir)
     cfg.apply_env = {k: str(v) for k, v in apply_t.get("env", {}).items()}
     cfg.apply_baseline = str(apply_t["baseline"]) if "baseline" in apply_t else None
-    cfg.apply_supersession = str(apply_t.get("supersession", cfg.apply_supersession))
+    cfg.apply_supersession = supersession_mode(apply_t.get("supersession", cfg.apply_supersession), "[apply].supersession")
 
     raw_targets = apply_t.get("targets")
     default_adapter = str(apply_t.get("adapter", "terraform"))
@@ -708,6 +725,7 @@ def load(start: Path | None = None) -> Config:
                     adapter=str(item.get("adapter", default_adapter)),
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                     diagnostics=item.get("diagnostics"),
+                    supersession=supersession_mode(item.get("supersession", ""), f"apply.targets.{name}.supersession"),
                 )
     elif isinstance(raw_targets, dict):
         for name, item in raw_targets.items():
@@ -720,6 +738,7 @@ def load(start: Path | None = None) -> Config:
                     adapter=str(item.get("adapter", default_adapter)),
                     verify=verify_policy(item.get("verify"), f"apply.targets.{name}.verify"),
                     diagnostics=item.get("diagnostics"),
+                    supersession=supersession_mode(item.get("supersession", ""), f"apply.targets.{name}.supersession"),
                 )
     if targets and "verify" in apply_t:
         raise ConfigError("[apply].verify applies to the implicit default target only; "
