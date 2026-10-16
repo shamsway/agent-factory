@@ -1,8 +1,7 @@
 # Weekly drift report: commits on upstream mikeroySoft/factory main that are
-# not yet under this fork's upstream-series (the portable commits proposed
-# upstream; sre-agent is upstream-series plus a thin fork-only layer).
-# Reports only; never rebases, merges or deploys. Scheduled workflows run from
-# the default branch (main), but the comparison always uses upstream-series.
+# not yet merged into this fork's main. Upstream is integrated by merging
+# (merge commits, never squash or rebase) into main, and then into the work
+# fork from main. Reports only; never merges or deploys.
 name: check-upstream
 on:
   schedule:
@@ -30,19 +29,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: upstream-series
+          ref: main
           fetch-depth: 0
 
-      - name: Compare origin/upstream-series with upstream/main
+      - name: Compare origin/main with upstream/main
         id: compare
         run: |
           set -euo pipefail
           git remote add upstream "$UPSTREAM_URL"
-          git fetch --no-tags origin +refs/heads/upstream-series:refs/remotes/origin/upstream-series
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
-          fork=$(git rev-parse origin/upstream-series)
+          fork=$(git rev-parse origin/main)
           up=$(git rev-parse upstream/main)
-          count=$(git rev-list --count origin/upstream-series..upstream/main)
+          count=$(git rev-list --count origin/main..upstream/main)
           echo "fork=$fork" >> "$GITHUB_OUTPUT"
           echo "up=$up" >> "$GITHUB_OUTPUT"
           echo "count=$count" >> "$GITHUB_OUTPUT"
@@ -51,21 +50,21 @@ jobs:
             echo "<!-- upstream-drift-state: $up $count -->"
             echo
             if [ "$count" -gt 0 ]; then
-              echo "\`upstream/main\` has **$count** commit(s) not in \`upstream-series\`."
+              echo "\`upstream/main\` has **$count** commit(s) not in \`main\`."
             else
-              echo "\`upstream-series\` contains every commit on \`upstream/main\`."
+              echo "\`main\` contains every commit on \`upstream/main\`."
             fi
             echo
             echo "- upstream/main (mikeroySoft/factory): \`$up\`"
-            echo "- origin/upstream-series: \`$fork\`"
+            echo "- origin/main: \`$fork\`"
             echo "- checked: $(date -u +%Y-%m-%dT%H:%MZ) by [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
             if [ "$count" -gt 0 ]; then
               echo
               echo "Newest first (up to 50, merges omitted):"
               echo
-              git log --no-merges --format='- `%h` %s' -n 50 origin/upstream-series..upstream/main
+              git log --no-merges --format='- `%h` %s' -n 50 origin/main..upstream/main
               echo
-              echo "Integrate by pinning a full upstream SHA: rebase \`upstream-series\` onto it, then rebase the fork-only layer of \`sre-agent\` onto the new series, and run the acceptance gate before any deployment. This workflow never rebases, merges or deploys."
+              echo "Integrate by merging an upstream release tag (or a pinned upstream SHA when a needed fix lands between releases) into \`main\` on a sync branch with a merge commit, never squash or rebase. Run the Linux test gate, then sync the work fork from \`main\` and run the acceptance gate before any deployment. This workflow never merges or deploys."
             fi
           } > body.md
           echo "Drift: $count commit(s); upstream $up; fork $fork"
@@ -83,7 +82,7 @@ jobs:
           state="$UP $COUNT"
           if [ -z "$issue" ]; then
             if [ "$COUNT" -gt 0 ]; then
-              gh issue create --title "Upstream drift: mikeroySoft/factory main is ahead of upstream-series" \
+              gh issue create --title "Upstream drift: mikeroySoft/factory main is ahead of the fork's main" \
                 --label "$LABEL" --body-file body.md
             else
               echo "No drift and no tracking issue; nothing to do."
@@ -104,7 +103,7 @@ jobs:
             gh issue comment "$number" --body-file comment.md
           elif [ "$open" = "OPEN" ]; then
             gh issue edit "$number" --body-file body.md
-            printf 'Caught up: `upstream-series` contains upstream/main `%s`.\n' "$UP" > comment.md
+            printf 'Caught up: `main` contains upstream/main `%s`.\n' "$UP" > comment.md
             gh issue comment "$number" --body-file comment.md
             gh issue close "$number"
           else
