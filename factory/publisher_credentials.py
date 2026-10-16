@@ -5,10 +5,9 @@ Never loads Factory host config, shells, workers, or a shared GitHub credential.
 import base64
 import json
 import os
-from pathlib import Path
 import re
-import stat
 import time
+from pathlib import Path
 
 from . import investigation_evidence as evidence
 from .investigation_publisher import PublisherRefused, http_call
@@ -149,11 +148,11 @@ class AppTokens:
             self.outcome = 'ready'
             self.audit(self.status())
             return value
-        except Exception:
+        except Exception:  # noqa: BLE001 - any refresh failure must fail closed
             self._token, self._expires = None, 0
             self.outcome = 'refresh_failed'
             try:
                 self.audit(self.status())
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - audit failure still refuses; no leak
                 pass  # Audit failure still refuses the operation; never leak its exception.
             raise PublisherRefused('publisher_token_unavailable') from None

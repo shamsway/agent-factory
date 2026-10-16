@@ -1,20 +1,21 @@
 """Option B operator transfer. Synthetic evidence; no network or credentials."""
-import copy
-from contextlib import redirect_stdout
 import io
 import json
 import os
 import stat
-from pathlib import Path
-import tempfile
 import subprocess
-from types import SimpleNamespace
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from factory import investigation_transfer as transfer, publisher_status as status
-from factory import investigation_evidence as evidence, investigation_outbox as outbox
 from factory import investigation_broker as broker
+from factory import investigation_evidence as evidence
+from factory import investigation_outbox as outbox
+from factory import investigation_transfer as transfer
+from factory import publisher_status as status
 from tests import test_investigation_model as fixtures
 
 ORIGINAL_SCOPE = transfer.scope.prepare_from_policy

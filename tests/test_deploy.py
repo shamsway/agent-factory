@@ -13,7 +13,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-
 from unittest import mock
 
 from factory import apply, config, deploy, dispatch, lifecycle
@@ -319,6 +318,7 @@ class DeployApplyIntegrationTest(unittest.TestCase):
     def test_apply_one_records_versioned_deploy_run_on_success(self) -> None:
         import subprocess
         from unittest import mock
+
         from factory import apply, dispatch, tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
@@ -367,6 +367,7 @@ class DeployApplyIntegrationTest(unittest.TestCase):
     def test_apply_one_records_failed_deploy_run_and_prevents_silent_retry(self) -> None:
         import subprocess
         from unittest import mock
+
         from factory import apply, dispatch, tf_plan_check
 
         with tempfile.TemporaryDirectory() as d:
@@ -416,6 +417,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
     def test_overlapping_passes_prevented_by_locks(self) -> None:
         """Target and backend locks prevent concurrent overlapping passes."""
         from unittest import mock
+
         from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
@@ -444,6 +446,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
     def test_direct_merges_on_main_detected_and_execution_refused(self) -> None:
         """Direct pushes/merges to main touching a target dir are flagged as unauthorized."""
         from unittest import mock
+
         from factory import apply, dispatch
         from tests.test_factory import git
 
@@ -490,6 +493,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
     def test_old_revisions_and_stale_reviews_rejected(self) -> None:
         """Revision-bound checks reject unapproved or stale approvals."""
         from unittest import mock
+
         from factory import apply, dispatch
 
         # Case 1: reviewDecision is not APPROVED
@@ -556,6 +560,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
     def test_per_target_ordering_and_sequential_failure_blocking(self) -> None:
         """Candidates are ordered topologically, and sequential mode halts on failure."""
         from unittest import mock
+
         from factory import apply, dispatch
         from tests.test_factory import git
 
@@ -652,6 +657,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
     def test_multiple_targets_isolation_and_shared_backend(self) -> None:
         """Targets only process changes to their own dir, and shared backends serialize."""
         from unittest import mock
+
         from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
@@ -1115,6 +1121,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
     def test_defect_4_dry_run_is_strictly_side_effect_free(self) -> None:
         """[P1] Dry-run never records events, never posts comments, even on skipped, unauthorized, or prepare failure paths."""
         from unittest import mock
+
         from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
@@ -1167,6 +1174,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
     def test_defect_5_pagination_stops_at_raw_boundary_not_matching_count(self) -> None:
         """[P2] Pagination stops only when raw results are exhausted, not based on factory branch matches."""
         from unittest import mock
+
         from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
@@ -1235,7 +1243,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
             git(repo, "checkout", "-b", "agent/20")
             (repo / "terraform" / "main.tf").write_text("v2")
             git(repo, "commit", "-q", "-am", "commit 1 of PR")
-            c1 = git(repo, "rev-parse", "HEAD")
+            git(repo, "rev-parse", "HEAD")
 
             (repo / "terraform" / "main.tf").write_text("v3")
             git(repo, "commit", "-q", "-am", "commit 2 of PR")
@@ -1795,16 +1803,19 @@ class TerraformProcessIsolationTest(unittest.TestCase):
         """Regression for the live post-migration test C: a SIGKILLed Factory
         previously killed terraform through its stdout pipe, leaving a partial
         apply and a held state lock."""
+        src = str(Path(deploy.__file__).resolve().parents[1])
+        root, factory_dir = str(self.root), str(self.root / ".factory")
+        planfile, env = str(self.root / "plan"), {**self.env, "FAKE_TF_TICKS": "15"}
         script = (
             "import sys; from pathlib import Path\n"
-            "sys.path.insert(0, %r)\n"
+            f"sys.path.insert(0, {src!r})\n"
             "from factory import config, deploy\n"
             "ctx = deploy.DeployContext(target=config.DeployTarget(name='default', dir='.'),\n"
-            "    ticket={'ticket': 90, 'pr': 91, 'commit': 'c90'}, root=Path(%r),\n"
-            "    factory_dir=Path(%r), worktree=Path(%r), planfile=Path(%r), env=%r)\n"
+            f"    ticket={{'ticket': 90, 'pr': 91, 'commit': 'c90'}}, root=Path({root!r}),\n"
+            f"    factory_dir=Path({factory_dir!r}), worktree=Path({root!r}), planfile=Path({planfile!r}),"
+            f" env={env!r})\n"
             "deploy.TerraformDeployAdapter(timeout_sec=60).execute(ctx)\n"
-        ) % (str(Path(deploy.__file__).resolve().parents[1]), str(self.root), str(self.root / ".factory"),
-             str(self.root), str(self.root / "plan"), {**self.env, "FAKE_TF_TICKS": "15"})
+        )
         (self.root / "plan").touch()
         factory_proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(lambda: factory_proc.poll() is None and factory_proc.kill())

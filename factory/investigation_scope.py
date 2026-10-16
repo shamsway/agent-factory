@@ -1,11 +1,12 @@
 """Operator-approved job/file mappings checked against each failed revision."""
-from dataclasses import dataclass
 import json
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 
-from . import investigation_evidence as evidence, investigation_publication as publication
+from . import investigation_evidence as evidence
+from . import investigation_publication as publication
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,7 @@ def load_policy(path, *, repository):
         return ScopePolicy(repository, tuple(bindings), raw["approved_at"])
     except evidence.EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any policy error must fail closed
         raise evidence.EvidenceRefused("unsupported_scope") from None
 
 
@@ -97,7 +98,7 @@ def prepare(repository_root, projection, raw_result, policy):
             size = subprocess.run(command + ["cat-file", "-s", blob.decode()], env=env,
                                   capture_output=True, timeout=5, check=True).stdout
             evidence.require(0 < int(size) <= 1024 * 1024, "scope_mapping_unavailable")
-        except Exception:
+        except Exception:  # noqa: BLE001 - any git/parse error must fail closed
             raise evidence.EvidenceRefused("scope_mapping_unavailable") from None
         files.append({"path": path, "git_blob": blob.decode()})
     return {"version": 1, "repository": policy.repository, "commit": commit,

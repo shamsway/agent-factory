@@ -6,8 +6,8 @@ network, repository, configuration, credential, or publication access.
 from __future__ import annotations
 
 import fcntl
+import math
 import os
-from pathlib import Path
 import selectors
 import signal
 import stat
@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 import uuid
-import math
+from pathlib import Path
 
 from .investigation_evidence import MAX_PROJECTION, Projection
 

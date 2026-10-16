@@ -6,16 +6,19 @@ Provisioning is operator-only. Import cannot replace durable publication state.
 import argparse
 import json
 import os
-from pathlib import Path
 import re
 import stat
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
-from . import investigation_evidence as evidence, investigation_model as model
-from . import investigation_outbox as outbox, investigation_publisher as publisher, publisher_status
-from .publisher_credentials import AppTokens, app_policy, protected_read
+from . import investigation_evidence as evidence
+from . import investigation_model as model
+from . import investigation_outbox as outbox
+from . import investigation_publisher as publisher
+from . import publisher_status
 from .investigation_publication import REFUSALS as EVIDENCE_FAILURE_CODES
+from .publisher_credentials import AppTokens, app_policy, protected_read
 
 
 def protected_store(path):
@@ -155,7 +158,7 @@ def operate(policy, args):
             try:
                 with evidence.directory(Path(policy['state'])) as fd:
                     model._write(fd, 'import-result.json', {'version': 1, 'result': 'refused', 'at': evidence.utc(time.time())})
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort audit must not mask the refusal
                 pass
             raise
     if args.verify_token:
@@ -198,14 +201,14 @@ def main(argv):
     except (publisher.PublisherRefused, evidence.EvidenceRefused) as error:
         code = str(error)
         result, exit_code = {'ok': False, 'code': code if code in FAILURE_CODES else 'publisher_unavailable'}, 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - any broker failure must fail closed
         result, exit_code = {'ok': False, 'code': 'publisher_unavailable'}, 1
     if policy is not None:
         try:
             status = publisher_status.write(policy)
             if args.status and exit_code == 0:
                 result = status
-        except Exception:
+        except Exception:  # noqa: BLE001 - status write failure must not obscure delivery
             # A POST may already be delivered. Never obscure it or authorize retry.
             result = {**result, 'status_write_failed': True}
     print(json.dumps(result))

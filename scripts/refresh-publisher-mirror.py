@@ -1,7 +1,16 @@
 #!/usr/bin/python3
 """PREPARE ONLY: root imports one approved local bundle, never fetches a remote."""
-import argparse,fcntl,hashlib,json,os,pwd,re,stat,subprocess
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import pwd
+import re
+import stat
+import subprocess
 from pathlib import Path
+
 ROOT=Path('/opt/factory-publisher/octant-private')
 SCOPE=Path('/etc/factory-publisher/scope.json')
 SCOPE_SHA='4dbb4daeced6eaeeb78f275aec4ec607159ac294505871eb7f7b3a68252bcfa5'
@@ -18,7 +27,7 @@ def main():
     try:
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
         def run(args):
-            r=subprocess.run(args,capture_output=True,timeout=180,env={'PATH':'/usr/bin:/bin','HOME':'/root','GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null','GIT_NO_REPLACE_OBJECTS':'1'})
+            r=subprocess.run(args,check=False,capture_output=True,timeout=180,env={'PATH':'/usr/bin:/bin','HOME':'/root','GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null','GIT_NO_REPLACE_OBJECTS':'1'})
             assert r.returncode in ((0,3) if args[:2]==['systemctl','is-active'] else (0,)),'git_or_unit_check_failed'
             return r.stdout
         for unit in ('factory-publisher.service','factory-publisher-check.service'):
@@ -59,4 +68,4 @@ print('scope_valid')
     finally:os.close(fd)
 if __name__=='__main__':
     try:main()
-    except Exception:print('{"state":"refused","code":"mirror_refresh_failed"}');raise SystemExit(1)
+    except Exception:print('{"state":"refused","code":"mirror_refresh_failed"}');raise SystemExit(1)  # noqa: BLE001 - fail closed with a fixed refusal; never echo error text

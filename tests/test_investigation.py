@@ -12,9 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from factory import config  # noqa: E402
-
-from tests.test_factory import make_repo  # noqa: E402
+from factory import config
+from tests.test_factory import make_repo
 
 
 class InvestigationLaneTest(unittest.TestCase):

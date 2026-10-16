@@ -18,16 +18,14 @@ dispatcher never sees (see docs/deployment-lifecycle.md).
 from __future__ import annotations
 
 import argparse
-import fcntl
-import json
 import os
 import re
-import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
-from factory import artifacts, config, deploy, diagnostics, dispatch, incidents, tf_plan_check
+from factory import artifacts, config, deploy, diagnostics, dispatch, incidents
 from factory.config import Config
 
 cfg: Config
@@ -96,7 +94,7 @@ def fetch_pr_review_evidence(pr_number: int, repo: str = "") -> dict | None:
         res = dispatch.gh_json(args)
         if isinstance(res, dict):
             return res
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - missing review evidence is treated as unavailable
         pass
     return None
 
@@ -162,7 +160,7 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
                     has_next = bool(page_info.get("hasNextPage"))
                     next_cursor = page_info.get("endCursor")
                     raw_items = pr_conn.get("nodes") or []
-            except Exception:
+            except Exception:  # noqa: BLE001 - GraphQL failure falls back to `gh pr list`
                 raw_items = []
 
         if page == 1 and not raw_items:
@@ -177,7 +175,7 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
                 if isinstance(prs, list):
                     raw_items = prs
                     has_next = len(raw_items) >= page_size
-            except Exception:
+            except Exception:  # noqa: BLE001 - listing failure ends pagination with no candidates
                 raw_items = []
 
         if not raw_items:
@@ -314,7 +312,7 @@ def apply_escalate(
         queue_errors = incidents.sync_failed(cfg)
         if queue_errors:
             log(f"#{n}: incident queue incomplete: {len(queue_errors)} run(s)")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - outbox failure must not replace the terminal deployment
         log(f"#{n}: incident queue skipped: {type(exc).__name__}")
     body = f"`factory apply` did not proceed: {reason}."
     try:
@@ -327,7 +325,7 @@ def apply_escalate(
         )
         if pr is not None:
             post_comment("pr", pr, body)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - notifications are best-effort after escalation is recorded
         log(f"#{n}: notification failed: {exc}")
     log(f"#{n}: apply escalated ({reason})")
 
@@ -421,7 +419,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
             deploy.record_deploy_run(running_run)
             try:
                 v_ok, v_err = adapter.verify(ctx)
-            except Exception as verify_err:  # an applied change is never reported healthy by default
+            except Exception as verify_err:  # noqa: BLE001 - an applied change is never reported healthy by default
                 v_ok, v_err = False, f"post-apply verification raised {type(verify_err).__name__}: {verify_err}"
             if not v_ok:
                 exec_res.ok = False
@@ -433,7 +431,7 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         try:
             planned_jobs = [{key: value for key, value in job.items() if key in ("id", "namespace", "region")}
                             for job in health.nomad_jobs(ctx.metadata.get("plan")) if job.get("id")][:8]
-        except Exception as lineage_err:
+        except Exception as lineage_err:  # noqa: BLE001 - optional lineage must not block persistence
             # Optional diagnostic lineage must not prevent terminal persistence.
             # Exception messages can contain private plan content.
             log(f"#{n}: diagnostic plan lineage unavailable: {type(lineage_err).__name__}")
@@ -471,12 +469,12 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
                 try:
                     bundle = diagnostics.collect(final_run, diagnostics.policy(target_obj.diagnostics), ctx.env)
                     artifacts.write_diagnostics(cfg.factory, final_run, bundle)
-                except Exception as diagnostic_err:
+                except Exception as diagnostic_err:  # noqa: BLE001 - diagnostics are best-effort; a collector failure must not crash apply
                     log(f"#{n}: diagnostics unavailable: {type(diagnostic_err).__name__}")
             sinks = artifacts.publish(cfg.factory, target, final_run.run_id, post_comment)
             if any(st == "pending" for st in sinks.values()):
                 log(f"#{n}: publication pending retry ({sinks})")
-        except Exception as notify_err:
+        except Exception as notify_err:  # noqa: BLE001 - publication failures are retried on later passes
             log(f"#{n}: artifact publication failed: {notify_err}")
 
         if not exec_res.ok:
@@ -627,7 +625,7 @@ def main(argv: list[str]) -> int:
         try:
             private = retention.prune(cfg.factory, dry_run=args.dry_run)
             log(f"private retention: {'would prune' if args.dry_run else 'pruned'} {len(private['removed'])} runs; {len(private['retained'])} retained; {len(private['errors'])} errors")
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - retention is optional housekeeping
             # Optional housekeeping must not become a deployment prerequisite.
             # Exception text may contain private paths or malformed raw rows.
             log(f"private retention skipped: {type(error).__name__}; inspect with factory prune-private --dry-run")
@@ -679,7 +677,7 @@ def main(argv: list[str]) -> int:
                     has_errors = True
                     continue
 
-                def check_touch(c: str) -> bool:
+                def check_touch(c: str, target: config.DeployTarget = target) -> bool:
                     if target.dir == cfg.apply_dir:
                         return touches_apply_dir(c)
                     return touches_target_dir(c, target.dir)
@@ -750,7 +748,7 @@ def main(argv: list[str]) -> int:
                 if queue_errors:
                     log(f"incident queue incomplete: {len(queue_errors)} run(s)")
                 incidents.deliver(cfg.factory, incidents.GitHub(cfg))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - incident delivery must not fail the apply pass
                 log(f"incident delivery skipped: {type(exc).__name__}")
         deploy.release_lock(lock_fd)
 

@@ -3,14 +3,16 @@
 Only freshly rendered fixed envelopes can enter. Caller supplies a separately
 reviewed publisher transport and identity; model output never supplies either.
 """
-from contextlib import contextmanager
 import fcntl
 import os
 import re
 import stat
 import time
+from contextlib import contextmanager
 
-from . import incidents, investigation_model as model, investigation_evidence as evidence
+from . import incidents
+from . import investigation_evidence as evidence
+from . import investigation_model as model
 
 
 @contextmanager
@@ -119,7 +121,7 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
                     break
             else:
                 return row
-        except Exception:
+        except Exception:  # noqa: BLE001 - lookup failure must fail closed (no POST)
             return row  # Lookup failed; no POST, no raw exception persisted.
         if row["state"] == "uncertain":
             return row
@@ -144,7 +146,7 @@ def deliver(cfg, incident, run, *, publisher, publisher_login, now=None):
                              "invalid_publication_destination")
         except incidents.RequestRefused:
             row.update(state="failed", code="post_rejected")
-        except Exception:
+        except Exception:  # noqa: BLE001 - unknown POST outcome stays uncertain
             row.update(code="post_outcome_unknown")
         else:
             row.update(state="delivered", code="confirmed")
@@ -182,6 +184,6 @@ def snapshot(cfg):
                         states[row["state"]] += 1
             finally:
                 os.close(fd)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any scan failure reports unavailable
         result = {"status": "unavailable", "states": {s: 0 for s in states}}
     return result

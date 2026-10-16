@@ -210,7 +210,9 @@ marks the `pr` sink `skipped`. Sinks are independent: one failing leaves the oth
 posted and the run's terminal state untouched. `factory apply` retries `pending` sinks
 at the start of each pass (up to 10 attempts, then `failed`).
 
-**Lookup.** The dashboard serves `/api/artifacts/<target>/<run_id>/<name>` only for names
+**Lookup.** *Pending MAT-193:* the upstream workspace UI does not serve this route yet, so
+artifact URLs in `factory dashboard --json` currently go nowhere. Once ported, the dashboard
+serves `/api/artifacts/<target>/<run_id>/<name>` only for names
 listed in the run's manifest whose on-disk sha256 still matches. `/api/file` refuses
 `private/`, `artifacts/`, `apply-checkout/`, raw `terraform-apply-*` logs, plan and
 state files.
@@ -354,7 +356,8 @@ verify their hashes when serving them. Historical journal output is excluded
 from the deployment projection. The generic `/api/file` route refuses both
 `events.jsonl` and rotated segments (also through symlink aliases), as well as
 private plans/state and raw apply logs. No historical journal rewrite is needed.
-The dashboard remains subject to its existing loopback/access restrictions.
+The dashboard binds to loopback by default and its APIs require the workspace
+access key; the fork's former hard refusal of non-loopback binds is pending MAT-193.
 
 Private plans remain in `.factory/private/<run_id>/` for recovery. Automated
 retention keeps the latest ten terminal runs per target plus protected runs (see below).

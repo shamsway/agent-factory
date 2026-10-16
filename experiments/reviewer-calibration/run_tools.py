@@ -21,7 +21,14 @@ reviewer mutated its clone.
 usage: run_tools.py <out-dir> <samples> [contract ...]
 """
 import concurrent.futures as cf
-import hashlib, json, pathlib, shutil, subprocess, sys, tempfile, time
+import hashlib
+import json
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 
 from run_calibration import checkout
 
@@ -30,7 +37,17 @@ REPO = "/home/mike/dev/mikeroysoft/factory"
 CONTRACTS = {"baseline": "cadb9981524ab5506693e27f56ff8ac4ef911da6",
              "landed": "29d21d625bd92b9f3aa6d8ac0c8da1386233f284"}
 CHECKOUT_ROOT = pathlib.Path("/tmp/cal-checkout")
-CASES = ["12-before", "20-before"]                 # the defect-bearing heads
+def _defect_cases() -> list[str]:
+    """Heads whose oracle expects REVISE (primary defects)."""
+    cases = []
+    for case_dir in sorted((EXP / "cases").iterdir()):
+        oracle = json.loads((case_dir / "oracle.json").read_text())
+        if oracle.get("expected_verdict") == "REVISE":
+            cases.append(case_dir.name)
+    return cases
+
+
+CASES = _defect_cases()  # defect-bearing heads only
 MODEL = "anthropic/claude-fable-5-1"               # the repo's configured reviewer model
 TIMEOUT = 900
 
@@ -73,10 +90,10 @@ def review(contract: str, case: str, sample: int) -> dict:
         proc = subprocess.run(["omp", "-p", "--mode", "text", "--no-session", "--no-title",
                                "--auto-approve", "--max-time", "600", "--model", MODEL, prompt],
                               cwd=wt, capture_output=True, text=True, timeout=TIMEOUT,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, check=False)
         elapsed = round(time.monotonic() - started, 1)
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=wt,
-                               capture_output=True, text=True).stdout.strip()
+                               capture_output=True, text=True, check=False).stdout.strip()
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return {"contract": contract, "contract_commit": CONTRACTS[contract], "case": case,

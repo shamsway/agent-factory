@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest import mock
 
 from factory import artifacts, config, deploy
-
 from tests.test_factory import make_repo
 
 SECRET = "s3cr3t-apply-value-123"
@@ -219,6 +218,7 @@ class LookupAndServingTest(unittest.TestCase):
             (fx.run_dir / "apply.log").write_text(f"tampered {SECRET}")
             self.assertIsNone(artifacts.lookup(f, "default", rid, "apply.log"))
 
+    @unittest.skip("MAT-193: artifact serving moves to the workspace; upstream removed dashboard.Handler")
     def test_dashboard_serves_artifacts_but_never_private_files(self) -> None:
         from factory import dashboard
 

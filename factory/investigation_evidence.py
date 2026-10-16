@@ -5,20 +5,20 @@ investigator boundary; the legacy worker must never receive the store or bundle.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import fcntl
 import gzip
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import stat
 import time
 import urllib.parse
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 from . import artifacts, deploy, incidents, lifecycle
 
@@ -60,7 +60,7 @@ def encoded(obj) -> bytes:
 def timestamp(value) -> float:
     require(isinstance(value, str) and len(value) <= 40)
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))  # noqa: FURB162 - keep error codes
         require(dt.tzinfo is not None)
         return dt.timestamp()
     except (ValueError, OverflowError):
@@ -68,7 +68,7 @@ def timestamp(value) -> float:
 
 
 def utc(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).isoformat()
+    return datetime.fromtimestamp(value, UTC).isoformat()
 
 
 def number(value) -> bool:
@@ -197,9 +197,8 @@ def durable_run(fd, run_id, target, ticket, deadline):
                 if any(r.get("event") == "deploy_run" and r.get("run_id") == run_id
                        for chunk in chunks for r in chunk):
                     break
-                with file_at(fd, (name,)) as archived:
-                    with gzip.GzipFile(fileobj=archived) as handle:
-                        chunks.append(scan(handle))
+                with file_at(fd, (name,)) as archived, gzip.GzipFile(fileobj=archived) as handle:
+                    chunks.append(scan(handle))
         except (OSError, EOFError):
             raise EvidenceRefused("journal_unavailable") from None
     rows = [row for chunk in reversed(chunks) for row in chunk]
@@ -248,7 +247,7 @@ def read_incident(factory, incident_id):
         return row
     except EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any parse failure must fail closed
         raise EvidenceRefused("invalid_evidence") from None
 
 
@@ -300,7 +299,7 @@ def project(bundle, run, now):
                         and (lineage.get("region") or "") == j[2] and lineage.get("version") == j[3]), None)
         if not matched:
             continue  # Includes all free text, local logs, dependency payloads.
-        jid, ns, region, version = matched
+        jid, ns, _region, version = matched
         require(type(lineage.get("version")) is int if type(version) is int else lineage.get("version") is None)
         scope = {"job": alias("job", jid), "namespace": alias("namespace", ns), "version": version}
         prefix = "nomad/job/" + urllib.parse.quote(jid, safe="")
@@ -460,5 +459,5 @@ def read_evidence(factory: Path, incident_id: str, run_id: str, *, now=None) -> 
                               and incident.get("uncertain") is False)
     except EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any projection failure must fail closed
         raise EvidenceRefused("invalid_evidence") from None

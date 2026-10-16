@@ -7,14 +7,23 @@ evidence of a sandboxed investigation or production activation.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import re
+from dataclasses import dataclass
 
 from . import incidents
-
-from .investigation_evidence import (Projection, EvidenceRefused, require, encoded, timestamp, utc,
-                                     MAX_PROJECTION, MAX_ROWS, read_evidence, read_incident)
+from .investigation_evidence import (
+    MAX_PROJECTION,
+    MAX_ROWS,
+    EvidenceRefused,
+    Projection,
+    encoded,
+    read_evidence,
+    read_incident,
+    require,
+    timestamp,
+    utc,
+)
 
 MAX_RESULT = 8192
 MAX_PUBLIC = 16384
@@ -135,7 +144,7 @@ def render(projection: Projection, raw_result: bytes) -> str:
         return _render(projection, raw_result)
     except EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any render failure must fail closed
         raise EvidenceRefused("invalid_result") from None
 
 

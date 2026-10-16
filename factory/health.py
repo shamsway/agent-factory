@@ -30,8 +30,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 EVIDENCE_VERSION = 1
 DETAIL_MAX = 500

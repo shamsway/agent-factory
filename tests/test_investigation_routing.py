@@ -1,10 +1,11 @@
 """Deployment roots cannot reach legacy execution or free-form publication."""
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from factory import config, deploy, dispatch, incidents, investigation_routing
+from factory.investigation_evidence import EvidenceRefused
 from tests.test_factory import make_repo
 
 
@@ -188,7 +189,7 @@ class RoutingTests(unittest.TestCase):
         destination.write_text("")
         (root / "11.lock").symlink_to(destination)
         remote = mock.Mock()
-        with self.assertRaises(Exception):
+        with self.assertRaises(EvidenceRefused):
             investigation_routing.handoff(dispatch.cfg, 11, remote=remote)
         remote.api.assert_not_called()
 

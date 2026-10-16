@@ -16,7 +16,6 @@ from pathlib import Path
 from unittest import mock
 
 from factory import apply, artifacts, config, deploy, dispatch, health
-
 from tests.test_factory import make_repo
 
 TOKEN = "nomad-acl-token-0123456789abcdef"
@@ -121,7 +120,7 @@ class NomadPolicyTest(unittest.TestCase):
         self.assertEqual(ev["verdict"], "healthy")
         item = ev["items"][0]
         self.assertEqual((item["policy"], item["state"]), ("periodic-registered", "healthy"))
-        method, path, query, token = self.nomad.requests[0]
+        _method, _path, query, token = self.nomad.requests[0]
         self.assertEqual((query["namespace"], query["region"], token), ("default", "home", TOKEN))
         self.assertNotIn(TOKEN, json.dumps(ev))
 
@@ -367,7 +366,7 @@ interval = 1
         self.addCleanup(nomad.close)
         with tempfile.TemporaryDirectory() as d, \
              mock.patch.object(health, "verify", side_effect=RuntimeError("boom")):
-            run, escalations, _ = self.run_apply(nomad, Path(d))
+            run, _escalations, _ = self.run_apply(nomad, Path(d))
         self.assertEqual(run.status, deploy.DeployStatus.FAILED)
         self.assertIn("raised RuntimeError", run.error)
 

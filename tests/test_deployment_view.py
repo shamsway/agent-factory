@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
 from factory import artifacts, deploy, deployment_view
 
 
@@ -18,7 +19,7 @@ class DeploymentViewTest(unittest.TestCase):
             rows = [row('pending', 'pending'), {**row('failed', 'failed'), 'ticket': 2, 'output': 'unknown old secret'},
                     {**row('success', 'succeeded', duration_sec=0), 'ticket': 3},
                     {**row('superseded', 'failed'), 'ticket': 4},
-                    dict(event='deploy_superseded', run_id='superseded', target='default')]
+                    {'event': 'deploy_superseded', 'run_id': 'superseded', 'target': 'default'}]
             data = deployment_view.project(Path(tmp), rows)
             self.assertNotIn('unknown old secret', json.dumps(data))
             self.assertEqual({r['status'] for r in data['runs']}, {'pending','failed','succeeded','superseded'})
@@ -64,7 +65,7 @@ class DeploymentViewTest(unittest.TestCase):
             self.assertEqual(data['runs'][0]['status'], 'executing')
 
     def test_compatibility_success_cannot_turn_skipped_run_into_success(self):
-        rows = [row('skip', 'skipped'), dict(event='applied', run_id='skip', ticket=1, ok=True)]
+        rows = [row('skip', 'skipped'), {'event': 'applied', 'run_id': 'skip', 'ticket': 1, 'ok': True}]
         state = deploy.replay_rows(rows)['default']
         self.assertEqual(state.runs[0].status, deploy.DeployStatus.SKIPPED)
 
@@ -83,9 +84,8 @@ class HistoryAvailabilityTest(unittest.TestCase):
     def test_optional_projection_failure_is_isolated(self):
         with mock.patch.object(
             deployment_view, "project", side_effect=PermissionError("lock")
-        ):
-            with self.assertLogs("factory.deployment_view", level="WARNING"):
-                self.assertIsNone(deployment_view.safe_project(Path("."), []))
+        ), self.assertLogs("factory.deployment_view", level="WARNING"):
+            self.assertIsNone(deployment_view.safe_project(Path("."), []))
 
     def test_missing_start_timestamp_does_not_break_history(self):
         event = row("missing-start", "succeeded")
