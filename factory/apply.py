@@ -614,6 +614,8 @@ def main(argv: list[str]) -> int:
     unknown = deploy.unknown_adapters(cfg.targets.values())
     if unknown:
         log(f"error: unknown deploy adapter ({'; '.join(unknown)}); registered: {', '.join(sorted(deploy.ADAPTERS))}")
+        for err in deploy.PLUGIN_ERRORS:
+            log(f"error: deploy adapter plugin: {err}")
         return 1
 
     a_ok, lock_fd = deploy.acquire_apply_lock(cfg.factory)

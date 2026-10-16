@@ -1752,6 +1752,62 @@ enabled = false
             lock_mock.assert_not_called()
 
 
+class _EntryPoint:
+    def __init__(self, name: str, value: str, target=None, error: Exception | None = None) -> None:
+        self.name, self.value, self._target, self._error = name, value, target, error
+
+    def load(self):
+        if self._error:
+            raise self._error
+        return self._target
+
+
+class PluginAdapterTest(unittest.TestCase):
+    """Adapters from installed packages register by entry point and fail closed."""
+
+    def load_with(self, *eps: _EntryPoint):
+        with mock.patch("importlib.metadata.entry_points", return_value=list(eps)) as ep_mock:
+            deploy.load_plugin_adapters()
+            deploy.load_plugin_adapters()  # second call is a no-op
+        ep_mock.assert_called_once_with(group=deploy.PLUGIN_GROUP)
+
+    def setUp(self) -> None:
+        for patcher in (
+            mock.patch.dict(deploy.ADAPTERS),
+            mock.patch.object(deploy, "PLUGIN_ERRORS", []),
+            mock.patch.object(deploy, "_plugins_loaded", False),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_plugin_adapter_is_registered_and_resolved(self) -> None:
+        class SiteAdapter(deploy.FakeDeployAdapter):
+            pass
+
+        self.load_with(_EntryPoint("Site-Platform", "site_pkg:SiteAdapter", SiteAdapter))
+        self.assertIsInstance(deploy.get_adapter("site-platform"), SiteAdapter)
+        self.assertEqual(deploy.PLUGIN_ERRORS, [])
+
+    def test_broken_plugins_are_skipped_and_recorded(self) -> None:
+        self.load_with(
+            _EntryPoint("missing", "gone_pkg:Adapter", error=ImportError("No module named 'gone_pkg'")),
+            _EntryPoint("not-adapter", "site_pkg:helper", target=object),
+            _EntryPoint("terraform", "site_pkg:Shadow", target=deploy.FakeDeployAdapter),
+        )
+        self.assertIs(deploy.ADAPTERS["terraform"], deploy.TerraformDeployAdapter)
+        for name in ("missing", "not-adapter"):
+            self.assertNotIn(name, deploy.ADAPTERS)
+            with self.assertRaisesRegex(ValueError, f"unknown deploy adapter '{name}'"):
+                deploy.get_adapter(name)
+        self.assertEqual(len(deploy.PLUGIN_ERRORS), 3)
+        self.assertIn("gone_pkg", deploy.PLUGIN_ERRORS[0])
+
+    def test_absent_plugin_still_rejected_before_any_work(self) -> None:
+        self.load_with()
+        target = config.DeployTarget(name="app", dir="deploy/app", adapter="site-platform")
+        self.assertEqual(deploy.unknown_adapters([target]), ["app: site-platform"])
+
+
 class TerraformProcessIsolationTest(unittest.TestCase):
     """`terraform apply` must outlive an abrupt Factory exit and stop gracefully on timeout."""
 
