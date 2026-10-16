@@ -2363,10 +2363,15 @@ def process_ticket(
                 promptfile.write_text(build_prompt(n, wt, investigation=True))
                 logfile = LOGS / f"{n}-attempt-1.log"
                 started = time.monotonic()
-                code = run_worker(cfg.worker(labels, promptfile, wt), wt, logfile)
+                code, fired = run_worker(
+                    cfg.worker(labels, promptfile, wt),
+                    wt, logfile, wt / ".factory" / f"handoff-{n}.md", deadline,
+                )
+                timeout = {"timeout": fired, "reason": TIMEOUT_REASONS[fired]} if fired else {}
                 record(
                     "attempt", ticket=n, attempt=1, worker_exit=code, gate=None,
                     seconds=int(time.monotonic() - started), cost=log_cost(logfile), log=str(logfile),
+                    **timeout,
                 )
                 finish_investigation(n, wt, logfile)
                 if wt.is_dir():
