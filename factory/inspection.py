@@ -50,7 +50,8 @@ def read(path: Path, limit: int = LIMIT) -> bytes:
 
 def command(argv: list[str], *, cwd: Path | None = None, env: dict | None = None) -> str:
     try:
-        result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=10)
+        result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, timeout=10,
+                                check=False)
     except (OSError, subprocess.SubprocessError):
         raise Unavailable("command_unavailable") from None
     if result.returncode or len(result.stdout) > LIMIT:
@@ -283,7 +284,7 @@ def _scan(lines, rows: list[dict], digest, remaining: int) -> int:
             continue  # lifecycle.append explicitly quarantines interrupted tails
         row = json.loads(line)
         if not isinstance(row, dict):
-            raise ValueError
+            raise ValueError  # noqa: TRY004 - callers handle ValueError, not TypeError
         if row.get("event") not in deploy.REPLAY_EVENTS:
             continue
         remaining -= len(line)

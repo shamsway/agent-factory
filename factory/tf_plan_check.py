@@ -71,12 +71,12 @@ def run_plan(cwd: Path, planfile: Path, env: dict | None = None) -> subprocess.C
     apply.env explicitly instead -- confirmed live, that plan 401'd against
     1Password's desktop-app flow because apply_env()'s credentials were
     computed but never actually passed to this subprocess."""
-    init = subprocess.run(
+    init = subprocess.run(  # noqa: PLW1510 - returncode is checked; test fakes reject check=
         ["terraform", "init", "-input=false", "-no-color"], cwd=cwd, capture_output=True, text=True, env=env
     )
     if init.returncode != 0:
         return init
-    return subprocess.run(
+    return subprocess.run(  # noqa: PLW1510 - caller checks returncode; test fakes reject check=
         ["terraform", "plan", "-input=false", "-no-color", "-out", str(planfile)],
         cwd=cwd,
         capture_output=True,

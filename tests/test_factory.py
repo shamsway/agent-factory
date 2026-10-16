@@ -16,6 +16,7 @@ import tempfile
 import unittest
 import venv
 from pathlib import Path
+from typing import Self
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -1363,7 +1364,7 @@ class DashboardTest(unittest.TestCase):
         class FakeResponse:
             status = 200
 
-            def __enter__(self) -> FakeResponse:
+            def __enter__(self) -> Self:
                 return self
 
             def __exit__(self, *exc: object) -> bool:
@@ -3171,7 +3172,7 @@ class DispatchTest(unittest.TestCase):
             head = git(repo, "rev-parse", "HEAD")
             with mock.patch.object(dispatch, "gh_json", return_value=issue) as gh_mock, \
                  mock.patch.object(dispatch, "run", side_effect=fake_run):
-                verdict, findings = dispatch.review(repo, 45, "gate report", head)
+                verdict, _findings = dispatch.review(repo, 45, "gate report", head)
             self.assertEqual(verdict, "APPROVE")
             self.assertIn("Add a widget", captured["prompt"])
             self.assertIn("Acceptance: widget exists.", captured["prompt"])

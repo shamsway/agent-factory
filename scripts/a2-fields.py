@@ -63,5 +63,5 @@ def after(work):
 if __name__=='__main__':
     try:
         {'before':before,'after':after}[sys.argv[1]](Path(sys.argv[2]))
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail closed with a fixed refusal; never echo error text
         print('{"state":"refused","code":"a2_metadata_check_failed"}',file=sys.stderr);sys.exit(1)

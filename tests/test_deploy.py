@@ -1243,7 +1243,7 @@ class ReviewDefectsRegressionTest(unittest.TestCase):
             git(repo, "checkout", "-b", "agent/20")
             (repo / "terraform" / "main.tf").write_text("v2")
             git(repo, "commit", "-q", "-am", "commit 1 of PR")
-            c1 = git(repo, "rev-parse", "HEAD")
+            git(repo, "rev-parse", "HEAD")
 
             (repo / "terraform" / "main.tf").write_text("v3")
             git(repo, "commit", "-q", "-am", "commit 2 of PR")
@@ -1803,16 +1803,19 @@ class TerraformProcessIsolationTest(unittest.TestCase):
         """Regression for the live post-migration test C: a SIGKILLed Factory
         previously killed terraform through its stdout pipe, leaving a partial
         apply and a held state lock."""
+        src = str(Path(deploy.__file__).resolve().parents[1])
+        root, factory_dir = str(self.root), str(self.root / ".factory")
+        planfile, env = str(self.root / "plan"), {**self.env, "FAKE_TF_TICKS": "15"}
         script = (
             "import sys; from pathlib import Path\n"
-            "sys.path.insert(0, %r)\n"
+            f"sys.path.insert(0, {src!r})\n"
             "from factory import config, deploy\n"
             "ctx = deploy.DeployContext(target=config.DeployTarget(name='default', dir='.'),\n"
-            "    ticket={'ticket': 90, 'pr': 91, 'commit': 'c90'}, root=Path(%r),\n"
-            "    factory_dir=Path(%r), worktree=Path(%r), planfile=Path(%r), env=%r)\n"
+            f"    ticket={{'ticket': 90, 'pr': 91, 'commit': 'c90'}}, root=Path({root!r}),\n"
+            f"    factory_dir=Path({factory_dir!r}), worktree=Path({root!r}), planfile=Path({planfile!r}),"
+            f" env={env!r})\n"
             "deploy.TerraformDeployAdapter(timeout_sec=60).execute(ctx)\n"
-        ) % (str(Path(deploy.__file__).resolve().parents[1]), str(self.root), str(self.root / ".factory"),
-             str(self.root), str(self.root / "plan"), {**self.env, "FAKE_TF_TICKS": "15"})
+        )
         (self.root / "plan").touch()
         factory_proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(lambda: factory_proc.poll() is None and factory_proc.kill())

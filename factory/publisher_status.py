@@ -107,12 +107,12 @@ def observe(cfg, *, now=None):
         return {'status': 'stale' if age > MAX_AGE else 'observed', **result}
     except FileNotFoundError:
         return {'status': 'missing'}
-    except Exception:
+    except Exception:  # noqa: BLE001 - any read failure reports malformed or missing
         # file_at normalizes missing files; distinguish only actual absent pathname.
         try:
             if not path.exists() and not path.is_symlink():
                 return {'status': 'missing'}
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - fall back to malformed on any probe error
             pass
         return {'status': 'malformed'}
 

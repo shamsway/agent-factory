@@ -53,7 +53,7 @@ def read_bundle(path):
         return json.loads(raw, object_pairs_hook=evidence.unique_pairs)
     except evidence.EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any decode error must fail closed
         raise evidence.EvidenceRefused('transfer_invalid') from None
 
 
@@ -287,7 +287,7 @@ def main(argv):
     except evidence.EvidenceRefused as error:
         code = str(error)
         result, exit_code = {'ok': False, 'code': code if code in EXPORT_FAILURE_CODES else 'transfer_unavailable'}, 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - withhold raw export errors
         result, exit_code = {'ok': False, 'code': 'transfer_unavailable'}, 1
     print(json.dumps(result))
     return exit_code

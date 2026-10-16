@@ -35,7 +35,7 @@ systemctl() {
 }
 ''' + ('echo failed' if failed else 'echo inactive') + ' > "$work/state"\n' + cleanup + "\ntrap cleanup EXIT\nexit " + ("7" if failed else "0") + "\n"
             result = subprocess.run(['bash', '-c', harness, 'cleanup-test', directory],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True, check=False)
             self.assertEqual(result.returncode, 7 if failed else 0, result.stderr)
             calls = (root / 'calls').read_text().splitlines()
             if failed:

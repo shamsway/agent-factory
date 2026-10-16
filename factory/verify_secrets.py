@@ -34,7 +34,7 @@ def unit_env(unit: str) -> dict[str, str] | None:
     """Loaded unit environment (including drop-ins), never print property values."""
     r = subprocess.run(
         ["systemctl", "--user", "show", "--property=LoadState,Environment,EnvironmentFiles,UnsetEnvironment", "--", unit],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     if r.returncode:
         raise OSError("unit inspection unavailable")
@@ -96,7 +96,7 @@ def check_gh_token(token: str) -> str:
     r = subprocess.run(
         ["gh", "api", "-i", "user"],
         env={"GH_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     if r.returncode != 0:
         return "auth FAILED"
@@ -108,7 +108,7 @@ def check_op_token(token: str) -> str:
     r = subprocess.run(
         ["op", "vault", "list", "--format=json"],
         env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=10, check=False,
     )
     if r.returncode != 0:
         return "FAILED: authentication check rejected"

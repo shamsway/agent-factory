@@ -60,14 +60,17 @@ class ProtectedReadTests(unittest.TestCase):
     def test_foreign_owner_on_ancestor_or_file(self):
         original = os.fstat
         for inode in (self.root.stat().st_ino, self.path.stat().st_ino):
-            def foreign(fd):
+            def foreign(fd, *, inode=inode):
                 meta = original(fd)
                 if meta.st_ino == inode:
                     return SimpleNamespace(st_uid=os.geteuid() + 10000, st_mode=meta.st_mode)
                 return meta
-            with self.subTest(inode=inode), mock.patch.object(os, 'fstat', side_effect=foreign):
-                with self.assertRaises(PublisherRefused):
-                    credentials.protected_read(self.path)
+            with (
+                self.subTest(inode=inode),
+                mock.patch.object(os, 'fstat', side_effect=foreign),
+                self.assertRaises(PublisherRefused),
+            ):
+                credentials.protected_read(self.path)
 
     def systemd_layout(self, mode=0o440, gid=0):
         original = os.fstat
@@ -90,9 +93,12 @@ class ProtectedReadTests(unittest.TestCase):
     def test_secret_refuses_unsafe_modes_and_group(self):
         for mode, gid in ((0o640, 992), (0o440, 992), (0o444, 0), (0o460, 0),
                           (0o600, 0), (0o420, 0), (0o401, 0), (0o410, 0)):
-            with self.subTest(mode=oct(mode), gid=gid), self.systemd_layout(mode, gid):
-                with self.assertRaises(PublisherRefused):
-                    credentials.protected_read(self.path, secret=True)
+            with (
+                self.subTest(mode=oct(mode), gid=gid),
+                self.systemd_layout(mode, gid),
+                self.assertRaises(PublisherRefused),
+            ):
+                credentials.protected_read(self.path, secret=True)
 
     def test_real_checker_reads_and_parses_systemd_layout(self):
         from cryptography.hazmat.primitives import serialization
@@ -105,18 +111,24 @@ class ProtectedReadTests(unittest.TestCase):
             serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
         self.path.rename(self.root / 'app-key')
         self.path = self.root / 'app-key'
-        with self.systemd_layout(), mock.patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.root)):
-            with redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(publisher_key_check.main(), 0)
+        with (
+            self.systemd_layout(),
+            mock.patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.root)),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(publisher_key_check.main(), 0)
         self.assertEqual(json.loads(output.getvalue()), {'key_loadable': True, 'type': 'rsa', 'bits': 2048})
 
     def test_real_checker_rejects_bad_pem_without_error_text(self):
         from factory import publisher_key_check
         self.path.rename(self.root / 'app-key')
         self.path = self.root / 'app-key'
-        with self.systemd_layout(), mock.patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.root)):
-            with redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(publisher_key_check.main(), 1)
+        with (
+            self.systemd_layout(),
+            mock.patch.dict(os.environ, CREDENTIALS_DIRECTORY=str(self.root)),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(publisher_key_check.main(), 1)
         self.assertEqual(json.loads(output.getvalue()), {'key_loadable': False, 'type': None, 'bits': None})
         self.assertNotIn('synthetic', output.getvalue())
 
@@ -301,7 +313,7 @@ class AppTokenTests(unittest.TestCase):
 
     def test_response_shape_and_duplicate_keys_refused(self):
         for body in ('[]', '{"id":10,"id":11}', 'not-json'):
-            self.client = credentials.AppTokens(APP, wire_fn=lambda request: {'status': 'ok', 'body': body},
+            self.client = credentials.AppTokens(APP, wire_fn=lambda request, *, body=body: {'status': 'ok', 'body': body},
                                                clock=lambda: NOW, audit=self.audit.append)
             with self.subTest(body_shape=body[:1]):
                 self.refused()

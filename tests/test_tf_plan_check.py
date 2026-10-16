@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 
 class TfPlanCheckTest(unittest.TestCase):
@@ -44,13 +45,13 @@ class TfPlanCheckTest(unittest.TestCase):
             tf_plan_check.run_plan(Path("/tmp"), Path("/tmp/plan"))
         self.assertEqual(calls, [None, None])
 
-    CLEAN_PLAN = {
+    CLEAN_PLAN: ClassVar[dict] = {
         "resource_changes": [
             {"address": "aws_instance.foo", "change": {"actions": ["no-op"]}},
             {"address": "aws_s3_bucket.logs", "change": {"actions": ["create"]}},
         ]
     }
-    DESTRUCTIVE_PLAN = {
+    DESTRUCTIVE_PLAN: ClassVar[dict] = {
         "resource_changes": [
             {"address": "aws_instance.foo", "change": {"actions": ["no-op"]}},
             {"address": "aws_instance.bar", "change": {"actions": ["delete", "create"]}},

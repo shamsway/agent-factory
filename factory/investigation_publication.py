@@ -144,7 +144,7 @@ def render(projection: Projection, raw_result: bytes) -> str:
         return _render(projection, raw_result)
     except EvidenceRefused:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - any render failure must fail closed
         raise EvidenceRefused("invalid_result") from None
 
 

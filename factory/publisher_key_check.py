@@ -15,7 +15,7 @@ def main():
         key = serialization.load_pem_private_key(protected_read(path, secret=True), password=None)
         if isinstance(key, rsa.RSAPrivateKey) and key.key_size >= 2048:
             result = {'key_loadable': True, 'type': 'rsa', 'bits': key.key_size}
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - never print key, path or parser output
         pass  # Never print the key, path, parser output or exception.
     print(json.dumps(result, sort_keys=True))
     return 0 if result['key_loadable'] else 1

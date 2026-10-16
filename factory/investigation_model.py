@@ -164,7 +164,7 @@ def http_call(p, payload):
         if child.returncode or len(output) > 6 * MAX_HTTP:
             return {"status": "uncertain", "code": "transport_unknown"}
         return json.loads(output, object_pairs_hook=evidence.unique_pairs)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any transport failure is uncertain
         return {"status": "uncertain", "code": "transport_unknown"}
     finally:
         if child.poll() is None:
@@ -305,7 +305,7 @@ def _response(wire, p, projection, reserved):
         reason = "content_shape"
         content = message["content"]
         if not isinstance(content, str):
-            raise ValueError
+            raise ValueError  # noqa: TRY004 - converted to ResponseRefused below
         # Accept one whole-content Markdown wrapper only. Never extract JSON
         # from prose, nested/multiple fences, or an arbitrary language block.
         content = content.strip()
@@ -343,7 +343,7 @@ def _response(wire, p, projection, reserved):
                       "invalid_projection": "projection"}.get(str(error), "schema")
             raise ValueError from None
         return result, {k: usage[k] for k in keys}, body["model"]
-    except Exception:
+    except Exception:  # noqa: BLE001 - any validation failure refuses the response
         raise ResponseRefused(reason) from None
 
 
@@ -431,7 +431,7 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
                 attempt.update(state="failed", code="invalid_response", validation_reason=error.reason)
             except ModelRefused:
                 attempt.update(state="failed", code="invalid_response")
-            except Exception:
+            except Exception:  # noqa: BLE001 - unknown failures are recorded as uncertain
                 attempt.update(state="uncertain", code="transport_unknown")
             attempt.update(elapsed_sec=min(p["timeout"], max(0, time.monotonic() - began)), completed_at=incidents.now())
             state.update(state=attempt["state"], code=attempt["code"], completed_at=attempt["completed_at"])
@@ -514,7 +514,7 @@ def reset_main(argv=None):
         code = str(error) if not isinstance(error, config.ConfigError) else "configuration_invalid"
         print(json.dumps({"ok": False, "code": code}))
         return 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - withhold raw model state errors
         print(json.dumps({"ok": False, "code": "model_state_unavailable"}))
         return 1
 
@@ -566,7 +566,7 @@ def snapshot(cfg):
                             result["states"][state["state"]] += 1
             finally:
                 os.close(fd)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any state read failure reports unavailable
         result["status"] = "unavailable"
     return result
 
@@ -576,7 +576,7 @@ def investigate(cfg, incident_id, run_id, *, client=None, now=None):
         return _investigate(cfg, incident_id, run_id, client=client, now=now)
     except (ModelRefused, evidence.EvidenceRefused):
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - unexpected failures must fail closed
         raise ModelRefused("model_state_unavailable") from None
 
 
@@ -585,7 +585,7 @@ def prepare(cfg, incident_id, run_id, *, now=None):
         return _prepare(cfg, incident_id, run_id, now=now)
     except (ModelRefused, evidence.EvidenceRefused):
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 - unexpected failures must fail closed
         raise ModelRefused("model_state_unavailable") from None
 
 
@@ -686,6 +686,6 @@ def accept_main(argv=None):
         code = str(error) if not isinstance(error, config.ConfigError) else "configuration_invalid"
         print(json.dumps({"ok": False, "code": code}))
         return 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - withhold raw acceptance errors
         print(json.dumps({"ok": False, "code": "synthetic_acceptance_unavailable"}))
         return 1

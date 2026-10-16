@@ -931,7 +931,7 @@ def wait_for_pr_head(ref: str, head: str, *, timeout: float = 10.0) -> dict:
             current = gh_json(["pr", "view", ref, "--repo", REPO, "--json", "body,headRefOid"])
             if isinstance(current, dict) and current.get("headRefOid") == head:
                 return current
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - transient gh failures retry until the deadline
             pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -963,7 +963,7 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
                 error = ("PR head does not match the gated revision" if pr.get("headRefOid") != expected_head
                          else plan_summary.validate(pr.get("body") or "", expected_head))
                 pr_text = pr.get("body") or ""
-            except Exception:
+            except Exception:  # noqa: BLE001 - any verification failure must block the review
                 error = "Unable to verify Terraform PR description at the gated revision"
             if error:
                 record("review", ticket=n, verdict="REVISE", parsed=True, accepted=False,
@@ -1222,7 +1222,7 @@ def refuse_investigation_route(n, reason, *, dry_run=False):
     if reason == "incident_routing_unavailable":
         try:
             investigation_routing.note_availability(cfg, False, record)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - audit is best-effort; refusal already logged
             log(f"routing audit unavailable ({type(exc).__name__})")
         return
     try:
@@ -1230,7 +1230,7 @@ def refuse_investigation_route(n, reason, *, dry_run=False):
             receipt = investigation_routing.snapshot(FACTORY)
             comment = next((r["comment"] for r in receipt["handoffs"] if r["issue"] == n), "unavailable")
             record("investigation-route-refused", ticket=n, reason=reason, handed_to_human=True, comment_state=comment)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - handoff retries on the next pass
         log(f"#{n}: routing handoff pending ({type(exc).__name__})")
 
 
@@ -1241,7 +1241,7 @@ def finish_investigation(n: int, wt: Path, logfile: Path | None) -> None:
     try:
         fresh = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "body"])
         refusal = investigation_routing.blocked(FACTORY, {**fresh, "number": n})
-    except Exception:
+    except Exception:  # noqa: BLE001 - any routing failure must fail closed
         refusal = "incident_routing_unavailable"
     if refusal:
         refuse_investigation_route(n, refusal)
@@ -2266,7 +2266,7 @@ def process_ticket(
     if not dry_run:
         try:
             investigation_routing.note_availability(cfg, True, record)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - recovery audit is best-effort
             log(f"routing recovery audit unavailable ({type(exc).__name__})")
     wt = FACTORY / f"wt-{n}"
     worker = cfg.worker(labels, wt / ".factory-prompt.md", wt)[0]

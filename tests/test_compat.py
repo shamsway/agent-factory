@@ -71,11 +71,11 @@ class LegacyImportCompatTest(unittest.TestCase):
         env = {**os.environ, **env}
         legacy = subprocess.run(
             [sys.executable, "-m", "agent_factory.tf_plan_check", "--help"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, env=env, check=False,
         )
         canonical = subprocess.run(
             [sys.executable, "-m", "factory.tf_plan_check", "--help"],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, env=env, check=False,
         )
         self.assertEqual(legacy.returncode, 0, legacy.stderr)
         self.assertEqual(legacy.returncode, canonical.returncode)

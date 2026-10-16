@@ -83,7 +83,7 @@ def http_call(wire):
         if child.returncode or len(output) > 6 * wire["max_response_bytes"] + 1024:
             return {"status": "unknown"}
         return json.loads(output, object_pairs_hook=evidence.unique_pairs)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any transport failure is an unknown outcome
         return {"status": "unknown"}
     finally:
         if child.poll() is None:
@@ -131,7 +131,7 @@ class Publisher:
             raise PublisherRefused("publisher_outcome_unknown")
         try:
             return json.loads(wire["body"], object_pairs_hook=evidence.unique_pairs)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any decode failure refuses the response
             raise PublisherRefused("publisher_response_invalid") from None
 
     def verify(self):
@@ -157,7 +157,7 @@ def verify_status(cfg, *, wire_fn=None):
         return "read_verified"
     except incidents.RequestRefused:
         return "invalid"
-    except Exception:
+    except Exception:  # noqa: BLE001 - withhold raw verification errors
         return "unavailable"
 
 

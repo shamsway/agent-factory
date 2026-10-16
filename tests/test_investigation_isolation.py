@@ -20,7 +20,7 @@ def real_boundary(test):
         test.skipTest("requires Linux bubblewrap")
     try:
         probe = subprocess.run(["unshare", "--user", "--map-root-user", "--net", "true"],
-                               capture_output=True, timeout=5)
+                               capture_output=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired):
         probe = None
     if probe is None or probe.returncode:
@@ -43,9 +43,11 @@ class IsolationTest(unittest.TestCase):
         self.assertEqual(args[-4:], ["/usr/bin/python3", "-I", "-S", "/worker.py"])
 
     def test_unsupported_platform_fails_closed(self):
-        with patch.object(sys, "platform", "darwin"):
-            with self.assertRaisesRegex(isolation.IsolationRefused, "isolation_unavailable"):
-                isolation.run(Projection(b"{}"), b"pass")
+        with (
+            patch.object(sys, "platform", "darwin"),
+            self.assertRaisesRegex(isolation.IsolationRefused, "isolation_unavailable"),
+        ):
+            isolation.run(Projection(b"{}"), b"pass")
 
     def test_input_and_timeout_budgets(self):
         with self.assertRaisesRegex(isolation.IsolationRefused, "input_budget"):
@@ -75,7 +77,8 @@ class IsolationTest(unittest.TestCase):
         # scope, including when a controller reports 'max' or is unavailable.
         result = subprocess.run(["/usr/bin/python3", "-I", "-S", "-c",
                                  isolation.CGROUP_CHECK, "not-a-real-scope.scope",
-                                 "/usr/bin/printf", "worker-started"], capture_output=True)
+                                 "/usr/bin/printf", "worker-started"], capture_output=True,
+                                check=False)
         self.assertEqual(result.returncode, 125)
         self.assertEqual(result.stdout, b"")
 

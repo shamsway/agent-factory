@@ -9,16 +9,16 @@ from factory import retention
 
 
 def run(rid, status="succeeded", target="default"):
-    return dict(
-        event="deploy_run",
-        run_id=rid,
-        target=target,
-        ticket=1,
-        commit="a" * 40,
-        attempt=1,
-        status=status,
-        started_at="2026-10-01T00:00:00Z",
-    )
+    return {
+        "event": "deploy_run",
+        "run_id": rid,
+        "target": target,
+        "ticket": 1,
+        "commit": "a" * 40,
+        "attempt": 1,
+        "status": status,
+        "started_at": "2026-10-01T00:00:00Z",
+    }
 
 
 class RetentionTest(unittest.TestCase):
@@ -67,7 +67,7 @@ class RetentionTest(unittest.TestCase):
                 self.fixture(
                     [
                         run("failed", "failed"),
-                        dict(event=disposition, target="default", run_id="failed"),
+                        {"event": disposition, "target": "default", "run_id": "failed"},
                         run("new"),
                     ]
                 )
@@ -111,7 +111,7 @@ class RetentionTest(unittest.TestCase):
         self.fixture([run("old"), run("new")])
         with (self.root / "events.jsonl").open("a") as f:
             f.write(
-                json.dumps(dict(event="deploy_run", run_id="old", status="invalid"))
+                json.dumps({"event": "deploy_run", "run_id": "old", "status": "invalid"})
                 + "\n"
             )
         with self.assertRaises((ValueError, TypeError, KeyError)):

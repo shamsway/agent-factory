@@ -193,9 +193,9 @@ class InspectionTest(unittest.TestCase):
             self.assertEqual(path.read_bytes(), data)
 
     def test_unit_environment_files_are_unknown_not_guessed(self):
-        text = '\n'.join(['LoadState=loaded', 'ActiveState=inactive', 'MainPID=0',
-                          'Environment=GH_TOKEN=read-token', 'EnvironmentFiles=/hidden',
-                          'ExecStart={ path=/python ; argv[]=/python -m factory ; }'])
+        text = ('LoadState=loaded\nActiveState=inactive\nMainPID=0\n'
+                'Environment=GH_TOKEN=read-token\nEnvironmentFiles=/hidden\n'
+                'ExecStart={ path=/python ; argv[]=/python -m factory ; }')
         with patch.object(inspection, 'command', return_value=text), patch.object(inspection, 'runtime_probe') as probe:
             report = inspection.unit_snapshot(self.cfg, self.cfg.unit+'.service', {})
         self.assertEqual(report['runtime']['status'], 'unavailable')
@@ -249,9 +249,11 @@ class InspectionTest(unittest.TestCase):
             self.assertEqual(verify_secrets.unit_env('factory-example.service'), {'TOKEN': 'a b==', 'GH_TOKEN': 'read-token'})
 
     def test_unit_environment_read_error_is_not_absence(self):
-        with patch.object(verify_secrets.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', SECRET)):
-            with self.assertRaises(OSError) as caught:
-                verify_secrets.unit_env('factory-example.service')
+        with (
+            patch.object(verify_secrets.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', SECRET)),
+            self.assertRaises(OSError) as caught,
+        ):
+            verify_secrets.unit_env('factory-example.service')
         self.assertNotIn(SECRET, str(caught.exception))
 
     def test_process_environment_and_identity_are_observed_without_argv(self):

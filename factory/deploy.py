@@ -303,7 +303,7 @@ def replay_rows(rows: list[dict]) -> dict[str, TargetState]:
             data.pop("at", None)
             try:
                 run = DeployRun.from_dict(data)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - skip malformed ledger rows
                 continue
         elif event in ("applied", "apply-escalate"):
             run = parse_legacy_row(row)

@@ -164,13 +164,18 @@ class BoundaryTests(unittest.TestCase):
             self.read()
 
     def test_file_journal_row_and_projection_budgets_refused(self):
-        with mock.patch.object(evidence, "MAX_FILE", 32):
-            with self.assertRaises(evidence.EvidenceRefused):
-                self.read()
+        with (
+            mock.patch.object(evidence, "MAX_FILE", 32),
+            self.assertRaises(evidence.EvidenceRefused),
+        ):
+            self.read()
         for limit in ("MAX_ROWS", "MAX_PROJECTION"):
-            with self.subTest(limit=limit), mock.patch.object(evidence, limit, 1):
-                with self.assertRaises(evidence.EvidenceRefused):
-                    self.read()
+            with (
+                self.subTest(limit=limit),
+                mock.patch.object(evidence, limit, 1),
+                self.assertRaises(evidence.EvidenceRefused),
+            ):
+                self.read()
 
     def test_rotated_committed_run_read_but_partial_tail_and_resolved_run_refused(self):
         import gzip
@@ -289,9 +294,11 @@ class BoundaryTests(unittest.TestCase):
         duplicate = ('{"projection_sha256":"' + projection.sha256 + '","outcome":"escalate","outcome":"proposal","reason":"UNSUPPORTED"}').encode()
         with self.assertRaises(evidence.EvidenceRefused):
             publication.render(projection, duplicate)
-        with mock.patch.object(publication, "MAX_PUBLIC", 1):
-            with self.assertRaises(evidence.EvidenceRefused):
-                publication.render(projection, self.result(projection))
+        with (
+            mock.patch.object(publication, "MAX_PUBLIC", 1),
+            self.assertRaises(evidence.EvidenceRefused),
+        ):
+            publication.render(projection, self.result(projection))
 
     def delivered(self):
         path = self.factory / "incidents" / (self.root_id + ".json")
@@ -365,9 +372,11 @@ class BoundaryTests(unittest.TestCase):
         # Configured larger threshold, and no decompression when live contains run.
         with mock.patch.object(lifecycle, "MAX_BYTES", 80 * 1024 * 1024), mock.patch.object(evidence.gzip, "GzipFile", side_effect=AssertionError("archive unnecessary")):
             self.read()
-        with mock.patch.object(lifecycle, "MAX_BYTES", 32 * 1024 * 1024):
-            with self.assertRaisesRegex(evidence.EvidenceRefused, "journal_budget_exhausted"):
-                self.read()
+        with (
+            mock.patch.object(lifecycle, "MAX_BYTES", 32 * 1024 * 1024),
+            self.assertRaisesRegex(evidence.EvidenceRefused, "journal_budget_exhausted"),
+        ):
+            self.read()
         # Aggregate exceeds 64 MiB: both files fit the configured per-file
         # limit. The live lookup is absent, so the large archive is opened.
         with journal.open("rb") as incoming, gzip.open(self.factory / "events.jsonl.1.gz", "wb") as out:

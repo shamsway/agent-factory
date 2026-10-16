@@ -172,9 +172,11 @@ class BrokerTests(unittest.TestCase):
         self.tokens.assert_not_called()
 
     def test_changed_binding_prevents_mint(self):
-        with mock.patch.object(outbox, 'binding', return_value={'issue': 999}):
-            with self.assertRaises(evidence.EvidenceRefused):
-                broker.handle(self.policy, self.request, send=True)
+        with (
+            mock.patch.object(outbox, 'binding', return_value={'issue': 999}),
+            self.assertRaises(evidence.EvidenceRefused),
+        ):
+            broker.handle(self.policy, self.request, send=True)
         self.tokens.assert_not_called()
 
     def test_preview_no_token_or_shared_config(self):

@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 from contextlib import redirect_stderr
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 from factory import config, lifecycle, triage
@@ -123,7 +124,7 @@ class TriageTest(unittest.TestCase):
         from factory import triage
 
         class FakeResponse:
-            def __enter__(self) -> FakeResponse:
+            def __enter__(self) -> Self:
                 return self
 
             def __exit__(self, *exc: object) -> bool:

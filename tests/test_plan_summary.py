@@ -68,8 +68,8 @@ class PlanSummaryTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout=output, stderr="")
 
         responses = [
-            dict(title="Terraform update", body="Include the plan summary"),
-            dict(body=body, headRefOid=head),
+            {"title": "Terraform update", "body": "Include the plan summary"},
+            {"body": body, "headRefOid": head},
         ]
         with (
             mock.patch.object(dispatch, "cfg", cfg, create=True),
@@ -149,8 +149,8 @@ class PlanSummaryTest(unittest.TestCase):
 class GitHubHeadWaitTest(unittest.TestCase):
     def test_old_head_is_retried_until_current_body_arrives(self):
         rows = [
-            dict(headRefOid="old", body="old body"),
-            dict(headRefOid="new", body="new body"),
+            {"headRefOid": "old", "body": "old body"},
+            {"headRefOid": "new", "body": "new body"},
         ]
         with (
             mock.patch.object(dispatch, "REPO", "fixture/repo", create=True),
@@ -165,7 +165,7 @@ class GitHubHeadWaitTest(unittest.TestCase):
     def test_wait_is_bounded_and_does_not_accept_different_head(self):
         with (
             mock.patch.object(dispatch, "REPO", "fixture/repo", create=True),
-            mock.patch.object(dispatch, "gh_json", return_value=dict(headRefOid="old")),
+            mock.patch.object(dispatch, "gh_json", return_value={"headRefOid": "old"}),
             mock.patch.object(dispatch.time, "monotonic", side_effect=[0, 0, 11]),
             mock.patch.object(dispatch.time, "sleep") as sleep,
             self.assertRaises(RuntimeError),
@@ -179,7 +179,7 @@ class GitHubHeadWaitTest(unittest.TestCase):
             mock.patch.object(
                 dispatch,
                 "gh_json",
-                side_effect=[RuntimeError("temporary"), dict(headRefOid="new")],
+                side_effect=[RuntimeError("temporary"), {"headRefOid": "new"}],
             ),
             mock.patch.object(dispatch.time, "sleep"),
         ):

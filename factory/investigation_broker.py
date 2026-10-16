@@ -158,7 +158,7 @@ def operate(policy, args):
             try:
                 with evidence.directory(Path(policy['state'])) as fd:
                     model._write(fd, 'import-result.json', {'version': 1, 'result': 'refused', 'at': evidence.utc(time.time())})
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - best-effort audit must not mask the refusal
                 pass
             raise
     if args.verify_token:
@@ -201,14 +201,14 @@ def main(argv):
     except (publisher.PublisherRefused, evidence.EvidenceRefused) as error:
         code = str(error)
         result, exit_code = {'ok': False, 'code': code if code in FAILURE_CODES else 'publisher_unavailable'}, 1
-    except Exception:
+    except Exception:  # noqa: BLE001 - any broker failure must fail closed
         result, exit_code = {'ok': False, 'code': 'publisher_unavailable'}, 1
     if policy is not None:
         try:
             status = publisher_status.write(policy)
             if args.status and exit_code == 0:
                 result = status
-        except Exception:
+        except Exception:  # noqa: BLE001 - status write failure must not obscure delivery
             # A POST may already be delivered. Never obscure it or authorize retry.
             result = {**result, 'status_write_failed': True}
     print(json.dumps(result))

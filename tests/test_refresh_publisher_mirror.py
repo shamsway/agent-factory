@@ -17,5 +17,6 @@ class MirrorHelperTests(unittest.TestCase):
         self.assertIn('/usr/sbin/runuser', commands)
         self.assertNotIn('runuser', commands)
         result = subprocess.run(['/usr/sbin/runuser', '--version'],
-                                env={'PATH': '/usr/bin:/bin'}, capture_output=True)
+                                env={'PATH': '/usr/bin:/bin'}, capture_output=True,
+                                check=False)
         self.assertEqual(result.returncode, 0)
