@@ -1,7 +1,7 @@
 # Weekly drift report: commits on upstream mikeroySoft/factory main that are
 # not yet merged into this fork's main. Upstream is integrated by merging
-# (merge commits, never squash or rebase) into main, and then into the work
-# fork from main. Reports only; never merges or deploys.
+# (merge commits, never squash or rebase) into main; every Factory host
+# installs from a pinned main commit. Reports only; never merges or deploys.
 name: check-upstream
 on:
   schedule:
@@ -64,7 +64,7 @@ jobs:
               echo
               git log --no-merges --format='- `%h` %s' -n 50 origin/main..upstream/main
               echo
-              echo "Integrate by merging an upstream release tag (or a pinned upstream SHA when a needed fix lands between releases) into \`main\` on a sync branch with a merge commit, never squash or rebase. Run the Linux test gate, then sync the work fork from \`main\` and run the acceptance gate before any deployment. This workflow never merges or deploys."
+              echo "Integrate by merging an upstream release tag (or a pinned upstream SHA when a needed fix lands between releases) into \`main\` on a sync branch with a merge commit, never squash or rebase. Run the Linux test gate, then roll the pinned \`main\` commit out host by host, running the acceptance gate before each deployment. This workflow never merges or deploys."
             fi
           } > body.md
           echo "Drift: $count commit(s); upstream $up; fork $fork"
