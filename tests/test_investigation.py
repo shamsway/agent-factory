@@ -32,6 +32,40 @@ class InvestigationLaneTest(unittest.TestCase):
                  "--label", config.LABEL_INVESTIGATE, "--json", "number,title,body,labels,assignees"]
             )
 
+    def test_escalation_drops_the_investigation_lane_label(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            with mock.patch.object(dispatch, "run") as run_mock:
+                dispatch.escalate(7, "investigation produced no findings report", None)
+            edit = next(c.args[0] for c in run_mock.call_args_list if c.args[0][:3] == ["gh", "issue", "edit"])
+            removed = {edit[i + 1] for i, arg in enumerate(edit) if arg == "--remove-label"}
+            self.assertEqual({config.LABEL_AGENT, config.LABEL_INVESTIGATE}, removed)
+            self.assertEqual(config.LABEL_HUMAN, edit[edit.index("--add-label") + 1])
+
+    def test_escalated_investigation_is_not_offered_by_the_next_pass(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            # A ticket escalated before the label fix still carries both labels, unassigned.
+            stale = {
+                "number": 7, "title": "why is prod slow", "body": "",
+                "labels": [{"name": config.LABEL_INVESTIGATE}, {"name": config.LABEL_HUMAN}],
+                "assignees": [],
+            }
+            with mock.patch.object(dispatch, "gh_json", return_value=[stale]), \
+                 mock.patch.object(dispatch, "open_blockers", return_value=[]), \
+                 mock.patch.object(dispatch, "log"):
+                self.assertEqual([], dispatch.frontier(config.LABEL_INVESTIGATE))
+
     def test_dry_run_reports_investigation_short_path_without_admission(self) -> None:
         from unittest import mock
 
