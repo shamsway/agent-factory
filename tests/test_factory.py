@@ -1316,12 +1316,11 @@ unused = ["agent"]
 class DashboardTest(unittest.TestCase):
     def test_dashboard_defaults_to_loopback_bind(self) -> None:
         """the fork keeps loopback as the default bind even though upstream
-        defaults to 0.0.0.0 (MAT-193 reconciles the policy)."""
-        with tempfile.TemporaryDirectory() as d:
-            repo = make_repo(Path(d))
-            proc = factory(repo, "dashboard", "--help")
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertIn("default: 127.0.0.1", " ".join(proc.stdout.split()))
+        defaults to 0.0.0.0 (MAT-193 reconciles the policy). Checks the parsed
+        value, not the help text, so the two cannot drift apart unnoticed."""
+        from factory import dashboard
+
+        self.assertEqual(dashboard._parser().parse_args([]).host, "127.0.0.1")
 
     @unittest.skip("MAT-193: loopback bind guard to be reconciled with the workspace access key")
     def test_dashboard_refuses_non_loopback_bind_without_escape_hatch(self) -> None:
