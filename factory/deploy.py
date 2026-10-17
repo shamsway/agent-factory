@@ -50,6 +50,10 @@ TERMINAL_STATUSES = frozenset(
 )
 
 
+# Phase recorded on the FAILED run of a revision rejected as unauthorized.
+REJECTED_PHASE = "rejected"
+
+
 @dataclass
 class DeployRun:
     """Versioned result contract for a deployment run attempt."""
@@ -162,6 +166,13 @@ class TargetState:
                 if last_run.run_id not in self.acknowledged_failures:
                     out.add(ticket)
         return out
+
+    @property
+    def unacknowledged_rejections(self) -> set[int]:
+        """Unacknowledged failed tickets whose revision was rejected as unauthorized.
+        A latest-wins target holds on these: every later revision contains the change."""
+        return {ticket for ticket in self.unacknowledged_failed_tickets
+                if self.runs_by_ticket[ticket][-1].phase == REJECTED_PHASE}
 
     @property
     def succeeded_tickets(self) -> set[int]:
@@ -767,6 +778,8 @@ def select_candidates_for_target(
         return [], []
     if supersession == "sequential" and tstate.unacknowledged_failed_tickets:
         return [], []
+    if supersession == "latest" and tstate.unacknowledged_rejections:
+        return [], []
 
     check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root))
 
@@ -1123,13 +1136,24 @@ class FakeDeployAdapter(DeployAdapter):
         return False, f"fake adapter requires operator reconciliation for {interrupted_run.run_id}"
 
 
-def latest_wins(candidates: list[dict]) -> tuple[dict | None, list[dict]]:
-    """Split topologically ordered candidates into the newest authorized one and
-    the older authorized ones it supersedes. Unauthorized candidates are neither."""
-    authorized = [c for c in candidates if "unauthorized_reason" not in c]
-    if not authorized:
-        return None, []
-    return authorized[-1], authorized[:-1]
+def latest_wins(candidates: list[dict]) -> tuple[dict | None, list[dict], list[dict]]:
+    """Split topologically ordered candidates into (newest, older, held).
+
+    The walk stops at the first unauthorized candidate: every later revision
+    contains its unapproved change, so none of them may deploy or supersede
+    anything. `newest` is the last authorized candidate before that point and
+    `older` the authorized ones it would supersede once it succeeds. `held`
+    starts with the unauthorized candidate (to escalate) and keeps everything
+    after it pending."""
+    for index, candidate in enumerate(candidates):
+        if "unauthorized_reason" in candidate:
+            approved, held = candidates[:index], candidates[index:]
+            break
+    else:
+        approved, held = candidates, []
+    if not approved:
+        return None, [], held
+    return approved[-1], approved[:-1], held
 
 
 def supersede_candidate(target: str, candidate: dict, newest: dict, events_path: Path | None = None) -> DeployRun:

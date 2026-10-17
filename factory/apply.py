@@ -274,6 +274,7 @@ def apply_escalate(
     target: str = "default",
     dry_run: bool = False,
     existing_run_id: str | None = None,
+    phase: str = "",
 ) -> None:
     """Post-merge escalation: the tracking issue is already closed, so this
     only comments + records an event rather than touching labels the way
@@ -302,6 +303,7 @@ def apply_escalate(
             pr=pr,
             error=reason,
             version=deploy.CONTRACT_VERSION,
+            phase=phase,
         )
         deploy.record_deploy_run(run)
         run_id = run.run_id
@@ -693,6 +695,11 @@ def main(argv: list[str]) -> int:
                     log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.unacknowledged_failed_tickets)})")
                     has_errors = True
                     continue
+                if tstate.unacknowledged_rejections and mode == "latest":
+                    log(f"target `{target_name}`: stopped (later revisions include unauthorized "
+                        f"tickets {sorted(tstate.unacknowledged_rejections)}; acknowledge them to continue)")
+                    has_errors = True
+                    continue
 
                 def check_touch(c: str, target: config.DeployTarget = target) -> bool:
                     if target.dir == cfg.apply_dir:
@@ -724,14 +731,12 @@ def main(argv: list[str]) -> int:
                 if not candidates:
                     continue
 
+                newest, older = None, []
                 if mode == "latest":
-                    newest, older = deploy.latest_wins(candidates)
-                    for stale in older:
-                        if args.dry_run:
-                            log(f"#{stale['ticket']}: would supersede (newer approved #{newest['ticket']} deploys instead)")
-                        else:
-                            supersede(stale, newest, target_name)
-                    candidates = [c for c in candidates if c is newest or "unauthorized_reason" in c]
+                    newest, older, held = deploy.latest_wins(candidates)
+                    for waiting in held[1:]:
+                        log(f"#{waiting['ticket']}: held on `{target_name}` behind unauthorized revision #{held[0]['ticket']}")
+                    candidates = ([newest] if newest else []) + held[:1]
 
                 any_candidates_found = True
                 for candidate in candidates:
@@ -739,7 +744,8 @@ def main(argv: list[str]) -> int:
                         reason = candidate["unauthorized_reason"]
                         log(f"#{candidate['ticket']}: {'would reject' if args.dry_run else 'apply rejected'} ({reason})")
                         if not args.dry_run:
-                            apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name, dry_run=args.dry_run)
+                            apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name,
+                                           dry_run=args.dry_run, phase=deploy.REJECTED_PHASE)
                         has_errors = True
                         if mode == "sequential":
                             log(f"target `{target_name}`: stopping further applies after unauthorized revision #{candidate['ticket']}")
@@ -757,6 +763,15 @@ def main(argv: list[str]) -> int:
                         if mode == "sequential":
                             log(f"target `{target_name}`: stopping further applies after failure of #{candidate['ticket']}")
                             break
+                    elif candidate is newest:
+                        # Older tickets are superseded only once the revision that
+                        # includes them has actually deployed; a failed newest run
+                        # leaves them pending.
+                        for stale in older:
+                            if args.dry_run:
+                                log(f"#{stale['ticket']}: would supersede once #{newest['ticket']} succeeds")
+                            else:
+                                supersede(stale, newest, target_name)
             finally:
                 deploy.release_lock(b_fd)
                 deploy.release_lock(t_fd)

@@ -1751,15 +1751,18 @@ dir = "terraform"
                                            "authorAssociation": "MEMBER", "commit": {"oid": sha}}]})
         return repo, cfg, prs
 
-    def run_pass(self, cfg, prs, args=()):
+    def run_pass(self, cfg, prs, args=(), failing=()):
         def fake_apply_one(candidate, dry_run, target="default"):
             if dry_run:
                 return True
+            ok = candidate["ticket"] not in failing
+            attempt = deploy.next_attempt(target, candidate["ticket"], candidate["commit"], events_path=dispatch.EVENTS)
             deploy.record_deploy_run(deploy.DeployRun(
-                run_id=f"deploy-{target}-{candidate['commit'][:8]}-1", target=target, commit=candidate["commit"],
-                ticket=candidate["ticket"], attempt=1, status=deploy.DeployStatus.SUCCEEDED,
+                run_id=f"deploy-{target}-{candidate['commit'][:8]}-{attempt}", target=target,
+                commit=candidate["commit"], ticket=candidate["ticket"], attempt=attempt,
+                status=deploy.DeployStatus.SUCCEEDED if ok else deploy.DeployStatus.FAILED,
                 started_at="2026-10-16T00:00:00Z"))
-            return True
+            return ok
 
         with mock.patch.object(config, "load", return_value=cfg), \
              mock.patch.object(dispatch, "run") as run, \
@@ -1807,16 +1810,65 @@ dir = "terraform"
             with mock.patch.object(apply, "log") as log:
                 self.run_pass(cfg, prs, ["--dry-run"])
             lines = " ".join(str(c.args[0]) for c in log.call_args_list)
-            self.assertIn("#11: would supersede (newer approved #13 deploys instead)", lines)
+            self.assertIn("#11: would supersede once #13 succeeds", lines)
             self.assertEqual(deploy.get_target_state("app", events_path=dispatch.EVENTS).runs, [])
 
-    def test_unauthorized_candidates_are_never_superseded_or_deployed(self) -> None:
-        newest, older = deploy.latest_wins([
-            {"ticket": 1, "commit": "a"}, {"ticket": 2, "commit": "b", "unauthorized_reason": "x"},
-            {"ticket": 3, "commit": "c"}, {"ticket": 4, "commit": "d", "unauthorized_reason": "y"},
+    def test_the_walk_stops_at_the_first_unauthorized_candidate(self) -> None:
+        newest, older, held = deploy.latest_wins([
+            {"ticket": 1, "commit": "a"}, {"ticket": 2, "commit": "b"},
+            {"ticket": 3, "commit": "c", "unauthorized_reason": "x"},
+            {"ticket": 4, "commit": "d"}, {"ticket": 5, "commit": "e", "unauthorized_reason": "y"},
         ])
-        self.assertEqual((newest["ticket"], [c["ticket"] for c in older]), (3, [1]))
-        self.assertEqual(deploy.latest_wins([{"ticket": 1, "unauthorized_reason": "x"}]), (None, []))
+        self.assertEqual((newest["ticket"], [c["ticket"] for c in older], [c["ticket"] for c in held]),
+                         (2, [1], [3, 4, 5]))
+        newest, older, held = deploy.latest_wins([{"ticket": 1, "unauthorized_reason": "x"}, {"ticket": 2}])
+        self.assertEqual((newest, older, [c["ticket"] for c in held]), (None, [], [1, 2]))
+
+    def test_unauthorized_revision_holds_every_later_one(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            prs[1].update(reviewDecision="", latestReviews=[])
+            with mock.patch.object(apply, "log") as log:
+                ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 1)
+            # #13 contains #12's unapproved change: it neither deploys nor supersedes.
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [11])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()},
+                             {11: "succeeded", 12: "failed"})
+            self.assertEqual(state.unacknowledged_rejections, {12})
+            self.assertIn("#13: held on `app` behind unauthorized revision #12",
+                          " ".join(str(c.args[0]) for c in log.call_args_list))
+
+            # The hold survives the next pass, when #12 is no longer a candidate.
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 1)
+            apply_one.assert_not_called()
+
+            # An operator acknowledgement releases it.
+            deploy.acknowledge_failure("app", "12", events_path=dispatch.EVENTS)
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [13])
+
+    def test_older_tickets_stay_pending_until_the_newest_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            ret, apply_one, run = self.run_pass(cfg, prs, failing={13})
+            self.assertEqual(ret, 1)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [13])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()}, {13: "failed"})
+            self.assertFalse([c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "comment"]])
+
+            # #13's failed run is terminal, so the next pass deploys the newest pending
+            # revision, #12, and only its success supersedes #11.
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [12])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()},
+                             {11: "superseded", 12: "succeeded", 13: "failed"})
 
     def test_sequential_targets_are_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as d:
