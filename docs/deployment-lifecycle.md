@@ -139,6 +139,14 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 4. `verify(ctx)`: Post-apply health verification under the target's `verify` policy (see below). A failed verification, or a verifier that raises, records the run `FAILED`.
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
+7. `credential_checks(env, live)`: Optional report on the credentials the adapter needs from `[apply].env`.
+   - It returns rows of `key`, `status` and an optional `detail`. The detail describes scope, such as the account kind or the permissions granted.
+   - `factory verify-secrets --scope apply` and `factory inspect` list these rows beside the generic ones, tagged with the adapter name. `--live` allows network checks.
+   - A `missing`, `invalid` or `unavailable` row fails the report.
+   - `key` must be a variable name and `status` one of `configured`, `missing`, `valid`, `invalid`, `unavailable` or `not_checked`.
+   - `key` names the variable and `detail` describes scope only. Neither may contain a credential value or a credential prefix (a token's leading characters, part of a robot secret). Factory sanitizes both against every configured secret, but it only recognizes whole values, so a fragment would get through.
+   - Details are also folded to one printable line and capped at 200 characters.
+   - Each adapter's check runs with a 30-second limit. A check that raises (including `SystemExit` or `KeyboardInterrupt`), times out, ends without a result or returns anything malformed (an unknown status, a key that is not a variable name, a row that is not a mapping) becomes one `unavailable` row for that adapter. Its message is dropped, and so are any rows it had already returned.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 
