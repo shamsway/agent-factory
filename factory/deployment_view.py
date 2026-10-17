@@ -22,6 +22,14 @@ def safe_project(factory: Path, rows: list[dict], secrets: list[str] | None = No
         return None
 
 
+def _observations(rows: list[dict]) -> dict:
+    """Post-run observations for one run; the latest per kind decides attention."""
+    items = [{key: row.get(key) for key in ("at", "kind", "state", "detail", "url", "attention", "final")}
+             for row in rows]
+    latest = {item["kind"]: item for item in items}
+    return {"observations": items, "needs_attention": any(item["attention"] for item in latest.values())}
+
+
 def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -> dict:
     states = deploy.replay_rows(rows)
     transitions: dict[str, list[dict]] = {}
@@ -37,6 +45,7 @@ def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -
             })
         if row.get("event") in ("deploy_acknowledged", "deploy_superseded"):
             dispositions[rid] = row["event"].removeprefix("deploy_")
+    observed = deploy.observations_by_run(rows)
     runs, targets = [], []
     for target, state in sorted(states.items()):
         safe_target = re.sub(r"[^a-zA-Z0-9_.-]", "_", target)
@@ -68,12 +77,13 @@ def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -
                               and state.runs_by_ticket[run.ticket][-1].run_id == run.run_id,
                 "timeline": transitions.get(run.run_id, []), "artifacts": [],
                 "result": None, "publication": {},
+                **_observations(observed.get(run.run_id, [])),
             })
     counts = Counter(r["outcome"] for r in runs)
     durations = [r["execution_sec"] for r in runs if r["execution_sec"] is not None]
     queue_times = [r["queue_sec"] for r in runs if r["queue_sec"] is not None]
     denominator = counts["succeeded"] + counts["failed"]
-    open_runs = [r for r in runs if r["unresolved"] or r["status"] in
+    open_runs = [r for r in runs if r["unresolved"] or r["needs_attention"] or r["status"] in
                  ("pending", "executing", "verifying", "interrupted")]
     closed = [r for r in runs if r not in open_runs]
     closed.sort(key=lambda r: r["completed_at"] or r["started_at"] or "", reverse=True)
@@ -97,7 +107,8 @@ def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -
             run["publication"] = manifest.get("publications", {})
         except (OSError, ValueError, KeyError, TypeError):
             run["result"] = None
-    return artifacts.sanitize_tree({"runs": visible, "targets": targets, "metrics": {
+    return artifacts.sanitize_tree({"runs": visible, "targets": targets,
+                                    "attention": sum(r["needs_attention"] for r in runs), "metrics": {
         "recorded_attempts": len(runs), "pending": counts["pending"],
         "successes": counts["succeeded"], "failures": counts["failed"],
         "success_denominator": denominator,

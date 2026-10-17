@@ -139,7 +139,8 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 4. `verify(ctx)`: Post-apply health verification under the target's `verify` policy (see below). A failed verification, or a verifier that raises, records the run `FAILED`.
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
-7. `credential_checks(env, live)`: Optional report on the credentials the adapter needs from `[apply].env`.
+7. `observe(target, run, env)`: Optional post-run observations (see below). The base adapter observes nothing.
+8. `credential_checks(env, live)`: Optional report on the credentials the adapter needs from `[apply].env`.
    - It returns rows of `key`, `status` and an optional `detail`. The detail describes scope, such as the account kind or the permissions granted.
    - `factory verify-secrets --scope apply` and `factory inspect` list these rows beside the generic ones, tagged with the adapter name. `--live` allows network checks.
    - A `missing`, `invalid` or `unavailable` row fails the report.
@@ -147,6 +148,43 @@ All platform mutations implement the `DeployAdapter` lifecycle:
    - `key` names the variable and `detail` describes scope only. Neither may contain a credential value or a credential prefix (a token's leading characters, part of a robot secret). Factory sanitizes both against every configured secret, but it only recognizes whole values, so a fragment would get through.
    - Details are also folded to one printable line and capped at 200 characters.
    - Each adapter's check runs with a 30-second limit. A check that raises (including `SystemExit` or `KeyboardInterrupt`), times out, ends without a result or returns anything malformed (an unknown status, a key that is not a variable name, a row that is not a mapping) becomes one `unavailable` row for that adapter. Its message is dropped, and so are any rows it had already returned.
+
+### Post-run observations
+
+Some targets finish their run before the change is live, for example an adapter whose
+`SUCCEEDED` means "a PR is open for a human to merge". On each later non-dry-run apply pass,
+after the target's applies and before its locks are released, Factory calls `observe()` for
+every `SUCCEEDED` run on the target that:
+
+- completed within the last 7 days (`deploy.OBSERVE_WINDOW_SEC`), and
+- has no final observation yet.
+
+Each observation is a dict:
+
+- `kind` and `state` (required, non-empty strings, at most 64 characters)
+- optional `detail` (string, at most 2000 characters) and `url` (an `http(s)://` URL)
+- `attention` (bool): a human should look, for example a PR closed without merge
+- `final` (bool): stop observing the run
+
+Before anything reaches the journal, Factory checks these types, redacts secret values and
+token shapes the same way as apply output, truncates long text and drops other keys. An item
+with a wrong type is dropped whole, and the pass logs the reason. At most 20 observations per
+run are kept from one call.
+
+Factory appends a `deploy_observation` journal row only when the `(kind, state)` pair changes.
+The deployment projection lists the rows under the run, and the latest observation per kind
+sets `needs_attention`. Such a run stays in the open part of the history, and the workspace
+Deployments view shows it expanded.
+
+Observations are evidence only. They never change the run's status, never feed target-state
+replay, and never make the ticket selectable again. Each run's call is isolated: an adapter
+that raises is logged for that run, and the next run is still observed. That includes
+`SystemExit` and other non-`Exception` errors, which become a `RuntimeError` for the run;
+only `KeyboardInterrupt` ends the pass. One call may take
+`deploy.OBSERVE_CALL_SEC` (60s) and one target's observations `deploy.OBSERVE_TOTAL_SEC`
+(180s). A call that overruns is abandoned on its thread, not killed, and the target's
+remaining runs wait for the next pass. An interrupted or crashed pass skips observations.
+The target and backend locks are released even if the observe pass itself raises.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 
