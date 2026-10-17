@@ -1001,16 +1001,12 @@ class Workspace:
         cfg = self.repository_config(slug)
         if ARTIFACT_NAME.fullmatch(name) is None or name == "manifest.json":
             raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404)
+        # The size check runs inside lookup, after the manifest has authorized the name,
+        # so an unlisted file's size is never disclosed.
         try:
-            path = artifacts.artifact_dir(cfg.factory, target, run_id) / name
-        except ValueError as exc:
-            raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404) from exc
-        try:
-            if path.lstat().st_size > ARTIFACT_BYTES:
-                raise WorkspaceError("artifact_too_large", "Artifact exceeds the serving limit.", 413)
-        except FileNotFoundError as exc:
-            raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404) from exc
-        found = artifacts.lookup(cfg.factory, target, run_id, name)
+            found = artifacts.lookup(cfg.factory, target, run_id, name, max_bytes=ARTIFACT_BYTES)
+        except artifacts.ArtifactTooLarge as exc:
+            raise WorkspaceError("artifact_too_large", "Artifact exceeds the serving limit.", 413) from exc
         if found is None:
             raise WorkspaceError("artifact_not_found", "Artifact is not available.", 404)
         return found

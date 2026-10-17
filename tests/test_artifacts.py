@@ -216,6 +216,19 @@ class LookupAndServingTest(unittest.TestCase):
             (fx.run_dir / "apply.log").write_text(f"tampered {SECRET}")
             self.assertIsNone(artifacts.lookup(f, "default", rid, "apply.log"))
 
+    def test_size_limit_applies_only_after_the_manifest_authorizes_the_name(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            fx = RunFixture(Path(d))
+            fx.run()
+            f, rid = fx.cfg.factory, "deploy-default-deadbeef-1"
+            size = (fx.run_dir / "apply.log").stat().st_size
+            with self.assertRaises(artifacts.ArtifactTooLarge):
+                artifacts.lookup(f, "default", rid, "apply.log", max_bytes=size - 1)
+            self.assertIsNotNone(artifacts.lookup(f, "default", rid, "apply.log", max_bytes=size))
+            # An unlisted file is refused whatever its size, so its size is never disclosed.
+            (fx.run_dir / "big.log").write_text("x" * 64)
+            self.assertIsNone(artifacts.lookup(f, "default", rid, "big.log", max_bytes=1))
+
     def test_workspace_serves_artifacts_but_never_private_files(self) -> None:
         import http.client
         import os
@@ -283,6 +296,10 @@ class LookupAndServingTest(unittest.TestCase):
                     "logs/terraform-apply-default-77.log",
                 ):
                     self.assertEqual(get(f"/api/file?repository={repo}&path=" + private)[0], 404, private)
+                with mock.patch("factory.workspace.ARTIFACT_BYTES", 1):
+                    self.assertEqual(artifact("default", rid, "apply.log")[0], 413)
+                    (fx.run_dir / "unlisted.log").write_text("x" * 64)
+                    self.assertEqual(artifact("default", rid, "unlisted.log")[0], 404)
                 # Tampering after the manifest was written stops serving.
                 (fx.run_dir / "apply.log").write_text(f"tampered {SECRET}")
                 self.assertEqual(artifact("default", rid, "apply.log")[0], 404)

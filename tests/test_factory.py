@@ -225,7 +225,6 @@ class ConfigTest(unittest.TestCase):
             self.assertGreater(path.stat().st_size, 1024 * 1024)
             self.assertFalse((path.parent / "events.jsonl.1.gz").exists())
             code = """
-import io
 import json
 from pathlib import Path
 from factory import config, lifecycle
