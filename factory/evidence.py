@@ -330,9 +330,11 @@ def attention_unavailable(result: dict, reasons: list[str], unknown_executions: 
     )
     # These describe why a derived count is unknown. Any actual source failure
     # remains separately in errors and must still drive an error badge.
-    count_errors = [{"source": diagnostic["id"], "scope": "attention_count", "code": code,
-                     "severity": "warning"}
+    count_errors = [{"source": diagnostic["id"], "scope": "attention_count", "code": code}
                     for code in reasons]
+    for error in count_errors:
+        if error['code'] != 'output_truncated':
+            error['severity'] = 'warning'
     output_errors = [error for error in result["errors"]
                      if error["source"] == "output" and error["scope"] == "response"]
     priority = count_errors + output_errors
