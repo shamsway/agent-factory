@@ -802,6 +802,10 @@ branches, or merge state.
   repository-wide WIP total. Wait durations use recorded wait identities, not an
   issue's last update time. Return-after-absence comparisons name their browser-local
   baseline and evidence coverage.
+  The collection badge shows **partial** for expected journal bounds and legacy
+  rows outside the lifecycle schema. Read failures, malformed records, identity
+  conflicts and unexplained missing execution entries remain **error**. A partial
+  badge describes coverage; it does not mean collection stopped or work succeeded.
   **Deployments** shows recorded deployment attempts, verification evidence and
   sanitized artifacts (see `docs/deployment-lifecycle.md`).
   **System** retains Ops diagnostics, dispatcher runs, tickets, gate/review evidence,

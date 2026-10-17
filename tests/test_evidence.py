@@ -24,6 +24,17 @@ REPO = "example/evidence"
 AT = "2026-01-02T03:04:05Z"
 PREFIX = f"repos/{REPO}/"
 
+
+class AttentionCoverageSeverityTest(unittest.TestCase):
+    def test_unknown_count_does_not_hide_the_underlying_source_failure(self):
+        failure = {'source': 'github', 'scope': 'issues', 'code': 'source_unavailable'}
+        result = {'errors': [failure], 'sources': [], 'coverage': {'notices': []}, 'ok': False}
+        evidence.attention_unavailable(result, ['issues_incomplete'], [])
+        self.assertIsNone(result['attention_count'])
+        self.assertEqual(result['errors'][0]['severity'], 'warning')
+        self.assertIn(failure, result['errors'])
+        self.assertNotIn('severity', failure)
+
 # The actual CLI runs under a Python audit hook, not patched Factory collectors.
 # Child executables use -S so their fixture transcript is outside this guard.
 READ_GUARD = '''

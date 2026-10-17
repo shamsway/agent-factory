@@ -12,7 +12,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from factory import lifecycle
+from factory import lifecycle, runtime_events
+
+
+class CoverageClassificationTest(unittest.TestCase):
+    def test_clipped_prefix_is_warning_but_unexplained_missing_entry_is_not(self):
+        error = {"source": "events.jsonl", "code": "missing_enter", "bounded_prefix": True}
+        history = {"truncated": True, "gaps": ["event_limit", "missing_enter"]}
+        self.assertTrue(runtime_events.coverage_only(error, history))
+        self.assertFalse(runtime_events.coverage_only(error, {}))
+        self.assertFalse(runtime_events.coverage_only(
+            {"source": "events.jsonl", "code": "missing_enter"}, history))
+        history["gaps"].append("invalid_json")
+        self.assertFalse(runtime_events.coverage_only(error, history))
+
+    def test_real_failures_remain_errors_even_when_history_is_clipped(self):
+        history = {"truncated": True, "gaps": ["byte_limit"]}
+        for code in ("identity_conflict", "sequence_gap", "unreadable", "lock_unavailable",
+                     "unsupported_version", "invalid_json", "unknown_code"):
+            self.assertFalse(runtime_events.coverage_only(
+                {"source": "events.jsonl", "code": code}, history), code)
+        for code in ("byte_limit", "event_limit", "unsupported_record"):
+            self.assertTrue(runtime_events.coverage_only(
+                {"source": "events.jsonl", "code": code}, history), code)
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = '''
@@ -201,6 +223,8 @@ class RuntimeCliTest(unittest.TestCase):
         self.assertIsNone(data["executions"][0]["entered_at"])
         self.assertEqual(data["executions"][0]["observation"], "partial")
         self.assertFalse(data["history"]["complete"])
+        missing = next(error for error in data['errors'] if error['code'] == 'missing_enter')
+        self.assertFalse(runtime_events.coverage_only(missing, data['history']))
 
     def test_large_history_clips_beginning_and_preserves_mid_execution_identity(self):
         execution = lifecycle.Execution(self.journal, "worker", ticket=11)
@@ -216,6 +240,8 @@ class RuntimeCliTest(unittest.TestCase):
         self.assertFalse(data["history"]["complete"])
         self.assertIsNone(data["executions"][0]["entered_at"])
         self.assertEqual(data["events"][0]["event_id"], waiting["event_id"])
+        missing = next(error for error in data['errors'] if error['code'] == 'missing_enter')
+        self.assertTrue(runtime_events.coverage_only(missing, data['history']))
 
     def test_truncated_old_history_does_not_poison_current_observations(self):
         import shutil
