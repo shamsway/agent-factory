@@ -1794,6 +1794,24 @@ PY
         self.assertEqual(factory(repo, "manage", path=stubs).returncode, 0)
         self.assertNotIn("issue comment", (Path(stubs) / "gh.log").read_text()[len(before):])
 
+    def test_manage_retry_restores_the_investigation_lane(self) -> None:
+        repo, stubs, _ = self.scenario()
+        events_path = repo / ".factory/events.jsonl"
+        lines = events_path.read_text().splitlines()
+        escalation = json.loads(lines[0])
+        escalation["lane"] = config.LABEL_INVESTIGATE
+        events_path.write_text("\n".join([json.dumps(escalation), *lines[1:]]) + "\n")
+        # The escalation's own label churn precedes its comment and is not human activity.
+        timeline_path = repo / ".factory/timeline.json"
+        churn = {"event": "unlabeled", "created_at": escalation["at"], "label": {"name": config.LABEL_INVESTIGATE},
+                 "actor": {"login": "factory-bot", "type": "User"}}
+        timeline_path.write_text(json.dumps([churn, *json.loads(timeline_path.read_text())]))
+        result = factory(repo, "manage", path=stubs)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = (Path(stubs) / "gh.log").read_text()
+        self.assertIn("--remove-label ready-for-human --add-label ready-for-investigation", calls)
+        self.assertNotIn("--add-label ready-for-agent", calls)
+
     def test_manage_skips_second_escalation_when_rounds_exhausted(self) -> None:
         repo, stubs, _ = self.scenario(round_number=2)
         result = factory(repo, "manage", path=stubs)

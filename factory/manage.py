@@ -20,6 +20,7 @@ from factory.config import (
     LABEL_APPROVED,
     LABEL_HUMAN,
     LABEL_INFO,
+    LABEL_INVESTIGATE,
     LABEL_REVIEW,
     LABEL_TRIAGE,
     LABEL_VIABILITY,
@@ -174,7 +175,7 @@ def human_activity(n: int, escalation: dict, events: list[dict]) -> bool:
         # Only the recorded escalation comment bounds its own label/assignee churn.
         if index < marker and (
             (kind == "labeled" and item.get("label", {}).get("name") == LABEL_HUMAN)
-            or (kind == "unlabeled" and item.get("label", {}).get("name") == LABEL_AGENT)
+            or (kind == "unlabeled" and item.get("label", {}).get("name") in {LABEL_AGENT, LABEL_INVESTIGATE})
             or kind == "unassigned"
         ):
             continue
@@ -359,7 +360,15 @@ def apply(n: int, issue: dict, decision: str, body: str, data: object, packet: P
     else:
         post_comment("issue", n, "Factory manager: " + body)
     if decision != "HUMAN":
-        issue_action("edit", "--remove-label", LABEL_HUMAN, "--add-label", LABEL_AGENT)
+        issue_action("edit", "--remove-label", LABEL_HUMAN, "--add-label", escalated_lane(n))
+
+
+def escalated_lane(n: int) -> str:
+    """The lane label the latest escalation dropped; ready-for-agent when unrecorded."""
+    escalation = next((e for e in reversed(lifecycle.read_events(dispatch.EVENTS))
+                       if e.get("event") == "escalate" and e.get("ticket") == n
+                       and e.get("reason") != "manager_failed"), {})
+    return LABEL_INVESTIGATE if escalation.get("lane") == LABEL_INVESTIGATE else LABEL_AGENT
 
 
 VIABILITY_MENU = """You are the factory manager assessing whether a direction is worth pursuing,

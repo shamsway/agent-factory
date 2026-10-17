@@ -114,7 +114,7 @@ flowchart TB
   EXTPR -->|"review attempts exhausted, new issue: dispatch.review_intake_pass"| RFH
   RFH -->|"packet and manager rounds left: manage.escalation_pass"| MGR
   RFH -->|"terminal, routed request published: handoff.handoff_pass"| HUMAN
-  MGR -->|"RETRY, REWRITE, or ROUTE: manage.apply"| RFA
+  MGR -->|"RETRY, REWRITE, or ROUTE, back to the escalated lane: manage.apply, manage.escalated_lane"| RFA
   MGR -->|"SPLIT, children opened, parent stays: manage.apply"| NT
   MGR -->|"FIX: worker round, gate, review: manage.apply"| FA
   MGR -->|"FIX fails gate, pr-tier gate, or review: manage.apply"| ESC
@@ -141,6 +141,12 @@ flowchart TB
   `wontfix-proposal` label (`manage.apply`).
 - **`needs-info` has no re-entry.** Nothing watches for the reporter's answer; a human
   puts `needs-triage` back (`decisions.apply` or GitHub).
+- **A lane label does not release an escalated ticket.** `dispatch.frontier` skips any
+  ticket carrying `ready-for-human`, so adding `ready-for-agent` (or
+  `ready-for-investigation`) while `ready-for-human` is still on it leaves the ticket
+  parked; the dispatcher logs `still ready-for-human`. Remove `ready-for-human` as well
+  to release it. A manager RETRY, REWRITE or ROUTE removes it and restores the lane
+  label `dispatch.escalate` recorded on its `escalate` event.
 - **Data-driven labels.** Rows marked `*` below edit labels chosen at runtime:
   the triage decision, manager ROUTE, the viability opt-in label, the human
   decision, and the `chore` PR label `learn.chore_pr` passes.
@@ -163,7 +169,7 @@ One row per function that edits labels (`--add-label`, `--remove-label`, or
 | `dispatch.refresh_pr_branch` | `factory-approved` | — | Behind main: approval withdrawn before refresh |
 | `dispatch.review_intake_pass` | — | `ready-for-human` | New issue for an unresolved opted-in PR review |
 | `dispatch.sync_escalate` | — | `ready-for-human` | New issue for a failed upstream sync |
-| `manage.apply` | `ready-for-human`, `*` | `ready-for-agent`, `needs-triage`, `wontfix-proposal`, `*` | RETRY/REWRITE/ROUTE back to agent; SPLIT children; CLOSE; ROUTE labels |
+| `manage.apply` | `ready-for-human`, `*` | `needs-triage`, `wontfix-proposal`, `*` | RETRY/REWRITE/ROUTE back to the lane the escalation recorded (`ready-for-agent`, or `ready-for-investigation`); SPLIT children; CLOSE; ROUTE labels |
 | `manage.viability_pass` | `*` | `needs-triage` | Opt-in label removed; BUILD queues triage |
 | `triage.apply_decision` | `needs-triage` | `*` | `*` is the decision: `ready-for-agent`, `needs-info`, or `ready-for-human` |
 
