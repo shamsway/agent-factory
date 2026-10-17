@@ -152,10 +152,13 @@ Deployments view shows it expanded.
 
 Observations are evidence only. They never change the run's status, never feed target-state
 replay, and never make the ticket selectable again. Each run's call is isolated: an adapter
-that raises is logged for that run, and the next run is still observed. One call may take
+that raises is logged for that run, and the next run is still observed. That includes
+`SystemExit` and other non-`Exception` errors, which become a `RuntimeError` for the run;
+only `KeyboardInterrupt` ends the pass. One call may take
 `deploy.OBSERVE_CALL_SEC` (60s) and one target's observations `deploy.OBSERVE_TOTAL_SEC`
 (180s). A call that overruns is abandoned on its thread, not killed, and the target's
 remaining runs wait for the next pass. An interrupted or crashed pass skips observations.
+The target and backend locks are released even if the observe pass itself raises.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 

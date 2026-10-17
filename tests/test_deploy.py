@@ -1738,6 +1738,8 @@ class ObservationTest(unittest.TestCase):
                 answer = test.answers.pop(0) if test.answers else []
                 if answer == "boom":
                     raise RuntimeError("platform unreachable")
+                if isinstance(answer, BaseException):
+                    raise answer
                 return answer
 
         self.adapters = mock.patch.dict(deploy.ADAPTERS, {"observing": Observing})
@@ -1812,6 +1814,45 @@ class ObservationTest(unittest.TestCase):
         self.assertIn("observations skipped for deploy-app-c0ffee00-1: RuntimeError", lines)
         rows = deploy.observations_by_run(lifecycle.read_events(self.events))
         self.assertEqual([r["state"] for r in rows[other.run_id]], ["merged"])
+
+    def test_system_exit_from_an_adapter_is_one_runs_failure(self) -> None:
+        other = self.second_run()
+        self.answers = [SystemExit(3), [{"kind": "platform_pr", "state": "merged"}]]
+        lines = self.apply_pass()
+        self.assertEqual(self.seen, [self.run.run_id, other.run_id])
+        self.assertIn("observations skipped for deploy-app-c0ffee00-1: RuntimeError: observe raised SystemExit: 3",
+                      lines)
+        rows = deploy.observations_by_run(lifecycle.read_events(self.events))
+        self.assertEqual([r["state"] for r in rows[other.run_id]], ["merged"])
+
+    def test_keyboard_interrupt_from_an_adapter_still_propagates(self) -> None:
+        self.answers = [KeyboardInterrupt()]
+        with self.assertRaises(KeyboardInterrupt):
+            self.apply_pass()
+
+    def test_target_locks_are_released_when_the_observe_pass_raises(self) -> None:
+        held: list[object] = []
+        released: list[object] = []
+        real_acquire, real_release = deploy.acquire_target_lock, deploy.release_lock
+
+        def acquire(*args):
+            ok, fd = real_acquire(*args)
+            held.append(fd)
+            return ok, fd
+
+        def release(fd: object) -> None:
+            released.append(fd)
+            real_release(fd)
+            if len(released) == 1:
+                raise OSError("backend lock release failed")  # the target lock must still be released
+
+        with mock.patch.object(apply, "observe_recent_runs", side_effect=RuntimeError("observe broke")), \
+             mock.patch.object(deploy, "acquire_target_lock", side_effect=acquire), \
+             mock.patch.object(deploy, "release_lock", side_effect=release), \
+             self.assertRaises((RuntimeError, OSError)):
+            self.apply_pass()
+        (target_fd,) = held
+        self.assertIn(target_fd, released)
 
     def test_fields_are_type_checked_redacted_and_capped_before_the_journal(self) -> None:
         secret = "hunter2-" + "x" * 24

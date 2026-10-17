@@ -348,9 +348,14 @@ def _observe_with_timeout(adapter: deploy.DeployAdapter, target: config.DeployTa
     worker.join(max(0.0, timeout))
     if worker.is_alive():
         raise TimeoutError(f"observe did not return within {timeout:.0f}s")
-    if "error" in box:
-        raise box["error"]
-    return box.get("value")
+    error = box.get("error")
+    if error is None:
+        return box.get("value")
+    if isinstance(error, (Exception, KeyboardInterrupt)):
+        raise error
+    # SystemExit, GeneratorExit and the like from adapter code must not end the
+    # pass: they become an ordinary per-run failure.
+    raise RuntimeError(f"observe raised {type(error).__name__}: {error}") from error
 
 
 def observe_recent_runs(target: config.DeployTarget) -> None:
@@ -808,10 +813,14 @@ def main(argv: list[str]) -> int:
                 observe = False
                 raise
             finally:
-                if observe:
-                    observe_recent_runs(target)
-                deploy.release_lock(b_fd)
-                deploy.release_lock(t_fd)
+                try:
+                    if observe:
+                        observe_recent_runs(target)
+                finally:
+                    try:
+                        deploy.release_lock(b_fd)
+                    finally:
+                        deploy.release_lock(t_fd)
 
         if not any_candidates_found and not has_errors:
             log("nothing to apply")
