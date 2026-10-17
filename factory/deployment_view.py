@@ -1,7 +1,6 @@
 """Read-only deployment history. Raw journal output is never part of this API."""
 from __future__ import annotations
 
-import fcntl
 import gzip
 import json
 import logging
@@ -45,10 +44,14 @@ def _deploy_rows(lines) -> list[dict]:
 def journal_rows(path: Path) -> list[dict]:
     """Every deployment-related row in the journal (gzip segments and live file),
     oldest first. Segments and the live prefix already read are cached, so a
-    refresh parses only appended bytes; rotation or truncation re-reads all."""
+    refresh parses only appended bytes; rotation or truncation re-reads all.
+
+    Passive like `dashboard.bounded_journal_rows`: no flock, so a writer holding
+    the journal exclusively never blocks the dashboard. The journal is
+    append-only and only complete lines are consumed; a read that races a
+    rotation raises (the caller isolates it) and leaves the cache untouched."""
     key = str(path)
     with _journal_lock, Path(path).open("rb") as handle:
-        fcntl.flock(handle, fcntl.LOCK_SH)
         stat = os.fstat(handle.fileno())
         segments = tuple((n, lifecycle._segment(path, n).stat().st_size) for n in lifecycle._segments(path))
         cache = _journal_cache.get(key)
