@@ -648,8 +648,10 @@ def collect(cfg, number: int | None = None, *, deadline: float | None = None) ->
     # One replay of the captured journal serves every initiative's deployment evidence.
     try:
         deploy_states, deploy_error = deploy.replay_rows(events), None
+        deploy_observations = deploy.observations_by_run(events)
     except Exception as exc:  # noqa: BLE001 - a malformed journal degrades verification, never collection
         deploy_states, deploy_error = {}, f"Deployment journal replay failed ({type(exc).__name__})"
+        deploy_observations = {}
         _notice(result, "Recorded deployments could not be replayed; machine deployment verification is unknown.")
 
     runtime = None
@@ -726,6 +728,7 @@ def collect(cfg, number: int | None = None, *, deadline: float | None = None) ->
                         {ticket: (accepted_rows[ticket]["baseline"].get("sha256") if ticket in accepted_rows else None)
                          for ticket in linked},
                         deploy_states,
+                        deploy_observations,
                     )
                 except Exception as exc:  # noqa: BLE001 - one initiative's evidence must not stop collection
                     delivery["verified"] = outcomes.unknown_delivery(

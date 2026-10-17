@@ -171,7 +171,10 @@ token shapes the same way as apply output, truncates long text and drops other k
 with a wrong type is dropped whole, and the pass logs the reason. At most 20 observations per
 run are kept from one call.
 
-Factory appends a `deploy_observation` journal row only when the `(kind, state)` pair changes.
+Factory appends a `deploy_observation` journal row only when the `(kind, state, attention)` triple
+changes, so an observation that starts (or stops) asking for attention without a state change is
+still recorded. A malformed hand-edited row (a non-string `kind`, a non-bool `attention`) never
+breaks the projection; a non-false `attention` value counts as attention.
 The deployment projection lists the rows under the run, and the latest observation per kind
 sets `needs_attention`. Such a run stays in the open part of the history, and the workspace
 Deployments view shows it expanded.

@@ -429,10 +429,12 @@ def project(cfg: config.Config, raw_issue: object, comments: object, *, complete
     }
 
 
-def _run_state(run: deploy.DeployRun) -> str:
+def _run_state(run: deploy.DeployRun, attention: bool = False) -> str:
     verification = run.verification if isinstance(run.verification, dict) else {}
     observed = verification.get("verdict") == "healthy" and bool(verification.get("items"))
     if run.status == deploy.DeployStatus.SUCCEEDED:
+        if attention:
+            return "needs_attention"
         return "verified" if observed else "unverified"
     if run.status == deploy.DeployStatus.FAILED:
         return "failed"
@@ -455,7 +457,8 @@ def unknown_delivery(error: str | None = None) -> dict:
 
 
 def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None],
-                      states: dict[str, deploy.TargetState]) -> dict:
+                      states: dict[str, deploy.TargetState],
+                      observations: dict[str, list[dict]] | None = None) -> dict:
     """Machine deployment and health verification for one initiative.
 
     ``bindings`` maps each linked ticket to the canonical plan revision it was admitted
@@ -465,8 +468,12 @@ def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None],
     the current canonical revision. A deployment is verified when every linked ticket
     has a counted run and each one succeeded with healthy recorded evidence. Failed,
     pending, superseded, skipped or unobserved runs never read as verified, and a linked
-    ticket with no counted run keeps the initiative unverified.
+    ticket with no counted run keeps the initiative unverified. ``observations`` are the
+    post-run observations per run (``deploy.observations_by_run``); a succeeded run whose
+    latest observation of any kind asks for attention reads as needs_attention, which
+    keeps the initiative unverified until a later run replaces it.
     """
+    observations = observations or {}
     evidence = []
     for target, state in sorted(states.items()):
         for ticket, runs in sorted(state.runs_by_ticket.items()):
@@ -475,15 +482,16 @@ def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None],
             run = runs[-1]
             bound = bindings[ticket]
             verification = run.verification if isinstance(run.verification, dict) else {}
+            attention = deploy.observation_attention(observations.get(run.run_id, []))
             evidence.append({
                 "ticket": ticket, "target": target, "run_id": run.run_id, "commit": run.commit,
                 "outcome": run.status.value, "verdict": verification.get("verdict"),
-                "completed_at": run.completed_at, "state": _run_state(run),
+                "completed_at": run.completed_at, "state": _run_state(run, attention), "attention": attention,
                 "binding": "unbound" if bound is None else "current" if bound == canonical_sha256 else "stale_revision",
                 "artifacts": [artifact_link(target, run.run_id, "summary.json")],
             })
     counted = [item for item in evidence
-               if item["binding"] == "current" and item["state"] in ("verified", "unverified", "failed", "pending")]
+               if item["binding"] == "current" and item["state"] in ("verified", "needs_attention", "unverified", "failed", "pending")]
     uncovered = sorted(set(bindings) - {item["ticket"] for item in counted})
     states_seen = {item["state"] for item in counted}
     if not counted:
