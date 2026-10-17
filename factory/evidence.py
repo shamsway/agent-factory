@@ -302,8 +302,10 @@ def case_summary(ticket: dict) -> dict:
     return result
 
 
-def failed(result: dict, exc: EvidenceError) -> None:
+def failed(result: dict, exc: EvidenceError, *, warning: bool = False) -> None:
     error = {"source": exc.source, "scope": exc.scope, "code": exc.code}
+    if warning:
+        error["severity"] = "warning"
     if error not in result["errors"] and len(result["errors"]) < ERROR_CAP:
         result["errors"].append(error)
     result["ok"] = False
@@ -326,8 +328,13 @@ def attention_unavailable(result: dict, reasons: list[str], unknown_executions: 
     result["coverage"]["notices"].extend(
         f"Attention count unavailable: {ATTENTION_REASONS[code]}" for code in reasons
     )
+    # These describe why a derived count is unknown. Any actual source failure
+    # remains separately in errors and must still drive an error badge.
     count_errors = [{"source": diagnostic["id"], "scope": "attention_count", "code": code}
                     for code in reasons]
+    for error in count_errors:
+        if error['code'] != 'output_truncated':
+            error['severity'] = 'warning'
     output_errors = [error for error in result["errors"]
                      if error["source"] == "output" and error["scope"] == "response"]
     priority = count_errors + output_errors
@@ -1422,7 +1429,7 @@ def audit_membership(cfg: config.Config, result: dict) -> dict:
         failed(result, EvidenceError("audit_partial", "The audit trail contains unreadable rows; case selection may miss recorded evidence.", "events.jsonl", "audit"))
         result["coverage"]["notices"].append("Unreadable audit rows keep membership incomplete; an unlisted issue may still have recorded evidence.")
     if size_truncated:
-        failed(result, EvidenceError("audit_partial", "Audit trail membership is incomplete; case selection may miss recorded evidence.", "events.jsonl", "audit"))
+        failed(result, EvidenceError("audit_partial", "Audit trail membership is incomplete; case selection may miss recorded evidence.", "events.jsonl", "audit"), warning=True)
         result["coverage"]["notices"].append("Audit-trail membership is bounded by size; an unlisted issue may still have recorded evidence.")
     if in_flight:
         failed(result, EvidenceError("audit_partial", "The audit trail's final row is in-flight; case selection may miss recorded evidence.", "events.jsonl", "audit"))
@@ -1453,7 +1460,8 @@ def collect_cases(req: dict, result: dict, cfg: config.Config, deadline: float) 
     runtime = runtime_events.project(cfg.factory / "events.jsonl", [(cfg.lock, "host"), (cfg.factory / "locks" / "merge.lock", "repository")])
     result["sources"].append(source("Local runtime observation", runtime))
     for error in runtime["errors"]:
-        failed(result, EvidenceError(error["code"], "Runtime observation is incomplete.", error["source"], error["scope"]))
+        failed(result, EvidenceError(error["code"], "Runtime observation is incomplete.", error["source"], error["scope"]),
+               warning=runtime_events.coverage_only(error, runtime.get("history", {})))
     on_disk, attempts = local_inventory(cfg, result)
     audit = audit_membership(cfg, result)
     result["sources"].append(source("Bounded audit-trail membership",

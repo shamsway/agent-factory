@@ -754,6 +754,11 @@ class Workspace:
             str(reported.get("message") or "Evidence collection was partial or unavailable."),
             operation=operation,
             returncode=returncode,
+            severity="warning" if (
+                returncode == 1 and reported.get("code") == "partial_collection"
+                and value.get("errors")
+                and all(item.get("severity") == "warning" for item in value["errors"])
+            ) else "error",
         )
 
     def request_refresh(self, slug: str, *, force: bool = False) -> bool:
@@ -867,6 +872,9 @@ class Workspace:
                                 str(runtime_error.get("code") or "runtime_partial"),
                                 "Runtime observation is partial.",
                                 operation="runtime",
+                                severity="warning" if runtime_events.coverage_only(
+                                    runtime_error, runtime.get("history", {})
+                                ) else "error",
                             )
                         )
                 with self._lock:

@@ -22,6 +22,27 @@ from factory.workspace import ACCESS_FILE, MAX_CHAT_BODY, Handler, Server, Works
 REPOSITORY = "acme/widgets"
 
 
+class EvidenceSeverityTest(unittest.TestCase):
+    def test_only_warning_only_partial_envelopes_are_downgraded(self):
+        workspace = Workspace.__new__(Workspace)
+        workspace._roots = {REPOSITORY: Path('/fixture')}
+        envelope = {
+            'schema_version': 1, 'ok': False,
+            'scope': {'repository': REPOSITORY, 'root': '/fixture'},
+            'error': {'code': 'partial_collection'},
+        }
+        for errors, expected in [
+            ([{'code': 'byte_limit', 'severity': 'warning'}], 'warning'),
+            ([{'code': 'byte_limit', 'severity': 'warning'}, {'code': 'unreadable'}], 'error'),
+            ([], 'error'),
+        ]:
+            with mock.patch.object(workspace, '_run_json', return_value=(
+                {**envelope, 'errors': errors}, None, 1
+            )):
+                _, problem = workspace._read_evidence(REPOSITORY, {}, 'observation')
+            self.assertEqual(problem['severity'], expected)
+
+
 def git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(root), *args],

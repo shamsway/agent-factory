@@ -35,13 +35,15 @@ const deployments = {
   try {
     const page = await browser.newPage({viewport:{width:1280,height:900}});
     const errors = [], artifactRequests = [];
+    let collectionProblems = [];
     page.on('pageerror', e => errors.push(e.message));
     page.on('dialog', d => { errors.push('dialog: ' + d.message()); d.dismiss(); });
     await page.route(ORIGIN + '/**', route => {
       const url = new URL(route.request().url());
       const json = value => route.fulfill({status:200, contentType:'application/json', body:JSON.stringify(value)});
       if (url.pathname === '/api/data') return json({observed_at:null, collection:{selected_repository:REPOSITORY},
-        repositories:[{slug:REPOSITORY, root:'/fixture', collection:{}, errors:[]}]});
+        repositories:[{slug:REPOSITORY, root:'/fixture', observed_at:'2026-10-16T00:00:00Z',
+          collection:{error:collectionProblems[0] || null}, errors:collectionProblems}]});
       if (url.pathname === '/api/snapshot') return json({repo:REPOSITORY, generated_at:'2026-10-16T00:00:00Z', deployments});
       if (url.pathname === '/api/artifacts') {
         artifactRequests.push({query:Object.fromEntries(url.searchParams), key:route.request().headers()['x-factory-access']});
@@ -77,6 +79,19 @@ const deployments = {
     await page.selectOption('[data-deploy-filter="target"]', 'other');
     assert.equal(await runs.count(), 1);
     assert.equal(await page.locator('details.deploy-run summary .signal').textContent(), 'succeeded');
+    const warning = {code:'partial_collection', severity:'warning', message:'Bounded history'};
+    for (const [problems, status, tone] of [
+      [[warning], 'partial', 'warn'],
+      [[warning, {code:'unreadable', severity:'error'}], 'error', 'bad'],
+      [[{code:'unknown_failure'}], 'error', 'bad'],
+      [[], 'ready', 'good'],
+    ]) {
+      collectionProblems = problems;
+      await page.reload();
+      const badge = page.locator('.collection .signal');
+      await page.waitForFunction(expected => document.querySelector('.collection .signal')?.textContent === expected, status);
+      assert.equal(await badge.getAttribute('data-tone'), tone, status);
+    }
     assert.deepEqual(errors, []);
     if (process.env.SCREENSHOT) await page.screenshot({path:process.env.SCREENSHOT, fullPage:true});
     console.log('PASS: workspace Deployments view: seven states, observations, filters, scoped artifact viewer and text safety');

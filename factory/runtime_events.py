@@ -45,6 +45,20 @@ REASONS = {
 PROCESS_FIELDS = ("pid", "boot_id", "start_ticks", "pid_namespace", "uid", "state", "ppid")
 
 
+def coverage_only(error: dict, history: dict) -> bool:
+    """Expected journal bounds are warnings, not failed source reads."""
+    if error.get("source") != "events.jsonl":
+        return False
+    code = error.get("code")
+    expected = {"byte_limit", "event_limit", "unsupported_record"}
+    if code in expected:
+        return True
+    return (code == "missing_enter" and error.get("bounded_prefix") is True
+            and history.get("truncated") is True
+            and bool(set(history.get("gaps", [])) & {"byte_limit", "event_limit"})
+            and set(history.get("gaps", [])) <= expected | {"missing_enter"})
+
+
 def _error(errors: list, source: str, scope: str, code: str) -> None:
     value = {"source": source, "scope": scope, "code": code}
     if value not in errors and len(errors) < ERROR_LIMIT:
@@ -543,6 +557,15 @@ def _executions(retained: list, history: dict, gaps: list, observation: _Observa
                 history["gaps"].append(code)
             history["complete"] = False
             _error(observation.errors, "events.jsonl", "executions", code)
+            if (code == "missing_enter" and history.get("truncated")
+                    and sequences[0] > 1 and not causal_gap
+                    and all(any(event["kind"] == "enter" for _, event in group)
+                            for other_key, group in groups.items() if other_key != key)
+                    and min(position for position, _ in rows) == min(
+                        position for group in groups.values() for position, _ in group)):
+                for error in observation.errors:
+                    if error.get("code") == code and error.get("scope") == "executions":
+                        error["bounded_prefix"] = True
         if terminal is not None and terminal != latest or sum(row["kind"] == "enter" for row in events) > 1:
             inconsistent = True
             if "sequence_conflict" not in history["gaps"]:
