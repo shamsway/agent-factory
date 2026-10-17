@@ -21,6 +21,7 @@ import argparse
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -330,21 +331,71 @@ def apply_escalate(
     log(f"#{n}: apply escalated ({reason})")
 
 
-def observe_recent_runs(target: config.DeployTarget, tstate: deploy.TargetState) -> None:
+def _observe_with_timeout(adapter: deploy.DeployAdapter, target: config.DeployTarget, run: deploy.DeployRun,
+                          env: dict[str, str], timeout: float) -> object:
+    """adapter.observe on a daemon thread, so a hung platform call cannot hold the
+    target lock past `timeout`. A call that overruns is abandoned, not killed."""
+    box: dict = {}
+
+    def call() -> None:
+        try:
+            box["value"] = adapter.observe(target, run, env)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=call, name=f"observe-{run.run_id}", daemon=True)
+    worker.start()
+    worker.join(max(0.0, timeout))
+    if worker.is_alive():
+        raise TimeoutError(f"observe did not return within {timeout:.0f}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def observe_recent_runs(target: config.DeployTarget) -> None:
     """Record adapter observations about recent finished runs. Evidence only: a
-    failure here is logged and never stops the pass or touches run status."""
+    failure here is logged and never stops the pass or touches run status. Each
+    run's call is isolated; one call may take OBSERVE_CALL_SEC and the target's
+    observations OBSERVE_TOTAL_SEC, after which the rest wait for the next pass."""
+    secrets = artifacts.secret_values(cfg.apply_env, os.environ)
+
+    def failure(exc: BaseException) -> str:
+        return f"{type(exc).__name__}: {artifacts.sanitize(str(exc), secrets)}"
+
     try:
         adapter = deploy.get_adapter(target.adapter)
+        tstate = deploy.get_target_state(target=target.name, events_path=dispatch.EVENTS)
         observed = deploy.observations_by_run(lifecycle.read_events(dispatch.EVENTS))
-        for run in deploy.runs_to_observe(tstate, observed):
-            found = adapter.observe(target, run, apply_env())
-            for row in deploy.record_observations(run, found or [], observed.get(run.run_id, []),
-                                                  events_path=dispatch.EVENTS):
-                flag = " (needs attention)" if row["attention"] else ""
-                log(f"#{run.ticket}: observed {row['kind']} {row['state']} for {run.run_id}{flag}")
+        pending = deploy.runs_to_observe(tstate, observed)
+        env = apply_env()
     except Exception as exc:  # noqa: BLE001 - observations are optional evidence
-        detail = artifacts.sanitize(str(exc), artifacts.secret_values(cfg.apply_env, os.environ))
-        log(f"target `{target.name}`: observations skipped: {type(exc).__name__}: {detail}")
+        log(f"target `{target.name}`: observations skipped: {failure(exc)}")
+        return
+    deadline = time.monotonic() + deploy.OBSERVE_TOTAL_SEC
+    for index, run in enumerate(pending):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            log(f"target `{target.name}`: observation budget of {deploy.OBSERVE_TOTAL_SEC}s spent; "
+                f"{len(pending) - index} run(s) wait for the next pass")
+            return
+        try:
+            found = _observe_with_timeout(adapter, target, run, env, min(deploy.OBSERVE_CALL_SEC, remaining))
+            written, dropped = deploy.record_observations(run, found, observed.get(run.run_id, []),
+                                                          events_path=dispatch.EVENTS, secrets=secrets)
+        except TimeoutError as exc:
+            # The adapter is likely wedged; later calls would hang the same way.
+            log(f"target `{target.name}`: observations stopped at {run.run_id}: {failure(exc)}")
+            return
+        except Exception as exc:  # noqa: BLE001 - one run's failure must not stop the others
+            log(f"#{run.ticket}: observations skipped for {run.run_id}: {failure(exc)}")
+            continue
+        if dropped:
+            log(f"#{run.ticket}: dropped {len(dropped)} invalid observation(s) for {run.run_id}: "
+                + artifacts.sanitize("; ".join(dropped)[:500], secrets))
+        for row in written:
+            flag = " (needs attention)" if row["attention"] else ""
+            log(f"#{run.ticket}: observed {row['kind']} {row['state']} for {run.run_id}{flag}")
 
 
 def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: deploy.DeployAdapter | None = None) -> bool:
@@ -677,6 +728,9 @@ def main(argv: list[str]) -> int:
                 deploy.release_lock(t_fd)
                 continue
 
+            # Observations run after this target's applies, under the same locks,
+            # so slow platform reads never delay a deploy. Not on an exception.
+            observe = not args.dry_run
             try:
                 tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
                 if tstate.has_interrupted_run:
@@ -690,9 +744,6 @@ def main(argv: list[str]) -> int:
                         continue
                     log(f"target `{target_name}`: {rec_msg}")
                     tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
-
-                if not args.dry_run:
-                    observe_recent_runs(target, tstate)
 
                 if tstate.unacknowledged_failed_tickets and cfg.apply_supersession == "sequential":
                     log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.unacknowledged_failed_tickets)})")
@@ -753,7 +804,12 @@ def main(argv: list[str]) -> int:
                         if cfg.apply_supersession == "sequential":
                             log(f"target `{target_name}`: stopping further applies after failure of #{candidate['ticket']}")
                             break
+            except BaseException:
+                observe = False
+                raise
             finally:
+                if observe:
+                    observe_recent_runs(target)
                 deploy.release_lock(b_fd)
                 deploy.release_lock(t_fd)
 

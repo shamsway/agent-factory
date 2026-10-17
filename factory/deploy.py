@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from factory import lifecycle
+from factory import artifacts, lifecycle
 
 CONTRACT_VERSION = 1
 
@@ -1136,7 +1136,65 @@ class FakeDeployAdapter(DeployAdapter):
 
 
 OBSERVE_WINDOW_SEC = 7 * 24 * 3600
-OBSERVATION_KEYS = ("kind", "state", "detail", "url", "attention", "final")
+# Bounds on one apply pass's observation work: per adapter call, and per target.
+OBSERVE_CALL_SEC = 60
+OBSERVE_TOTAL_SEC = 180
+# What a journal row may carry from an adapter: type and length per field.
+OBSERVATION_TEXT_LIMITS = {"kind": 64, "state": 64, "detail": 2000, "url": 2048}
+OBSERVATION_FLAGS = ("attention", "final")
+OBSERVATIONS_PER_RUN = 20
+
+
+def _capped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def clean_observations(found: Any, secrets: list[str] | None = None) -> tuple[list[dict], list[str]]:
+    """Validated copies of an adapter's observations, ready for the journal, and a
+    reason for each one dropped. Text is redacted and length-capped; `kind` and
+    `state` must be non-empty strings, `detail` a string, `url` an http(s) URL,
+    and `attention`/`final` booleans. Other keys are ignored."""
+    if found is None:
+        return [], []
+    if not isinstance(found, list):
+        return [], [f"observe returned {type(found).__name__}, not a list"]
+    clean: list[dict] = []
+    dropped: list[str] = []
+    for index, item in enumerate(found):
+        if len(clean) >= OBSERVATIONS_PER_RUN:
+            dropped.append(f"{len(found) - index} beyond the limit of {OBSERVATIONS_PER_RUN}")
+            break
+        if not isinstance(item, dict):
+            dropped.append(f"item {index}: {type(item).__name__}, not a dict")
+            continue
+        row: dict = {}
+        problem = ""
+        for key, limit in OBSERVATION_TEXT_LIMITS.items():
+            value = item.get(key)
+            if value is None and key not in ("kind", "state"):
+                continue
+            if not isinstance(value, str) or (key in ("kind", "state") and not value.strip()):
+                problem = f"`{key}` is {type(value).__name__ if value is not None else 'missing'}"
+                break
+            value = artifacts.sanitize(value, secrets)
+            if key in ("kind", "state"):
+                value = " ".join(value.split())
+            if key == "url" and not value.startswith(("https://", "http://")):
+                problem = "`url` is not an http(s) URL"
+                break
+            row[key] = _capped(value, limit)
+        for key in OBSERVATION_FLAGS:
+            if problem:
+                break
+            value = item.get(key, False)
+            if not isinstance(value, bool):
+                problem = f"`{key}` is {type(value).__name__}, not a bool"
+            row[key] = value
+        if problem:
+            dropped.append(f"item {index}: {problem}")
+            continue
+        clean.append(row)
+    return clean, dropped
 
 
 def observations_by_run(rows: list[dict]) -> dict[str, list[dict]]:
@@ -1167,21 +1225,18 @@ def runs_to_observe(state: TargetState, observed: dict[str, list[dict]], now: fl
     return out
 
 
-def record_observations(run: DeployRun, found: list[dict], observed: list[dict],
-                        events_path: Path | None = None) -> list[dict]:
-    """Append each observation whose (kind, state) differs from the last one recorded
-    for its kind on this run. Returns the rows written."""
+def record_observations(run: DeployRun, found: Any, observed: list[dict], events_path: Path | None = None,
+                        secrets: list[str] | None = None) -> tuple[list[dict], list[str]]:
+    """Append each valid observation whose (kind, state) differs from the last one
+    recorded for its kind on this run. Returns the rows written and a reason for
+    each observation `clean_observations` dropped."""
+    clean, dropped = clean_observations(found, secrets)
     last = {row.get("kind"): row.get("state") for row in observed}
     written = []
-    for item in found:
-        if not isinstance(item, dict) or not item.get("kind") or not item.get("state"):
-            continue
+    for item in clean:
         if last.get(item["kind"]) == item["state"]:
             continue
-        row = {"event": "deploy_observation", "run_id": run.run_id, "target": run.target, "ticket": run.ticket,
-               **{key: item[key] for key in OBSERVATION_KEYS if key in item}}
-        row["attention"] = bool(row.get("attention"))
-        row["final"] = bool(row.get("final"))
+        row = {"event": "deploy_observation", "run_id": run.run_id, "target": run.target, "ticket": run.ticket, **item}
         if events_path is not None:
             lifecycle.append(events_path, {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **row})
         else:
@@ -1190,7 +1245,7 @@ def record_observations(run: DeployRun, found: list[dict], observed: list[dict],
             row["event"] = "deploy_observation"
         last[item["kind"]] = item["state"]
         written.append(row)
-    return written
+    return written, dropped
 
 
 def reconcile_interrupted_run(

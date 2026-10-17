@@ -127,17 +127,23 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 
 Some targets finish their run before the change is live, for example an adapter whose
 `SUCCEEDED` means "a PR is open for a human to merge". On each later non-dry-run apply pass,
-Factory calls `observe()` for every `SUCCEEDED` run on the target that:
+after the target's applies and before its locks are released, Factory calls `observe()` for
+every `SUCCEEDED` run on the target that:
 
 - completed within the last 7 days (`deploy.OBSERVE_WINDOW_SEC`), and
 - has no final observation yet.
 
 Each observation is a dict:
 
-- `kind` and `state` (required)
-- optional `detail` and `url`
-- `attention`: a human should look, for example a PR closed without merge
-- `final`: stop observing the run
+- `kind` and `state` (required, non-empty strings, at most 64 characters)
+- optional `detail` (string, at most 2000 characters) and `url` (an `http(s)://` URL)
+- `attention` (bool): a human should look, for example a PR closed without merge
+- `final` (bool): stop observing the run
+
+Before anything reaches the journal, Factory checks these types, redacts secret values and
+token shapes the same way as apply output, truncates long text and drops other keys. An item
+with a wrong type is dropped whole, and the pass logs the reason. At most 20 observations per
+run are kept from one call.
 
 Factory appends a `deploy_observation` journal row only when the `(kind, state)` pair changes.
 The deployment projection lists the rows under the run, and the latest observation per kind
@@ -145,8 +151,11 @@ sets `needs_attention`. Such a run stays in the open part of the history, and th
 Deployments view shows it expanded.
 
 Observations are evidence only. They never change the run's status, never feed target-state
-replay, and never make the ticket selectable again. An adapter that raises is logged, and
-the pass continues.
+replay, and never make the ticket selectable again. Each run's call is isolated: an adapter
+that raises is logged for that run, and the next run is still observed. One call may take
+`deploy.OBSERVE_CALL_SEC` (60s) and one target's observations `deploy.OBSERVE_TOTAL_SEC`
+(180s). A call that overruns is abandoned on its thread, not killed, and the target's
+remaining runs wait for the next pass. An interrupted or crashed pass skips observations.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 
