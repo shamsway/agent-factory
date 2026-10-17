@@ -556,7 +556,12 @@ def doctor(argv: list[str]) -> int:
         )
 
     if cfg.apply_enabled:
-        report(shutil.which("terraform") is not None, "terraform on PATH (required: [apply].enabled)")
+        # Only the built-in terraform adapter shells out to terraform; plugin
+        # adapters bring their own tools and report them through check().
+        tf_targets = [t.name for t in cfg.targets.values() if t.enabled and t.adapter.lower() == "terraform"]
+        if tf_targets:
+            report(shutil.which("terraform") is not None, "terraform on PATH",
+                   f"required by target(s): {', '.join(tf_targets)}")
         # Credential-boundary canary: [apply].env names credentials `factory
         # apply` alone should hold. If this shell already exports one, the
         # boundary is only a convention here, not enforced -- whoever installs

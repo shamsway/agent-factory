@@ -927,10 +927,24 @@ class HostConfigTest(unittest.TestCase):
                 proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
             out = json.loads(proc.stdout)
             rows = {r["label"]: r for r in out["rows"]}
-            self.assertIn("terraform on PATH (required: [apply].enabled)", rows)  # checked only when apply.enabled
+            self.assertIn("terraform on PATH", rows)  # checked only when apply.enabled
             leak_row = rows["apply credentials isolated from this shell"]
             self.assertEqual(leak_row["status"], "FAIL")
             self.assertIn("FAKE_CRED", leak_row["detail"])
+    def test_doctor_requires_terraform_only_for_terraform_targets(self) -> None:
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        toml = ('[apply]\nenabled = true\n[apply.targets.app]\ndir = "deploy/app"\nadapter = "mock"\n'
+                '[apply.targets.infra]\ndir = "infra"\nadapter = "terraform"\nenabled = false\n')
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
+            rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
+            self.assertNotIn("terraform on PATH", rows)
+            repo.joinpath(".factory.toml").write_text(toml.replace("enabled = false\n", ""))
+            proc = factory(repo, "doctor", "--json", path=stub_bin(Path(d), gh=gh, systemctl="echo inactive"))
+            rows = {r["label"]: r for r in json.loads(proc.stdout)["rows"]}
+            self.assertIn("required by target(s): infra", rows["terraform on PATH"]["detail"])
+
     def test_doctor_template_fix_applies(self) -> None:
         host_file('[defaults.triage]\nurl = "http://127.0.0.1:1/v1/chat/completions"\n')
         for original in (None, "", "custom\n", "custom"):
