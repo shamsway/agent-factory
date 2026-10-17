@@ -429,6 +429,50 @@ def record_unauthorized_event(
         dispatch.record("deploy_unauthorized", commit=commit, target=target, reason=reason)
 
 
+OPERATOR_APPROVAL_EVENT = "deploy_operator_approval"
+
+
+def record_operator_approval(pr: int, head_commit: str, merge_commit: str, operator: str, reason: str,
+                             events_path: Path | None = None) -> dict:
+    """Record a host operator's approval of one merged PR revision.
+
+    This stands in for the second human's GitHub review when no other reviewer
+    is available. It is bound to the exact merged head, so a later push to the
+    same PR is not covered."""
+    row = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": OPERATOR_APPROVAL_EVENT,
+        "pr": int(pr),
+        "head_commit": head_commit,
+        "merge_commit": merge_commit,
+        "operator": operator,
+        "reason": reason,
+    }
+    if events_path is not None:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        lifecycle.append(events_path, row)
+    else:
+        from factory import dispatch
+        dispatch.record(OPERATOR_APPROVAL_EVENT, **{k: v for k, v in row.items() if k not in ("at", "event")})
+    return row
+
+
+def operator_approvals(rows: list[dict]) -> dict[int, dict[str, dict]]:
+    """Recorded operator approvals: PR number -> exact head commit -> the approval row."""
+    out: dict[int, dict[str, dict]] = {}
+    for row in rows:
+        if row.get("event") != OPERATOR_APPROVAL_EVENT:
+            continue
+        try:
+            pr = int(row.get("pr"))
+        except (TypeError, ValueError):
+            continue
+        head = str(row.get("head_commit") or "")
+        if re.fullmatch(r"[0-9a-f]{40}", head):
+            out.setdefault(pr, {})[head] = row
+    return out
+
+
 def resolve_main_ref(root: Path, main_branch: str = "main") -> str:
     """Find the most up-to-date ref between main and origin/main."""
     has_origin = subprocess.run(
@@ -758,6 +802,7 @@ def select_candidates_for_target(
     supersession: str = "sequential",
     repo: str = "",
     fetch_evidence_fn: Any = None,
+    approvals: dict[int, dict[str, dict]] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Select, filter, and order deployment candidates for a target.
 
@@ -765,7 +810,9 @@ def select_candidates_for_target(
     - Target state checks (interrupted runs or unreconciled failures block selection).
     - Adoption baseline filtering.
     - Direct merge detection on main touching target_dir.
-    - Revision authorization verification.
+    - Revision authorization verification: a trusted human review of the merged
+      head, or a recorded operator approval of that exact head (`approvals`,
+      read from the journal when not given).
     - Git topological ordering.
 
     Returns:
@@ -838,7 +885,14 @@ def select_candidates_for_target(
 
         ok, reason = verify_revision_authorization(c, c.get("commit", ""))
         if not ok:
-            c["unauthorized_reason"] = reason
+            if approvals is None:
+                approvals = operator_approvals(lifecycle.read_events(events_path)) if events_path else {}
+            head = str(c.get("head_commit") or c.get("headRefOid") or "")
+            approval = approvals.get(int(c["pr"]), {}).get(head)
+            if approval:
+                c["operator_approval"] = {key: approval.get(key) for key in ("operator", "reason", "at")}
+            else:
+                c["unauthorized_reason"] = reason
 
     ordered = sort_candidates_topologically(candidates, root=root, main_branch=main_branch)
     return ordered, []
