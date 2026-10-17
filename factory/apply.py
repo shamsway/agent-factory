@@ -691,13 +691,8 @@ def main(argv: list[str]) -> int:
                     log(f"target `{target_name}`: {rec_msg}")
                     tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
 
-                if tstate.unacknowledged_failed_tickets and mode == "sequential":
+                if tstate.unacknowledged_failed_tickets and mode in deploy.HALTING_MODES:
                     log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.unacknowledged_failed_tickets)})")
-                    has_errors = True
-                    continue
-                if tstate.unacknowledged_rejections and mode == "latest":
-                    log(f"target `{target_name}`: stopped (later revisions include unauthorized "
-                        f"tickets {sorted(tstate.unacknowledged_rejections)}; acknowledge them to continue)")
                     has_errors = True
                     continue
 

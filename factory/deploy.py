@@ -52,6 +52,10 @@ TERMINAL_STATUSES = frozenset(
 
 # Phase recorded on the FAILED run of a revision rejected as unauthorized.
 REJECTED_PHASE = "rejected"
+# Supersession modes that stop a target on any unacknowledged failed run. In
+# latest mode a failed newest run must not let an older revision deploy behind
+# it, and a rejected revision is contained in every later one.
+HALTING_MODES = frozenset({"sequential", "latest"})
 
 
 @dataclass
@@ -166,13 +170,6 @@ class TargetState:
                 if last_run.run_id not in self.acknowledged_failures:
                     out.add(ticket)
         return out
-
-    @property
-    def unacknowledged_rejections(self) -> set[int]:
-        """Unacknowledged failed tickets whose revision was rejected as unauthorized.
-        A latest-wins target holds on these: every later revision contains the change."""
-        return {ticket for ticket in self.unacknowledged_failed_tickets
-                if self.runs_by_ticket[ticket][-1].phase == REJECTED_PHASE}
 
     @property
     def succeeded_tickets(self) -> set[int]:
@@ -776,9 +773,7 @@ def select_candidates_for_target(
     tstate = get_target_state(target=target_name, events_path=events_path)
     if tstate.has_interrupted_run:
         return [], []
-    if supersession == "sequential" and tstate.unacknowledged_failed_tickets:
-        return [], []
-    if supersession == "latest" and tstate.unacknowledged_rejections:
+    if supersession in HALTING_MODES and tstate.unacknowledged_failed_tickets:
         return [], []
 
     check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root))

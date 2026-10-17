@@ -1836,7 +1836,7 @@ dir = "terraform"
             state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
             self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()},
                              {11: "succeeded", 12: "failed"})
-            self.assertEqual(state.unacknowledged_rejections, {12})
+            self.assertEqual(state.unacknowledged_failed_tickets, {12})
             self.assertIn("#13: held on `app` behind unauthorized revision #12",
                           " ".join(str(c.args[0]) for c in log.call_args_list))
 
@@ -1861,8 +1861,21 @@ dir = "terraform"
             self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()}, {13: "failed"})
             self.assertFalse([c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "comment"]])
 
-            # #13's failed run is terminal, so the next pass deploys the newest pending
-            # revision, #12, and only its success supersedes #11.
+            # The unacknowledged failure halts the target: #12 must not replace the
+            # newer #13 that failed, and nothing is superseded.
+            with mock.patch.object(apply, "log") as log:
+                ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 1)
+            apply_one.assert_not_called()
+            self.assertIn("target `app`: stopped (unreconciled failed tickets: [13])",
+                          " ".join(str(c.args[0]) for c in log.call_args_list))
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()}, {13: "failed"})
+
+            # Once the operator acknowledges it, #13 is terminal: the newest pending
+            # revision, #12, deploys and only its success supersedes #11.
+            run_id = state.runs_by_ticket[13][-1].run_id
+            deploy.acknowledge_failure("app", run_id, events_path=dispatch.EVENTS)
             ret, apply_one, _ = self.run_pass(cfg, prs)
             self.assertEqual(ret, 0)
             self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [12])
