@@ -1956,6 +1956,186 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(deploy.TerraformDeployAdapter().observe(None, self.run, {}), [])
 
 
+class LatestWinsTest(unittest.TestCase):
+    """`supersession = "latest"`: N approved merges deploy once, newest only."""
+
+    TOML = """
+[apply]
+enabled = true
+
+[[apply.targets]]
+name = "app"
+dir = "deploy/app"
+supersession = "latest"
+
+[[apply.targets]]
+name = "infra"
+dir = "terraform"
+"""
+
+    def setup_repo(self, d: str):
+        from tests.test_factory import git
+
+        repo = make_repo(Path(d), self.TOML)
+        cfg = config.load(repo)
+        dispatch.configure(cfg)
+        apply.configure(cfg)
+        cfg.factory.mkdir(parents=True, exist_ok=True)
+        prs = []
+        for i, sub in enumerate(("deploy/app", "deploy/app", "deploy/app"), start=1):
+            (repo / sub).mkdir(parents=True, exist_ok=True)
+            (repo / sub / f"v{i}.yaml").write_text(f"v{i}\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "-m", f"app v{i}")
+            sha = git(repo, "rev-parse", "HEAD")
+            prs.append({"pr": i, "ticket": 10 + i, "commit": sha, "head_commit": sha, "reviewDecision": "APPROVED",
+                        "latestReviews": [{"state": "APPROVED", "author": {"login": "human"},
+                                           "authorAssociation": "MEMBER", "commit": {"oid": sha}}]})
+        return repo, cfg, prs
+
+    def run_pass(self, cfg, prs, args=(), failing=()):
+        def fake_apply_one(candidate, dry_run, target="default"):
+            if dry_run:
+                return True
+            ok = candidate["ticket"] not in failing
+            attempt = deploy.next_attempt(target, candidate["ticket"], candidate["commit"], events_path=dispatch.EVENTS)
+            deploy.record_deploy_run(deploy.DeployRun(
+                run_id=f"deploy-{target}-{candidate['commit'][:8]}-{attempt}", target=target,
+                commit=candidate["commit"], ticket=candidate["ticket"], attempt=attempt,
+                status=deploy.DeployStatus.SUCCEEDED if ok else deploy.DeployStatus.FAILED,
+                started_at="2026-10-16T00:00:00Z"))
+            return ok
+
+        with mock.patch.object(config, "load", return_value=cfg), \
+             mock.patch.object(dispatch, "run") as run, \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=prs[::-1]), \
+             mock.patch.object(apply, "touches_target_dir", side_effect=lambda c, d: d == "deploy/app"), \
+             mock.patch.object(apply, "apply_one", side_effect=fake_apply_one) as apply_one:
+            ret = apply.main(list(args))
+        return ret, apply_one, run
+
+    def test_config_modes_and_target_override(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), self.TOML)
+            cfg = config.load(repo)
+            self.assertEqual((cfg.apply_supersession, cfg.targets["app"].supersession, cfg.targets["infra"].supersession),
+                             ("sequential", "latest", ""))
+        for bad in ('[apply]\nsupersession = "newest"\n',
+                    '[apply]\n[apply.targets.x]\ndir = "x"\nsupersession = "LATEST"\n'):
+            with self.subTest(toml=bad), tempfile.TemporaryDirectory() as d:
+                repo = make_repo(Path(d), bad)
+                self.assertRaisesRegex(config.ConfigError, "must be one of sequential, none, latest", config.load, repo)
+
+    def test_only_the_newest_deploys_and_older_are_superseded(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            ret, apply_one, run = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [13])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            by_ticket = {t: runs[-1] for t, runs in state.runs_by_ticket.items()}
+            self.assertEqual({t: r.status.value for t, r in by_ticket.items()},
+                             {11: "superseded", 12: "superseded", 13: "succeeded"})
+            self.assertIn("superseded by #13", by_ticket[11].error)
+            self.assertEqual(state.unacknowledged_failed_tickets, set())
+            comments = [c.args[0] for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "comment"]]
+            self.assertEqual(sorted(c[3] for c in comments), ["11", "12"])
+
+            # The superseded tickets are terminal: the next pass has nothing to do.
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            apply_one.assert_not_called()
+
+    def test_dry_run_reports_supersession_without_recording(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            with mock.patch.object(apply, "log") as log:
+                self.run_pass(cfg, prs, ["--dry-run"])
+            lines = " ".join(str(c.args[0]) for c in log.call_args_list)
+            self.assertIn("#11: would supersede once #13 succeeds", lines)
+            self.assertEqual(deploy.get_target_state("app", events_path=dispatch.EVENTS).runs, [])
+
+    def test_the_walk_stops_at_the_first_unauthorized_candidate(self) -> None:
+        newest, older, held = deploy.latest_wins([
+            {"ticket": 1, "commit": "a"}, {"ticket": 2, "commit": "b"},
+            {"ticket": 3, "commit": "c", "unauthorized_reason": "x"},
+            {"ticket": 4, "commit": "d"}, {"ticket": 5, "commit": "e", "unauthorized_reason": "y"},
+        ])
+        self.assertEqual((newest["ticket"], [c["ticket"] for c in older], [c["ticket"] for c in held]),
+                         (2, [1], [3, 4, 5]))
+        newest, older, held = deploy.latest_wins([{"ticket": 1, "unauthorized_reason": "x"}, {"ticket": 2}])
+        self.assertEqual((newest, older, [c["ticket"] for c in held]), (None, [], [1, 2]))
+
+    def test_unauthorized_revision_holds_every_later_one(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            prs[1].update(reviewDecision="", latestReviews=[])
+            with mock.patch.object(apply, "log") as log:
+                ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 1)
+            # #13 contains #12's unapproved change: it neither deploys nor supersedes.
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [11])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()},
+                             {11: "succeeded", 12: "failed"})
+            self.assertEqual(state.unacknowledged_failed_tickets, {12})
+            self.assertIn("#13: held on `app` behind unauthorized revision #12",
+                          " ".join(str(c.args[0]) for c in log.call_args_list))
+
+            # The hold survives the next pass, when #12 is no longer a candidate.
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 1)
+            apply_one.assert_not_called()
+
+            # An operator acknowledgement releases it.
+            deploy.acknowledge_failure("app", "12", events_path=dispatch.EVENTS)
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [13])
+
+    def test_older_tickets_stay_pending_until_the_newest_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            ret, apply_one, run = self.run_pass(cfg, prs, failing={13})
+            self.assertEqual(ret, 1)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [13])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()}, {13: "failed"})
+            self.assertFalse([c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "comment"]])
+
+            # The unacknowledged failure halts the target: #12 must not replace the
+            # newer #13 that failed, and nothing is superseded.
+            with mock.patch.object(apply, "log") as log:
+                ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 1)
+            apply_one.assert_not_called()
+            self.assertIn("target `app`: stopped (unreconciled failed tickets: [13])",
+                          " ".join(str(c.args[0]) for c in log.call_args_list))
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()}, {13: "failed"})
+
+            # Once the operator acknowledges it, #13 is terminal: the newest pending
+            # revision, #12, deploys and only its success supersedes #11.
+            run_id = state.runs_by_ticket[13][-1].run_id
+            deploy.acknowledge_failure("app", run_id, events_path=dispatch.EVENTS)
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [12])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertEqual({t: runs[-1].status.value for t, runs in state.runs_by_ticket.items()},
+                             {11: "superseded", 12: "succeeded", 13: "failed"})
+
+    def test_sequential_targets_are_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            _, cfg, prs = self.setup_repo(d)
+            cfg.targets["app"].supersession = ""
+            ret, apply_one, _ = self.run_pass(cfg, prs)
+            self.assertEqual(ret, 0)
+            self.assertEqual([c.args[0]["ticket"] for c in apply_one.call_args_list], [11, 12, 13])
+            state = deploy.get_target_state("app", events_path=dispatch.EVENTS)
+            self.assertNotIn("superseded", {r.status.value for r in state.runs})
+
+
 class UnknownAdapterTest(unittest.TestCase):
     """An unregistered adapter name must never fall back to Terraform."""
 

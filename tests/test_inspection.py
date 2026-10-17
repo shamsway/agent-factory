@@ -45,6 +45,138 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "unavailable")
         self.assertNotIn(SECRET, json.dumps(rows))
 
+    def test_successful_live_check_reports_scope_detail_without_values(self):
+        with patch.dict(verify_secrets.LIVE_CHECKS, {"GH_TOKEN": lambda token: f"OK, scopes: repo, {token}"}, clear=True):
+            rows = verify_secrets.credential_rows(self.cfg, "apply", True)
+        gh = next(r for r in rows if r["key"] == "GH_TOKEN")
+        self.assertEqual(gh["status"], "valid")
+        self.assertTrue(gh["detail"].startswith("scopes: repo, "))
+        self.assertNotIn(SECRET, json.dumps(rows))
+
+    def test_adapter_credential_checks_join_the_apply_scope(self):
+        from factory import deploy
+
+        calls = []
+
+        class Checked(deploy.FakeDeployAdapter):
+            def credential_checks(self, env, live):
+                calls.append((sorted(env), live))
+                return [{"key": "REGISTRY_PASSWORD", "status": "valid", "detail": f"robot account, push only {SECRET}"},
+                        {"key": "REGISTRY_USERNAME", "status": "missing"}]
+
+        class Broken(deploy.FakeDeployAdapter):
+            def credential_checks(self, env, live):
+                raise RuntimeError(SECRET)
+
+        self.cfg.targets = {
+            "app": config.DeployTarget(name="app", dir="app", adapter="checked"),
+            "other": config.DeployTarget(name="other", dir="o", adapter="broken"),
+            "off": config.DeployTarget(name="off", dir="x", adapter="broken", enabled=False),
+        }
+        with patch.dict(deploy.ADAPTERS, {"checked": Checked, "broken": Broken}), \
+             patch.dict(verify_secrets.LIVE_CHECKS, {}, clear=True):
+            rows = verify_secrets.credential_rows(self.cfg, "apply", True)
+            output = io.StringIO()
+            with patch.object(config, "load", return_value=self.cfg), redirect_stdout(output):
+                code = verify_secrets.main(["--scope", "apply"])
+        adapter = [r for r in rows if r.get("adapter")]
+        self.assertEqual([(r["adapter"], r["key"], r["status"]) for r in adapter],
+                         [("broken", "*", "unavailable"), ("checked", "REGISTRY_PASSWORD", "valid"),
+                          ("checked", "REGISTRY_USERNAME", "missing")])
+        self.assertIn("robot account, push only", adapter[1]["detail"])
+        self.assertEqual(calls[0], (["GH_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN"], True))
+        self.assertNotIn(SECRET, json.dumps(rows) + output.getvalue())
+        self.assertIn("apply (checked): REGISTRY_PASSWORD: valid -- robot account, push only", output.getvalue())
+        self.assertEqual(code, 1)  # missing and unavailable fail the report
+
+    def test_malformed_adapter_reports_become_one_unavailable_row(self):
+        import threading
+
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class Exploding(dict):
+            def get(self, *args):
+                raise RuntimeError(SECRET)
+
+        reports = {
+            "status": [{"key": "A", "status": "valid"}, {"key": "B", "status": "ok " + SECRET}],
+            "key": [{"key": SECRET, "status": "valid"}],
+            "control": [{"key": "A\nB", "status": "valid"}],
+            "shape": "not a list",
+            "item": ["not a dict"],
+            "iterate": [{"key": "FIRST", "status": "valid"}, Exploding()],  # earlier rows are discarded too
+            "generator": iter([{"key": "A", "status": "valid"}]),
+        }
+
+        def adapter(report):
+            class Reporting(deploy.FakeDeployAdapter):
+                def credential_checks(self, env, live):
+                    return report
+            return Reporting
+
+        class Hung(deploy.FakeDeployAdapter):
+            def credential_checks(self, env, live):
+                release.wait(5)
+                return [{"key": "LATE", "status": "valid"}]
+
+        class Noisy(deploy.FakeDeployAdapter):
+            def credential_checks(self, env, live):
+                return [{"key": "TOKEN", "status": "valid", "detail": "line one\n\x1b[31mline two\x00 " + "x" * 400}]
+
+        adapters = {name: adapter(report) for name, report in reports.items()}
+        adapters.update(hung=Hung, noisy=Noisy)
+        self.cfg.targets = {name: config.DeployTarget(name=name, dir=name, adapter=name) for name in adapters}
+        with patch.dict(deploy.ADAPTERS, adapters):
+            rows = verify_secrets.adapter_rows(self.cfg, True, timeout=0.2)
+        by_adapter = {}
+        for row in rows:
+            by_adapter.setdefault(row["adapter"], []).append(row)
+        for name in [*reports, "hung"]:
+            self.assertEqual([(r["key"], r["status"]) for r in by_adapter[name]], [("*", "unavailable")], name)
+        self.assertEqual(by_adapter["hung"][0]["detail"], "timed out after 0.2s")
+        self.assertEqual(by_adapter["status"][0]["detail"], "check failed")
+        noisy = by_adapter["noisy"][0]
+        self.assertEqual(noisy["status"], "valid")
+        self.assertTrue(noisy["detail"].startswith("line one [31mline two "), noisy["detail"])
+        self.assertEqual(len(noisy["detail"]), verify_secrets.DETAIL_LIMIT)
+        self.assertNotIn(SECRET, json.dumps(rows))
+
+    def test_adapter_base_exceptions_and_missing_results_are_unavailable(self):
+        def raising(exc):
+            class Raising(deploy.FakeDeployAdapter):
+                def credential_checks(self, env, live):
+                    raise exc
+            return Raising
+
+        adapters = {"exit": raising(SystemExit(SECRET)), "interrupt": raising(KeyboardInterrupt(SECRET))}
+        self.cfg.targets = {name: config.DeployTarget(name=name, dir=name, adapter=name) for name in adapters}
+        with patch.dict(deploy.ADAPTERS, adapters):
+            rows = verify_secrets.adapter_rows(self.cfg, True, timeout=5)
+        self.assertEqual([(r["adapter"], r["status"], r["detail"]) for r in rows],
+                         [("exit", "unavailable", "check failed"), ("interrupt", "unavailable", "check failed")])
+        self.assertNotIn(SECRET, json.dumps(rows))
+
+        class Silent:
+            """A worker that ends without running the check, so nothing is recorded."""
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        self.cfg.targets = {"quiet": config.DeployTarget(name="quiet", dir="q", adapter="fake")}
+        with patch.object(verify_secrets.threading, "Thread", Silent):
+            rows = verify_secrets.adapter_rows(self.cfg, True)
+        self.assertEqual(rows, [{"scope": "apply", "adapter": "fake", "key": "*", "status": "unavailable",
+                                 "detail": "check failed"}])
+
     def test_op_rejection_does_not_print_provider_stderr(self):
         with patch.object(verify_secrets.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", SECRET)):
             self.assertNotIn(SECRET, verify_secrets.check_op_token(SECRET))

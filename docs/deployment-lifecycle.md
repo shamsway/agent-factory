@@ -64,7 +64,25 @@ adapter = "terraform"
 
 * `backend_key`: Serializes deployment across multiple targets that share a common state backend (e.g. shared S3 state lock or Consul cluster), preventing overlapping apply passes.
 * `adapter`: Pluggable deployment adapter (`"terraform"`, `"fake"`, etc.). An enabled target naming an adapter that is not registered stops the whole `factory apply` pass before any lock, fetch or deployment; it never falls back to Terraform.
-* `supersession`: `"sequential"` enforces that tickets apply strictly in git topological commit order. A failure halts the target until resolved; subsequent commits are never applied out of order.
+* `supersession`: how a target treats several pending approved revisions. Set it in `[apply]`
+  for every target, or per target to override (an unknown value is a config error).
+  * `"sequential"` (default): tickets apply strictly in git topological commit order. A failure
+    halts the target until resolved; subsequent commits are never applied out of order.
+  * `"none"`: commit order, but an unacknowledged failure does not halt later candidates.
+  * `"latest"`: only the newest authorized candidate deploys. Once it succeeds, each older
+    pending authorized candidate is recorded as a terminal `SUPERSEDED` run naming the newer
+    ticket, and its ticket gets a comment. It is never selected again, so N merges deploy once.
+    The walk stops at the first unauthorized candidate: every later revision contains its
+    unapproved change, so the newest authorized candidate before it deploys, the unauthorized
+    one escalates, and the later ones are held. Like `"sequential"`, any unacknowledged failed
+    run (a failed newest run or a rejected revision) halts the target: if the newest run fails,
+    the older candidates stay pending and nothing deploys, so an older revision never replaces
+    a newer one that failed. After the operator acknowledges the failure with `factory apply
+    --acknowledge-failure`, the failed revision is terminal and the next pass deploys the newest
+    still-pending candidate, superseding those before it once it succeeds; a repair merged after
+    the failure is newer still and wins. Use this only where each revision is a complete desired
+    state that includes everything before it (an app manifest that a platform PR replaces
+    wholesale), never for Terraform roots that must apply every change in order.
 
 ---
 
@@ -122,6 +140,14 @@ All platform mutations implement the `DeployAdapter` lifecycle:
 5. `reconcile(target, interrupted_run)`: Recovery hook for interrupted runs.
 6. `cleanup(ctx)`: Guaranteed cleanup of worktrees in `finally`.
 7. `observe(target, run, env)`: Optional post-run observations (see below). The base adapter observes nothing.
+8. `credential_checks(env, live)`: Optional report on the credentials the adapter needs from `[apply].env`.
+   - It returns rows of `key`, `status` and an optional `detail`. The detail describes scope, such as the account kind or the permissions granted.
+   - `factory verify-secrets --scope apply` and `factory inspect` list these rows beside the generic ones, tagged with the adapter name. `--live` allows network checks.
+   - A `missing`, `invalid` or `unavailable` row fails the report.
+   - `key` must be a variable name and `status` one of `configured`, `missing`, `valid`, `invalid`, `unavailable` or `not_checked`.
+   - `key` names the variable and `detail` describes scope only. Neither may contain a credential value or a credential prefix (a token's leading characters, part of a robot secret). Factory sanitizes both against every configured secret, but it only recognizes whole values, so a fragment would get through.
+   - Details are also folded to one printable line and capped at 200 characters.
+   - Each adapter's check runs with a 30-second limit. A check that raises (including `SystemExit` or `KeyboardInterrupt`), times out, ends without a result or returns anything malformed (an unknown status, a key that is not a variable name, a row that is not a mapping) becomes one `unavailable` row for that adapter. Its message is dropped, and so are any rows it had already returned.
 
 ### Post-run observations
 
