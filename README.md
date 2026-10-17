@@ -867,7 +867,10 @@ branches, or merge state.
   verification record; linked tickets without one are listed as
   `uncovered_tickets` and keep it `unverified`. One failed or pending run makes it
   `failed` or `pending`, and a success without health evidence makes it
-  `unverified`. Superseded, acknowledged, skipped, stale-revision and unbound runs
+  `unverified`. A success whose latest post-run observation of any kind asks for
+  attention (for example, the platform PR closed without merge) reads
+  `needs_attention` and also keeps it `unverified` until a later observation
+  clears it or a later run replaces it. Superseded, acknowledged, skipped, stale-revision and unbound runs
   stay in the evidence list but never count. Each evidence row links its
   `summary.json` artifact in the workspace's `/api/artifacts` form. Collection
   replays the deploy journal once; if that replay fails, verification reads

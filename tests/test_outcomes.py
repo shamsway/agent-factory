@@ -231,10 +231,17 @@ class VerifiedDeliveryTest(unittest.TestCase):
         )
         return {"event": "deploy_run", "at": "2026-10-16T00:05:00Z", **run.to_dict()}
 
+    @staticmethod
+    def observation(ticket, kind, *, attention, target="app", attempt=1):
+        return {"event": "deploy_observation", "at": "2026-10-16T01:00:00Z", "target": target,
+                "run_id": f"deploy-{target}-{ticket:08d}-{attempt}", "ticket": ticket,
+                "kind": kind, "state": "closed" if attention else "ok", "attention": attention}
+
     def verified(self, bindings, rows):
         from factory import deploy
 
-        return outcomes.verified_delivery(self.CURRENT, bindings, deploy.replay_rows(rows))
+        return outcomes.verified_delivery(self.CURRENT, bindings, deploy.replay_rows(rows),
+                                          deploy.observations_by_run(rows))
 
     def test_healthy_run_for_a_current_binding_is_verified_with_evidence_links(self) -> None:
         result = self.verified({7: self.CURRENT}, [self.run_row(7, "succeeded", verdict="healthy")])
@@ -259,12 +266,34 @@ class VerifiedDeliveryTest(unittest.TestCase):
                 [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(7, "failed", attempt=2)], "failed", "unknown"),
             "one of two tickets unverified": (
                 [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(8, "succeeded")], "unverified", "unknown"),
+            "one of two tickets acknowledged": (
+                [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(8, "acknowledged")], "unverified", "unknown"),
+            "failure acknowledged after a verified run": (
+                [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(8, "succeeded", verdict="healthy"),
+                 self.run_row(8, "acknowledged", attempt=2)], "unverified", "unknown"),
         }
         for name, (rows, deployment, health) in cases.items():
             with self.subTest(name):
                 result = self.verified({7: self.CURRENT, 8: self.CURRENT}, rows)
                 self.assertEqual(result["deployment"]["status"], deployment)
                 self.assertEqual(result["health"]["status"], health)
+
+    def test_an_attention_observation_downgrades_a_verified_run(self) -> None:
+        healthy = [self.run_row(7, "succeeded", verdict="healthy")]
+        flagged = self.verified({7: self.CURRENT}, [*healthy, self.observation(7, "platform_pr", attention=True)])
+        self.assertEqual(flagged["deployment"]["status"], "unverified")
+        self.assertEqual(flagged["health"]["status"], "unknown")
+        (item,) = flagged["deployment"]["evidence"]
+        self.assertEqual((item["state"], item["attention"]), ("needs_attention", True))
+
+        cleared = self.verified({7: self.CURRENT}, [*healthy, self.observation(7, "platform_pr", attention=True),
+                                                    self.observation(7, "platform_pr", attention=False)])
+        self.assertEqual(cleared["deployment"]["status"], "verified")
+        quiet = self.verified({7: self.CURRENT}, [*healthy, self.observation(7, "app_health", attention=False)])
+        self.assertEqual(quiet["deployment"]["status"], "verified")
+        replaced = self.verified({7: self.CURRENT}, [*healthy, self.observation(7, "platform_pr", attention=True),
+                                                     self.run_row(7, "succeeded", verdict="healthy", attempt=2)])
+        self.assertEqual(replaced["deployment"]["status"], "verified")
 
     def test_stale_or_unbound_revisions_do_not_count(self) -> None:
         rows = [self.run_row(7, "succeeded", verdict="healthy"), self.run_row(8, "succeeded", verdict="healthy")]

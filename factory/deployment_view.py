@@ -26,8 +26,7 @@ def _observations(rows: list[dict]) -> dict:
     """Post-run observations for one run; the latest per kind decides attention."""
     items = [{key: row.get(key) for key in ("at", "kind", "state", "detail", "url", "attention", "final")}
              for row in rows]
-    latest = {item["kind"]: item for item in items}
-    return {"observations": items, "needs_attention": any(item["attention"] for item in latest.values())}
+    return {"observations": items, "needs_attention": deploy.observation_attention(rows)}
 
 
 def project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -> dict:

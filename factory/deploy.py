@@ -1206,6 +1206,12 @@ def observations_by_run(rows: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def observation_attention(rows: list[dict]) -> bool:
+    """True when the latest recorded observation of any kind asks for a human."""
+    latest = {row.get("kind"): row for row in rows}
+    return any(row.get("attention") is True for row in latest.values())
+
+
 def runs_to_observe(state: TargetState, observed: dict[str, list[dict]], now: float | None = None) -> list[DeployRun]:
     """SUCCEEDED runs that completed inside the window and have no final observation."""
     now = time.time() if now is None else now
