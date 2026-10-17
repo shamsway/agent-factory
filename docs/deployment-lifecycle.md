@@ -125,7 +125,9 @@ All platform mutations implement the `DeployAdapter` lifecycle:
    - It returns rows of `key`, `status` and an optional `detail`. The detail describes scope, such as the account kind or the permissions granted.
    - `factory verify-secrets --scope apply` and `factory inspect` list these rows beside the generic ones, tagged with the adapter name. `--live` allows network checks.
    - A `missing`, `invalid` or `unavailable` row fails the report.
-   - Details are sanitized against every configured secret, and a check that raises becomes `unavailable` without its message.
+   - `key` must be a variable name and `status` one of `configured`, `missing`, `valid`, `invalid`, `unavailable` or `not_checked`.
+   - Details are sanitized against every configured secret, folded to one printable line and capped at 200 characters.
+   - Each adapter's check runs with a 30-second limit. A check that raises, times out or returns anything malformed (an unknown status, a key that is not a variable name, a row that is not a mapping) becomes one `unavailable` row for that adapter. Its message is dropped, and so are any rows it had already returned.
 
 Pluggability is demonstrated by `FakeDeployAdapter`, allowing test suites and new execution engines (e.g. Nomad, Kubernetes) to be plugged in via `deploy.register_adapter()`.
 

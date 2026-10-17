@@ -19,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 
 from . import config
 
@@ -138,23 +139,69 @@ def _detail(result: str, secrets: list[str]) -> str | None:
     return artifacts.sanitize(text, secrets)[:200] or None
 
 
-def adapter_rows(cfg: config.Config, live: bool) -> list[dict]:
-    """Credential rows from each deploy adapter an enabled target uses."""
+# Statuses an adapter may report (see DeployAdapter.credential_checks). Anything
+# else means the plugin is broken, and its whole report becomes `unavailable`.
+ADAPTER_STATUSES = frozenset({"configured", "missing", "valid", "invalid", "unavailable", "not_checked"})
+ADAPTER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}|\*")
+# A live check may call a registry or an API; one hung plugin must not hang the report.
+ADAPTER_CHECK_TIMEOUT_SEC = 30
+DETAIL_LIMIT = 200
+
+
+def _adapter_report(adapter, env: dict[str, str], live: bool, secrets: list[str]) -> list[dict]:
+    """Validated rows from one adapter. Raises on any malformed result."""
+    from factory import artifacts
+    found = adapter.credential_checks(env, live)
+    if found is None:
+        return []
+    if not isinstance(found, (list, tuple)):
+        raise TypeError("credential_checks must return a list")
+    rows = []
+    for item in found:
+        if not isinstance(item, dict):
+            raise TypeError("credential_checks rows must be dicts")
+        key, status = item.get("key", "*"), item.get("status")
+        if not isinstance(key, str) or not ADAPTER_KEY.fullmatch(key) or artifacts.sanitize(key, secrets) != key:
+            raise ValueError("credential_checks key is not a variable name")
+        if status not in ADAPTER_STATUSES:
+            raise ValueError("credential_checks status is not a documented status")
+        row = {"key": key, "status": status}
+        detail = item.get("detail")
+        if detail:
+            text = " ".join(artifacts.sanitize(str(detail), secrets).split())  # one line, no control characters
+            row["detail"] = "".join(ch for ch in text if ch.isprintable())[:DETAIL_LIMIT]
+        rows.append(row)
+    return rows
+
+
+def adapter_rows(cfg: config.Config, live: bool, timeout: float = ADAPTER_CHECK_TIMEOUT_SEC) -> list[dict]:
+    """Credential rows from each deploy adapter an enabled target uses.
+
+    A check that raises, returns something malformed or outlives `timeout`
+    becomes one `unavailable` row for the adapter; its message never escapes."""
     from factory import artifacts, deploy
     secrets = artifacts.secret_values(cfg.apply_env, cfg.install["env"])
     rows = []
     for name in sorted({t.adapter for t in cfg.targets.values() if t.enabled}):
-        try:
-            found = deploy.get_adapter(name).credential_checks(dict(cfg.apply_env), live)
-        except Exception:  # noqa: BLE001 - a broken plugin check is a status, not a crash or a leak
-            rows.append({"scope": "apply", "adapter": name, "key": "*", "status": "unavailable"})
+        outcome: dict = {}
+
+        def run(name: str = name, outcome: dict = outcome) -> None:
+            try:
+                outcome["rows"] = _adapter_report(deploy.get_adapter(name), dict(cfg.apply_env), live, secrets)
+            except Exception:  # noqa: BLE001 - a broken plugin check is a status, not a crash or a leak
+                outcome["error"] = "check failed"
+
+        worker = threading.Thread(target=run, name=f"credential-checks-{name}", daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            error = f"timed out after {timeout:g}s"
+        else:
+            error = outcome.get("error") if "rows" not in outcome else None
+        if error:
+            rows.append({"scope": "apply", "adapter": name, "key": "*", "status": "unavailable", "detail": error})
             continue
-        for item in found or []:
-            row = {"scope": "apply", "adapter": name, "key": str(item.get("key", "*")),
-                   "status": str(item.get("status", "unavailable"))}
-            if item.get("detail"):
-                row["detail"] = artifacts.sanitize(str(item["detail"]), secrets)[:200]
-            rows.append(row)
+        rows += [{"scope": "apply", "adapter": name, **row} for row in outcome["rows"]]
     return rows
 
 

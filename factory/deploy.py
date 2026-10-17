@@ -912,7 +912,10 @@ class DeployAdapter:
         `factory inspect`. `status` is one of configured, missing, valid, invalid,
         unavailable or not_checked, and `live` allows network checks. `detail` may
         describe scope (an account kind, granted permissions) but must never contain a
-        credential value or raw provider output. Factory also sanitizes it.
+        credential value or raw provider output. Factory also sanitizes it. A check
+        that raises, returns another status or a key that is not a variable name, or
+        runs past `verify_secrets.ADAPTER_CHECK_TIMEOUT_SEC` is reported as one
+        `unavailable` row for the adapter.
         """
         return []
 
