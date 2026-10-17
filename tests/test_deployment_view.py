@@ -127,3 +127,92 @@ class HistoryAvailabilityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JournalRowsTest(unittest.TestCase):
+    """Deployment history comes from the whole journal, not the dashboard's
+    bounded tail window, and refreshes parse only what was appended."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.factory = Path(self.tmp.name)
+        self.path = self.factory / 'events.jsonl'
+        deployment_view._journal_cache.clear()
+        self.addCleanup(deployment_view._journal_cache.clear)
+
+    def write(self, *rows):
+        with self.path.open('ab') as handle:
+            for item in rows:
+                handle.write(json.dumps(item).encode() + b'\n')
+
+    def test_deploys_older_than_the_bounded_window_are_projected(self):
+        old = {**row('deploy-default-aaaaaaaa-1', 'succeeded', duration_sec=3), 'at': '2026-10-01T00:00:00Z'}
+        self.write(old)
+        filler = {'event': 'lifecycle', 'stage': 'scheduling', 'pad': 'x' * 900}
+        with self.path.open('ab') as handle:  # well past the 1 MiB dashboard window
+            handle.write((json.dumps(filler) + '\n').encode() * 2000)
+        self.assertGreater(self.path.stat().st_size, 1024 * 1024)
+        data = deployment_view.safe_project_journal(self.factory)
+        self.assertEqual([r['run_id'] for r in data['runs']], ['deploy-default-aaaaaaaa-1'])
+        self.assertEqual(data['history']['total'], 1)
+        rows = deployment_view.journal_rows(self.path)
+        self.assertTrue(all(r.get('event') != 'lifecycle' for r in rows))  # filtered before parse
+
+    def test_refresh_reads_only_appended_complete_lines(self):
+        self.write(row('deploy-default-aaaaaaaa-1', 'succeeded'))
+        self.assertEqual(len(deployment_view.journal_rows(self.path)), 1)
+        offset = deployment_view._journal_cache[str(self.path)]['offset']
+        torn = json.dumps(row('deploy-default-bbbbbbbb-1', 'succeeded'))
+        with self.path.open('ab') as handle:
+            handle.write(torn[:20].encode())  # a writer mid-line
+        self.assertEqual(len(deployment_view.journal_rows(self.path)), 1)
+        with self.path.open('ab') as handle:
+            handle.write(torn[20:].encode() + b'\n')
+        rows = deployment_view.journal_rows(self.path)
+        self.assertEqual([r['run_id'] for r in rows], ['deploy-default-aaaaaaaa-1', 'deploy-default-bbbbbbbb-1'])
+        self.assertGreater(deployment_view._journal_cache[str(self.path)]['offset'], offset)
+
+    def test_rotation_rereads_segments_and_the_new_live_file(self):
+        import gzip
+        self.write(row('deploy-default-aaaaaaaa-1', 'succeeded'))
+        deployment_view.journal_rows(self.path)
+        # Rotate: the live file moves into segment 1 and a new live file starts.
+        with self.path.open('rb') as live, gzip.open(self.factory / 'events.jsonl.1.gz', 'wb') as segment:
+            segment.write(live.read())
+        self.path.unlink()
+        self.write(row('deploy-default-bbbbbbbb-1', 'failed'))
+        rows = deployment_view.journal_rows(self.path)
+        self.assertEqual([r['run_id'] for r in rows], ['deploy-default-aaaaaaaa-1', 'deploy-default-bbbbbbbb-1'])
+
+    def test_a_journal_read_failure_is_isolated(self):
+        self.write(row('deploy-default-aaaaaaaa-1', 'succeeded'))
+        with mock.patch.object(deployment_view, 'journal_rows', side_effect=OSError('denied')):
+            self.assertIsNone(deployment_view.safe_project_journal(self.factory))
+        self.path.unlink()
+        self.assertEqual(deployment_view.safe_project_journal(self.factory)['runs'], [])
+
+
+class SnapshotDeploymentsTest(unittest.TestCase):
+    def test_dashboard_snapshot_shows_deploys_beyond_the_bounded_window(self):
+        from factory import config, dashboard, dispatch
+        from tests.test_factory import make_repo
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[repo]\nslug = "example/project"\n')
+            state = repo / '.factory'
+            state.mkdir()
+            filler = json.dumps({'event': 'lifecycle', 'stage': 'scheduling', 'pad': 'x' * 900}) + '\n'
+            (state / 'events.jsonl').write_text(
+                json.dumps(row('deploy-default-aaaaaaaa-1', 'succeeded', duration_sec=3)) + '\n' + filler * 2000)
+            empty = {'repository': {'id': 'R_1', 'issues': {'nodes': []}, 'pullRequests': {'nodes': []}}}
+            deployment_view._journal_cache.clear()
+            self.addCleanup(deployment_view._journal_cache.clear)
+            with mock.patch.dict(dashboard.__dict__), mock.patch.dict(dispatch.__dict__):
+                dashboard.configure(config.load(repo))
+                with mock.patch.object(dashboard, 'github', return_value=empty), \
+                     mock.patch.object(dashboard, 'dispatcher', return_value={}), \
+                     mock.patch.object(dashboard, 'upstream_state', return_value={}), \
+                     mock.patch.object(dashboard, 'triage_llm_online', return_value=False):
+                    snapshot = dashboard.snapshot()
+            self.assertEqual([r['run_id'] for r in snapshot['deployments']['runs']], ['deploy-default-aaaaaaaa-1'])
