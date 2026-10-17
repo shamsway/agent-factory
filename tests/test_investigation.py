@@ -32,6 +32,46 @@ class InvestigationLaneTest(unittest.TestCase):
                  "--label", config.LABEL_INVESTIGATE, "--json", "number,title,body,labels,assignees"]
             )
 
+    def test_escalation_drops_the_investigation_lane_label(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            labels = {"labels": [{"name": config.LABEL_INVESTIGATE}]}
+            with mock.patch.object(dispatch, "run") as run_mock, \
+                 mock.patch.object(dispatch, "gh_json", return_value=labels):
+                dispatch.escalate(7, "investigation produced no findings report", None)
+            edit = next(c.args[0] for c in run_mock.call_args_list if c.args[0][:3] == ["gh", "issue", "edit"])
+            removed = {edit[i + 1] for i, arg in enumerate(edit) if arg == "--remove-label"}
+            self.assertEqual({config.LABEL_AGENT, config.LABEL_INVESTIGATE}, removed)
+            self.assertEqual(config.LABEL_HUMAN, edit[edit.index("--add-label") + 1])
+            from factory import lifecycle
+
+            escalation = next(e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "escalate")
+            self.assertEqual(config.LABEL_INVESTIGATE, escalation["lane"])
+
+    def test_escalated_investigation_is_not_offered_by_the_next_pass(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            # A ticket escalated before the label fix still carries both labels, unassigned.
+            stale = {
+                "number": 7, "title": "why is prod slow", "body": "",
+                "labels": [{"name": config.LABEL_INVESTIGATE}, {"name": config.LABEL_HUMAN}],
+                "assignees": [],
+            }
+            with mock.patch.object(dispatch, "gh_json", return_value=[stale]), \
+                 mock.patch.object(dispatch, "open_blockers", return_value=[]), \
+                 mock.patch.object(dispatch, "log"):
+                self.assertEqual([], dispatch.frontier(config.LABEL_INVESTIGATE))
+
     def test_dry_run_reports_investigation_short_path_without_admission(self) -> None:
         from unittest import mock
 
@@ -82,7 +122,7 @@ class InvestigationLaneTest(unittest.TestCase):
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "ensure_worktree", return_value=wt), \
                  mock.patch.object(dispatch, "build_prompt", return_value="prompt") as build_prompt_mock, \
-                 mock.patch.object(dispatch, "run_worker", return_value=0) as run_worker_mock, \
+                 mock.patch.object(dispatch, "run_worker", autospec=True, return_value=(0, None)) as run_worker_mock, \
                  mock.patch.object(dispatch, "finish_investigation") as finish_mock, \
                  mock.patch.object(dispatch, "admit_plan") as admit_plan_mock, \
                  mock.patch.object(dispatch, "push_and_pr") as push_and_pr_mock, \
@@ -99,6 +139,9 @@ class InvestigationLaneTest(unittest.TestCase):
 
             build_prompt_mock.assert_called_once_with(7, wt, investigation=True)
             run_worker_mock.assert_called_once()
+            # autospec enforces the real signature; the handoff path is the
+            # file finish_investigation reads, so the exit-grace watch sees it.
+            self.assertEqual(run_worker_mock.call_args.args[3], wt / ".factory" / "handoff-7.md")
             finish_mock.assert_called_once()
             self.assertEqual(finish_mock.call_args[0][0], 7)
             self.assertEqual(finish_mock.call_args[0][1], wt)

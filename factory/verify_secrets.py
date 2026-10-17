@@ -19,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 
 from . import config
 
@@ -125,8 +126,91 @@ LIVE_CHECKS = {
 }
 
 
+BAD_STATUSES = ("empty", "invalid", "unavailable", "missing")
+
+
+def _detail(result: str, secrets: list[str]) -> str | None:
+    """Non-secret scope detail from a successful live check ("OK, scopes: repo" ->
+    "scopes: repo"). A failure's text is provider output and never escapes."""
+    if not result.startswith("OK"):
+        return None
+    from factory import artifacts
+    text = result[2:].lstrip(" ,").strip()
+    return artifacts.sanitize(text, secrets)[:200] or None
+
+
+# Statuses an adapter may report (see DeployAdapter.credential_checks). Anything
+# else means the plugin is broken, and its whole report becomes `unavailable`.
+ADAPTER_STATUSES = frozenset({"configured", "missing", "valid", "invalid", "unavailable", "not_checked"})
+ADAPTER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}|\*")
+# A live check may call a registry or an API; one hung plugin must not hang the report.
+ADAPTER_CHECK_TIMEOUT_SEC = 30
+DETAIL_LIMIT = 200
+
+
+def _adapter_report(adapter, env: dict[str, str], live: bool, secrets: list[str]) -> list[dict]:
+    """Validated rows from one adapter. Raises on any malformed result."""
+    from factory import artifacts
+    found = adapter.credential_checks(env, live)
+    if found is None:
+        return []
+    if not isinstance(found, (list, tuple)):
+        raise TypeError("credential_checks must return a list")
+    rows = []
+    for item in found:
+        if not isinstance(item, dict):
+            raise TypeError("credential_checks rows must be dicts")
+        key, status = item.get("key", "*"), item.get("status")
+        if not isinstance(key, str) or not ADAPTER_KEY.fullmatch(key) or artifacts.sanitize(key, secrets) != key:
+            raise ValueError("credential_checks key is not a variable name")
+        if status not in ADAPTER_STATUSES:
+            raise ValueError("credential_checks status is not a documented status")
+        row = {"key": key, "status": status}
+        detail = item.get("detail")
+        if detail:
+            text = " ".join(artifacts.sanitize(str(detail), secrets).split())  # one line, no control characters
+            row["detail"] = "".join(ch for ch in text if ch.isprintable())[:DETAIL_LIMIT]
+        rows.append(row)
+    return rows
+
+
+def adapter_rows(cfg: config.Config, live: bool, timeout: float = ADAPTER_CHECK_TIMEOUT_SEC) -> list[dict]:
+    """Credential rows from each deploy adapter an enabled target uses.
+
+    A check that raises (any BaseException), returns something malformed,
+    records nothing or outlives `timeout` becomes one `unavailable` row for the
+    adapter; its message never escapes."""
+    from factory import artifacts, deploy
+    secrets = artifacts.secret_values(cfg.apply_env, cfg.install["env"])
+    rows = []
+    for name in sorted({t.adapter for t in cfg.targets.values() if t.enabled}):
+        outcome: dict = {}
+
+        def run(name: str = name, outcome: dict = outcome) -> None:
+            try:
+                outcome["rows"] = _adapter_report(deploy.get_adapter(name), dict(cfg.apply_env), live, secrets)
+            except BaseException:  # noqa: BLE001 - SystemExit or KeyboardInterrupt from a plugin thread is a status too
+                outcome["error"] = "check failed"
+
+        worker = threading.Thread(target=run, name=f"credential-checks-{name}", daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if worker.is_alive():
+            error = f"timed out after {timeout:g}s"
+        elif "rows" in outcome:
+            error = None
+        else:  # the worker ended without recording rows or an error
+            error = outcome.get("error", "check failed")
+        if error:
+            rows.append({"scope": "apply", "adapter": name, "key": "*", "status": "unavailable", "detail": error})
+            continue
+        rows += [{"scope": "apply", "adapter": name, **row} for row in outcome["rows"]]
+    return rows
+
+
 def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
-    """Only names/statuses escape this boundary; values and provider diagnostics never do."""
+    """Only names, statuses and sanitized scope details escape this boundary; values
+    and provider diagnostics never do."""
     scopes = {"install": cfg.install["env"], "apply": cfg.apply_env}
     rows = []
     for name, env in scopes.items():
@@ -147,15 +231,19 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
                 status = "empty" if key in LIVE_CHECKS else "empty_allowed"
             else:
                 status = "configured"
+            detail = None
             if live and key in LIVE_CHECKS and value:
                 try:
                     result = LIVE_CHECKS[key](str(value))
                     status = "valid" if result.startswith("OK") else "invalid"
+                    detail = _detail(result, [str(value)])
                 except (OSError, subprocess.SubprocessError, ValueError):
                     status = "unavailable"
             elif live and key not in LIVE_CHECKS and value:
                 status = "not_checked"
-            rows.append({"scope": name, "key": key, "status": status})
+            rows.append({"scope": name, "key": key, "status": status, **({"detail": detail} if detail else {})})
+        if name == "apply":
+            rows += adapter_rows(cfg, live)
     if scope in ("all", "investigation"):
         from .investigation_model import KEY_NAME, credential_status, policy
         p = policy(cfg.investigation)
@@ -208,7 +296,7 @@ def main(argv: list[str]) -> int:
         for unit, _, status in rows
     )
     credentials = credential_rows(cfg, args.scope, args.live)
-    bad |= any(row["status"] in ("empty", "invalid", "unavailable") for row in credentials)
+    bad |= any(row["status"] in BAD_STATUSES for row in credentials)
     # Compare configured roles only: the caller shell is not the dispatcher.
     # Actual unit/process boundaries are checked by `factory inspect`.
     # Shared variable names are legitimate when credentials differ.
@@ -227,7 +315,8 @@ def main(argv: list[str]) -> int:
         for row in report["units"]:
             print(f"  {row['unit']}: {row['key']}: {row['status']}")
         for row in credentials:
-            print(f"  {row['scope']}: {row['key']}: {row['status']}")
+            where = f"{row['scope']} ({row['adapter']})" if row.get("adapter") else row["scope"]
+            print(f"  {where}: {row['key']}: {row['status']}" + (f" -- {row['detail']}" if row.get("detail") else ""))
         for row in isolation:
             print(f"  apply isolation: {row['key']}: {row['status']}")
         if sync_error:

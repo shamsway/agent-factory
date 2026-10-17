@@ -263,7 +263,7 @@ merge stage.
 | `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or a `wontfix` proposal comment. `--dry-run`, `--issue N`, `--replay a,b,c`. |
 | `factory dispatch` | One stateless pass: upstream sync → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. Ordinary `ready-for-investigation` tickets take a shorter path instead (deployment roots are fenced to humans): one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan. |
 | `factory inspect` | Read-only runtime/unit/process identity, credential-boundary comparisons, deployment state and existing lock probes as JSON. `--live` validates scoped tokens; `--candidates` queries bounded candidate metadata without Git fetch; `--worker-cwd` checks a worker's gate interpreter context. See [operational verification](docs/metadata-verification.md) for coverage and limitations. |
-| `factory verify-secrets` | Compare loaded unit credentials, fail on required missing units or failed supported live checks. `--scope install` (default), `apply`, `investigation`, `publisher`, or `all`; `--live`; `--json`; `--reuse-install-model-key NAME` for explicit investigation reuse. Only names/statuses are reported. |
+| `factory verify-secrets` | Compare loaded unit credentials, fail on required missing units or failed supported live checks. `--scope install` (default), `apply`, `investigation`, `publisher`, or `all`; `--live`; `--json`; `--reuse-install-model-key NAME` for explicit investigation reuse. Reports names, statuses and sanitized scope details (for example a live-checked token's scopes). The `apply` scope includes rows from the deploy adapters' `credential_checks`. |
 | `factory incidents` | Durable failed-run index, explicit delivery/retry and repair-run attachment. |
 | `factory diagnostics` | Bounded read-only collection for explicitly enabled deployment targets. |
 | `factory investigation-export` | Export validated evidence/model bindings for operator transfer. |
@@ -859,6 +859,19 @@ branches, or merge state.
   declared owner's GitHub identity. They are not machine deployment/health proof
   or permission to publish/install. Missing, partial, edited or superseded evidence
   cannot establish current acceptance.
+  Machine verification comes from recorded deployments instead
+  (`outcomes.verified_delivery`). For each ticket linked to the initiative, the
+  latest `deploy_run` per target counts only if the ticket's accepted plan binding
+  matches the current canonical revision. Deployment is `verified` only when every
+  linked ticket has a counted run and each one succeeded with a healthy, non-empty
+  verification record; linked tickets without one are listed as
+  `uncovered_tickets` and keep it `unverified`. One failed or pending run makes it
+  `failed` or `pending`, and a success without health evidence makes it
+  `unverified`. Superseded, acknowledged, skipped, stale-revision and unbound runs
+  stay in the evidence list but never count. Each evidence row links its
+  `summary.json` artifact in the workspace's `/api/artifacts` form. Collection
+  replays the deploy journal once; if that replay fails, verification reads
+  `unknown` with an error note and the rest of the roadmap is still collected.
 
   Theme choices persist in this browser: Cyberpunk, GPUFlo, District, Factory,
   ROCm, Porcelain, Sandstone, Slate and Forest. Motion respects reduced-motion

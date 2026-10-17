@@ -317,6 +317,11 @@ def frontier(label: str = LABEL_AGENT) -> list[dict]:
         if issue["assignees"]:
             log(f"#{n}: skipped (assigned)")
             continue
+        if any(label.get("name") == LABEL_HUMAN for label in issue.get("labels", [])):
+            # A lane label added while ready-for-human remains does not release the ticket;
+            # the human (or a manager decision) must also remove ready-for-human.
+            log(f"#{n}: skipped (still {LABEL_HUMAN}; remove it to release the ticket to {label})")
+            continue
         blockers = open_blockers(n, issue.get("body", ""))
         if blockers:
             log(f"#{n}: skipped (blocked by {', '.join(f'#{b}' for b in blockers)})")
@@ -892,9 +897,16 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "") -> Non
     log(f"#{n}: escalating to human ({reason})")
     wt = FACTORY / f"wt-{n}"
     packet, round_number = escalation_packet(n, reason, log_path, wt, extra=extra)
+    # Both lane labels are dropped below; record the lane so a manager RETRY can restore it.
+    try:
+        labels = {label.get("name") for label in gh_json(
+            ["issue", "view", str(n), "--repo", REPO, "--json", "labels"]).get("labels", [])}
+    except Exception:  # noqa: BLE001 - an unreadable issue escalates from the agent lane
+        labels = set()
     record(
         "escalate", ticket=n, reason=reason, log=str(log_path) if log_path else None,
         packet=str(packet), round=round_number,
+        lane=LABEL_INVESTIGATE if LABEL_INVESTIGATE in labels else LABEL_AGENT,
     )
     run(
         [
@@ -908,6 +920,8 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "") -> Non
             "@me",
             "--remove-label",
             LABEL_AGENT,
+            "--remove-label",
+            LABEL_INVESTIGATE,
             "--add-label",
             LABEL_HUMAN,
         ],
@@ -2363,10 +2377,15 @@ def process_ticket(
                 promptfile.write_text(build_prompt(n, wt, investigation=True))
                 logfile = LOGS / f"{n}-attempt-1.log"
                 started = time.monotonic()
-                code = run_worker(cfg.worker(labels, promptfile, wt), wt, logfile)
+                code, fired = run_worker(
+                    cfg.worker(labels, promptfile, wt),
+                    wt, logfile, wt / ".factory" / f"handoff-{n}.md", deadline,
+                )
+                timeout = {"timeout": fired, "reason": TIMEOUT_REASONS[fired]} if fired else {}
                 record(
                     "attempt", ticket=n, attempt=1, worker_exit=code, gate=None,
                     seconds=int(time.monotonic() - started), cost=log_cost(logfile), log=str(logfile),
+                    **timeout,
                 )
                 finish_investigation(n, wt, logfile)
                 if wt.is_dir():

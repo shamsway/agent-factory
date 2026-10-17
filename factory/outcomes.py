@@ -5,9 +5,9 @@ import json
 import re
 import unicodedata
 from datetime import datetime
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
-from factory import binding, config, plan
+from factory import binding, config, deploy, plan
 
 KINDS = ("released", "installed", "healthy", "accepted")
 MARKER = "<!-- factory-outcome:v1 -->"
@@ -416,10 +416,7 @@ def project(cfg: config.Config, raw_issue: object, comments: object, *, complete
         "canonical_revision": canonical["sha256"],
         "owner": owner,
         "attributed": attributed,
-        "verified": {
-            "deployment": {"status": "unknown", "evidence": []},
-            "health": {"status": "unknown", "evidence": []},
-        },
+        "verified": unknown_delivery(),
         "evidence": evidence,
         "sources": [],
         "coverage": {
@@ -429,4 +426,81 @@ def project(cfg: config.Config, raw_issue: object, comments: object, *, complete
             "marker_comments": marker_comments,
             "reason": coverage_reason,
         },
+    }
+
+
+def _run_state(run: deploy.DeployRun) -> str:
+    verification = run.verification if isinstance(run.verification, dict) else {}
+    observed = verification.get("verdict") == "healthy" and bool(verification.get("items"))
+    if run.status == deploy.DeployStatus.SUCCEEDED:
+        return "verified" if observed else "unverified"
+    if run.status == deploy.DeployStatus.FAILED:
+        return "failed"
+    if run.status in (deploy.DeployStatus.PENDING, deploy.DeployStatus.RUNNING):
+        return "pending"
+    return run.status.value  # skipped, superseded, acknowledged: no deployment of this revision
+
+
+def artifact_link(target: str, run_id: str, name: str) -> dict:
+    """A deployment artifact reference in the workspace's form; the workspace adds
+    the repository scope and access key when it fetches it."""
+    return {"name": name, "url": "/api/artifacts?" + urlencode({"target": target, "run": run_id, "name": name})}
+
+
+def unknown_delivery(error: str | None = None) -> dict:
+    deployment: dict = {"status": "unknown", "evidence": []}
+    if error:
+        deployment["error"] = error
+    return {"deployment": deployment, "health": {"status": "unknown", "evidence": []}}
+
+
+def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None],
+                      states: dict[str, deploy.TargetState]) -> dict:
+    """Machine deployment and health verification for one initiative.
+
+    ``bindings`` maps each linked ticket to the canonical plan revision it was admitted
+    against (None when no accepted binding is retained). ``states`` is the journal
+    replayed once by the caller (``deploy.replay_rows``). Only the latest recorded run
+    per (ticket, target) is considered, and it counts only when the ticket is bound to
+    the current canonical revision. A deployment is verified when every linked ticket
+    has a counted run and each one succeeded with healthy recorded evidence. Failed,
+    pending, superseded, skipped or unobserved runs never read as verified, and a linked
+    ticket with no counted run keeps the initiative unverified.
+    """
+    evidence = []
+    for target, state in sorted(states.items()):
+        for ticket, runs in sorted(state.runs_by_ticket.items()):
+            if ticket not in bindings or not runs:
+                continue
+            run = runs[-1]
+            bound = bindings[ticket]
+            verification = run.verification if isinstance(run.verification, dict) else {}
+            evidence.append({
+                "ticket": ticket, "target": target, "run_id": run.run_id, "commit": run.commit,
+                "outcome": run.status.value, "verdict": verification.get("verdict"),
+                "completed_at": run.completed_at, "state": _run_state(run),
+                "binding": "unbound" if bound is None else "current" if bound == canonical_sha256 else "stale_revision",
+                "artifacts": [artifact_link(target, run.run_id, "summary.json")],
+            })
+    counted = [item for item in evidence
+               if item["binding"] == "current" and item["state"] in ("verified", "unverified", "failed", "pending")]
+    uncovered = sorted(set(bindings) - {item["ticket"] for item in counted})
+    states_seen = {item["state"] for item in counted}
+    if not counted:
+        deployment = "unknown"
+    elif "failed" in states_seen:
+        deployment = "failed"
+    elif "pending" in states_seen:
+        deployment = "pending"
+    elif states_seen == {"verified"} and not uncovered:
+        deployment = "verified"
+    else:
+        deployment = "unverified"
+    verdicts = {item["verdict"] for item in counted}
+    health = ("unhealthy" if "unhealthy" in verdicts
+              else "verified" if deployment == "verified"
+              else "unknown")
+    return {
+        "deployment": {"status": deployment, "evidence": evidence, "uncovered_tickets": uncovered},
+        "health": {"status": health, "evidence": [item for item in counted if item["verdict"]]},
     }

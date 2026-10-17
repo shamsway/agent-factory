@@ -393,6 +393,86 @@ class RoadmapTest(unittest.TestCase):
         self.assertEqual(recovered["sections"]["Plan"], "Revised live plan")
         self.assertEqual(recovered["drift"][0]["status"], "changed")
 
+    def test_verified_deploy_run_of_a_bound_slice_sets_verified_deployment(self):
+        from factory import deploy
+
+        parent = issue(50, initiative_body("Plan"), labels=("initiative",), title="Parent")
+        baseline = binding.from_issue(self.cfg, 50, parent)
+        ticket_body = binding.render(baseline)
+        self.accepted(baseline, ticket_body)
+        child = issue(7, ticket_body, labels=(), title="Slice", state="closed")
+        deploy.record_deploy_run(deploy.DeployRun(
+            run_id="deploy-app-00000007-1", target="app", commit="c" * 40, ticket=7, attempt=1,
+            status=deploy.DeployStatus.SUCCEEDED, started_at=AT, completed_at=AT,
+            verification={"version": 1, "verdict": "healthy", "items": [{"kind": "check", "state": "healthy"}]},
+        ), events_path=self.cfg.factory / "events.jsonl")
+        responses = {
+            f"repos/{REPO}/issues/50": parent,
+            f"repos/{REPO}/issues/7": child,
+            f"repos/{REPO}/issues/7/dependencies/blocked_by": [],
+        }
+        verified = self.collect(responses, 50)["plans"][0]["delivery"]["verified"]
+        self.assertEqual(verified["deployment"]["status"], "verified")
+        self.assertEqual(verified["health"]["status"], "verified")
+        self.assertEqual(verified["deployment"]["evidence"][0]["run_id"], "deploy-app-00000007-1")
+
+        # A revised plan makes the same deployment evidence for a stale revision.
+        responses[f"repos/{REPO}/issues/50"] = issue(50, initiative_body("Revised plan"), labels=("initiative",),
+                                                     title="Parent")
+        stale = self.collect(responses, 50)["plans"][0]["delivery"]["verified"]
+        self.assertEqual(stale["deployment"]["status"], "unknown")
+        self.assertEqual(stale["deployment"]["evidence"][0]["binding"], "stale_revision")
+
+    def _bound_deploy_fixture(self):
+        from factory import deploy
+
+        parent = issue(50, initiative_body("Plan"), labels=("initiative",), title="Parent")
+        baseline = binding.from_issue(self.cfg, 50, parent)
+        ticket_body = binding.render(baseline)
+        self.accepted(baseline, ticket_body)
+        deploy.record_deploy_run(deploy.DeployRun(
+            run_id="deploy-app-00000007-1", target="app", commit="c" * 40, ticket=7, attempt=1,
+            status=deploy.DeployStatus.SUCCEEDED, started_at=AT, completed_at=AT,
+            verification={"version": 1, "verdict": "healthy", "items": [{"kind": "check", "state": "healthy"}]},
+        ), events_path=self.cfg.factory / "events.jsonl")
+        return {
+            f"repos/{REPO}/issues/50": parent,
+            f"repos/{REPO}/issues/7": issue(7, ticket_body, labels=(), title="Slice", state="closed"),
+            f"repos/{REPO}/issues/7/dependencies/blocked_by": [],
+        }
+
+    def test_deploy_replay_failure_degrades_verification_not_collection(self):
+        from factory import deploy
+
+        responses = self._bound_deploy_fixture()
+        with patch.object(deploy, "replay_rows", side_effect=ValueError("bad row")):
+            result = self.collect(responses, 50)
+        verified = result["plans"][0]["delivery"]["verified"]
+        self.assertEqual(verified["deployment"]["status"], "unknown")
+        self.assertEqual(verified["deployment"]["error"], "Deployment journal replay failed (ValueError)")
+        self.assertEqual(verified["health"]["status"], "unknown")
+        self.assertIn("Recorded deployments could not be replayed; machine deployment verification is unknown.",
+                      result["coverage"]["notices"])
+
+        with patch.object(outcomes, "verified_delivery", side_effect=KeyError("x")):
+            verified = self.collect(responses, 50)["plans"][0]["delivery"]["verified"]
+        self.assertEqual(verified["deployment"], {"status": "unknown", "evidence": [],
+                                                  "error": "Deployment evidence failed (KeyError)"})
+
+    def test_deploy_journal_is_replayed_once_per_collect(self):
+        from factory import deploy
+
+        responses = self._bound_deploy_fixture()
+        other = issue(60, initiative_body("Other plan"), labels=("initiative",), title="Other")
+        responses[f"repos/{REPO}/issues/60"] = other
+        list_path = f"repos/{REPO}/issues?labels=initiative&state=all&sort=updated&direction=desc&per_page={plan.PAGE_SIZE}&page=1"
+        responses[list_path] = [responses[f"repos/{REPO}/issues/50"], other]
+        with patch.object(deploy, "replay_rows", wraps=deploy.replay_rows) as replay:
+            result = self.collect(responses)
+        self.assertEqual(replay.call_count, 1)
+        verified = {row["number"]: row["delivery"]["verified"]["deployment"]["status"] for row in result["plans"]}
+        self.assertEqual(verified, {50: "verified", 60: "unknown"})
+
     def test_owner_outcomes_keep_comment_coverage_and_machine_verification_separate(self):
         parent = issue(
             50,
