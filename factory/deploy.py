@@ -912,10 +912,14 @@ class DeployAdapter:
         `factory inspect`. `status` is one of configured, missing, valid, invalid,
         unavailable or not_checked, and `live` allows network checks. `detail` may
         describe scope (an account kind, granted permissions) but must never contain a
-        credential value or raw provider output. Factory also sanitizes it. A check
-        that raises, returns another status or a key that is not a variable name, or
-        runs past `verify_secrets.ADAPTER_CHECK_TIMEOUT_SEC` is reported as one
-        `unavailable` row for the adapter.
+        credential value, a credential prefix (a token's leading characters, a
+        robot account's secret part) or raw provider output; the same holds for
+        `key`, which names the variable only. Factory sanitizes both against the
+        configured values, but it cannot recognize a fragment. A check that raises
+        (including SystemExit or KeyboardInterrupt), returns another status or a key
+        that is not a variable name, or runs past
+        `verify_secrets.ADAPTER_CHECK_TIMEOUT_SEC` is reported as one `unavailable`
+        row for the adapter.
         """
         return []
 

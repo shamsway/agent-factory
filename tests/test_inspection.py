@@ -142,6 +142,41 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(len(noisy["detail"]), verify_secrets.DETAIL_LIMIT)
         self.assertNotIn(SECRET, json.dumps(rows))
 
+    def test_adapter_base_exceptions_and_missing_results_are_unavailable(self):
+        def raising(exc):
+            class Raising(deploy.FakeDeployAdapter):
+                def credential_checks(self, env, live):
+                    raise exc
+            return Raising
+
+        adapters = {"exit": raising(SystemExit(SECRET)), "interrupt": raising(KeyboardInterrupt(SECRET))}
+        self.cfg.targets = {name: config.DeployTarget(name=name, dir=name, adapter=name) for name in adapters}
+        with patch.dict(deploy.ADAPTERS, adapters):
+            rows = verify_secrets.adapter_rows(self.cfg, True, timeout=5)
+        self.assertEqual([(r["adapter"], r["status"], r["detail"]) for r in rows],
+                         [("exit", "unavailable", "check failed"), ("interrupt", "unavailable", "check failed")])
+        self.assertNotIn(SECRET, json.dumps(rows))
+
+        class Silent:
+            """A worker that ends without running the check, so nothing is recorded."""
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+        self.cfg.targets = {"quiet": config.DeployTarget(name="quiet", dir="q", adapter="fake")}
+        with patch.object(verify_secrets.threading, "Thread", Silent):
+            rows = verify_secrets.adapter_rows(self.cfg, True)
+        self.assertEqual(rows, [{"scope": "apply", "adapter": "fake", "key": "*", "status": "unavailable",
+                                 "detail": "check failed"}])
+
     def test_op_rejection_does_not_print_provider_stderr(self):
         with patch.object(verify_secrets.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", SECRET)):
             self.assertNotIn(SECRET, verify_secrets.check_op_token(SECRET))

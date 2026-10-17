@@ -177,8 +177,9 @@ def _adapter_report(adapter, env: dict[str, str], live: bool, secrets: list[str]
 def adapter_rows(cfg: config.Config, live: bool, timeout: float = ADAPTER_CHECK_TIMEOUT_SEC) -> list[dict]:
     """Credential rows from each deploy adapter an enabled target uses.
 
-    A check that raises, returns something malformed or outlives `timeout`
-    becomes one `unavailable` row for the adapter; its message never escapes."""
+    A check that raises (any BaseException), returns something malformed,
+    records nothing or outlives `timeout` becomes one `unavailable` row for the
+    adapter; its message never escapes."""
     from factory import artifacts, deploy
     secrets = artifacts.secret_values(cfg.apply_env, cfg.install["env"])
     rows = []
@@ -188,7 +189,7 @@ def adapter_rows(cfg: config.Config, live: bool, timeout: float = ADAPTER_CHECK_
         def run(name: str = name, outcome: dict = outcome) -> None:
             try:
                 outcome["rows"] = _adapter_report(deploy.get_adapter(name), dict(cfg.apply_env), live, secrets)
-            except Exception:  # noqa: BLE001 - a broken plugin check is a status, not a crash or a leak
+            except BaseException:  # noqa: BLE001 - SystemExit or KeyboardInterrupt from a plugin thread is a status too
                 outcome["error"] = "check failed"
 
         worker = threading.Thread(target=run, name=f"credential-checks-{name}", daemon=True)
@@ -196,8 +197,10 @@ def adapter_rows(cfg: config.Config, live: bool, timeout: float = ADAPTER_CHECK_
         worker.join(timeout)
         if worker.is_alive():
             error = f"timed out after {timeout:g}s"
-        else:
-            error = outcome.get("error") if "rows" not in outcome else None
+        elif "rows" in outcome:
+            error = None
+        else:  # the worker ended without recording rows or an error
+            error = outcome.get("error", "check failed")
         if error:
             rows.append({"scope": "apply", "adapter": name, "key": "*", "status": "unavailable", "detail": error})
             continue
