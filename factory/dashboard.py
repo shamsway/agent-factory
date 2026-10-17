@@ -1220,7 +1220,8 @@ def snapshot() -> dict:
         "resources": resources,
         "tickets": tickets,
         "review_queue": review_queue(review_prs, rows, viewer),
-        "deployments": deployment_view.safe_project(FACTORY, rows, artifacts.secret_values(cfg.apply_env)),
+        # Full-journal (cached, filtered) read: deploys outlive the bounded window.
+        "deployments": deployment_view.safe_project_journal(FACTORY, artifacts.secret_values(cfg.apply_env)),
     }
 
 

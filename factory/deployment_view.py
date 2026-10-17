@@ -1,16 +1,82 @@
 """Read-only deployment history. Raw journal output is never part of this API."""
 from __future__ import annotations
 
+import fcntl
+import gzip
+import json
 import logging
+import os
 import re
+import threading
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
-from factory import artifacts, deploy, dispatch
+from factory import artifacts, deploy, dispatch, lifecycle
 
 HISTORY_LIMIT = 200
+
+
+# Deployment history spans the whole journal, so it can't come from the
+# dashboard's bounded tail window: on a long-lived host every deploy ages out
+# of it. These byte markers pre-filter lines before JSON parsing; anything
+# project() or deploy.replay_rows() reads carries one of them.
+_DEPLOY_MARKERS = (b'"deploy_', b'"applied"', b'"apply-escalate"', b'"run_id"')
+_journal_lock = threading.Lock()
+_journal_cache: dict[str, dict] = {}
+
+
+def _deploy_rows(lines) -> list[dict]:
+    rows = []
+    for line in lines:
+        if not line.endswith(b"\n") or not any(marker in line for marker in _DEPLOY_MARKERS):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and (row.get("event") in deploy.REPLAY_EVENTS or row.get("run_id")
+                                      or str(row.get("event", "")).startswith("deploy_")):
+            rows.append(row)
+    return rows
+
+
+def journal_rows(path: Path) -> list[dict]:
+    """Every deployment-related row in the journal (gzip segments and live file),
+    oldest first. Segments and the live prefix already read are cached, so a
+    refresh parses only appended bytes; rotation or truncation re-reads all."""
+    key = str(path)
+    with _journal_lock, Path(path).open("rb") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH)
+        stat = os.fstat(handle.fileno())
+        segments = tuple((n, lifecycle._segment(path, n).stat().st_size) for n in lifecycle._segments(path))
+        cache = _journal_cache.get(key)
+        if (cache is None or cache["inode"] != stat.st_ino or cache["segments"] != segments
+                or stat.st_size < cache["offset"]):
+            archived: list[dict] = []
+            for n, _size in segments:
+                with gzip.open(lifecycle._segment(path, n), "rb") as segment:
+                    archived += _deploy_rows(segment)
+            cache = {"inode": stat.st_ino, "segments": segments, "offset": 0, "archived": archived, "live": []}
+        handle.seek(cache["offset"])
+        data = handle.read(max(0, stat.st_size - cache["offset"]))
+        end = data.rfind(b"\n") + 1  # a torn final line waits for the next refresh
+        cache["live"] += _deploy_rows(data[:end].splitlines(keepends=True))
+        cache["offset"] += end
+        _journal_cache[key] = cache
+        return cache["archived"] + cache["live"]
+
+
+def safe_project_journal(factory: Path, secrets: list[str] | None = None) -> dict | None:
+    """Project the full journal's deployment history; failures never break the dashboard."""
+    try:
+        return project(factory, journal_rows(factory / "events.jsonl"), secrets)
+    except FileNotFoundError:
+        return project(factory, [], secrets)
+    except Exception:
+        logging.getLogger(__name__).warning("Deployment history unavailable", exc_info=True)
+        return None
 
 
 def safe_project(factory: Path, rows: list[dict], secrets: list[str] | None = None) -> dict | None:
