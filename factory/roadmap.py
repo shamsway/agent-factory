@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from factory import binding, config, lifecycle, outcomes, plan, runtime_events
+from factory import binding, config, deploy, lifecycle, outcomes, plan, runtime_events
 from factory.briefing import CONTEXT_CAP, SOURCE_COUNT
 from factory.evidence import ERROR_CAP, READ_SECONDS, EvidenceError, clean_text, failed, source
 
@@ -645,6 +645,13 @@ def collect(cfg, number: int | None = None, *, deadline: float | None = None) ->
         elif event.get("event") in ("claimed", "pr-opened"):
             factory_claim[ticket] = event
 
+    # One replay of the captured journal serves every initiative's deployment evidence.
+    try:
+        deploy_states, deploy_error = deploy.replay_rows(events), None
+    except Exception as exc:  # noqa: BLE001 - a malformed journal degrades verification, never collection
+        deploy_states, deploy_error = {}, f"Deployment journal replay failed ({type(exc).__name__})"
+        _notice(result, "Recorded deployments could not be replayed; machine deployment verification is unknown.")
+
     runtime = None
     canonical_cache: dict[int, object] = {}
     for discovered_row in discovered:
@@ -710,12 +717,19 @@ def collect(cfg, number: int | None = None, *, deadline: float | None = None) ->
 
         delivery = row["delivery"]
         if isinstance(delivery.get("verified"), dict) and isinstance(canonical, dict):
-            delivery["verified"] = outcomes.verified_delivery(
-                canonical["sha256"],
-                {ticket: (accepted_rows[ticket]["baseline"].get("sha256") if ticket in accepted_rows else None)
-                 for ticket in linked},
-                events,
-            )
+            if deploy_error:
+                delivery["verified"] = outcomes.unknown_delivery(deploy_error)
+            else:
+                try:
+                    delivery["verified"] = outcomes.verified_delivery(
+                        canonical["sha256"],
+                        {ticket: (accepted_rows[ticket]["baseline"].get("sha256") if ticket in accepted_rows else None)
+                         for ticket in linked},
+                        deploy_states,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one initiative's evidence must not stop collection
+                    delivery["verified"] = outcomes.unknown_delivery(
+                        f"Deployment evidence failed ({type(exc).__name__})")
 
         for ticket in linked:
             if time.monotonic() >= stop:

@@ -416,10 +416,7 @@ def project(cfg: config.Config, raw_issue: object, comments: object, *, complete
         "canonical_revision": canonical["sha256"],
         "owner": owner,
         "attributed": attributed,
-        "verified": {
-            "deployment": {"status": "unknown", "evidence": []},
-            "health": {"status": "unknown", "evidence": []},
-        },
+        "verified": unknown_delivery(),
         "evidence": evidence,
         "sources": [],
         "coverage": {
@@ -444,18 +441,34 @@ def _run_state(run: deploy.DeployRun) -> str:
     return run.status.value  # skipped, superseded, acknowledged: no deployment of this revision
 
 
-def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None], rows: list[dict]) -> dict:
+def artifact_link(target: str, run_id: str, name: str) -> dict:
+    """A deployment artifact reference in the workspace's form; the workspace adds
+    the repository scope and access key when it fetches it."""
+    return {"name": name, "url": "/api/artifacts?" + urlencode({"target": target, "run": run_id, "name": name})}
+
+
+def unknown_delivery(error: str | None = None) -> dict:
+    deployment: dict = {"status": "unknown", "evidence": []}
+    if error:
+        deployment["error"] = error
+    return {"deployment": deployment, "health": {"status": "unknown", "evidence": []}}
+
+
+def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None],
+                      states: dict[str, deploy.TargetState]) -> dict:
     """Machine deployment and health verification for one initiative.
 
     ``bindings`` maps each linked ticket to the canonical plan revision it was admitted
-    against (None when no accepted binding is retained). ``rows`` is the journal. Only
-    the latest recorded run per (ticket, target) is considered, and it counts only when
-    the ticket is bound to the current canonical revision. A deployment is verified when
-    it succeeded and its recorded health evidence says healthy. Failed, pending,
-    superseded, skipped or unobserved runs never read as verified.
+    against (None when no accepted binding is retained). ``states`` is the journal
+    replayed once by the caller (``deploy.replay_rows``). Only the latest recorded run
+    per (ticket, target) is considered, and it counts only when the ticket is bound to
+    the current canonical revision. A deployment is verified when every linked ticket
+    has a counted run and each one succeeded with healthy recorded evidence. Failed,
+    pending, superseded, skipped or unobserved runs never read as verified, and a linked
+    ticket with no counted run keeps the initiative unverified.
     """
     evidence = []
-    for target, state in sorted(deploy.replay_rows(rows).items()):
+    for target, state in sorted(states.items()):
         for ticket, runs in sorted(state.runs_by_ticket.items()):
             if ticket not in bindings or not runs:
                 continue
@@ -467,18 +480,19 @@ def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None], ro
                 "outcome": run.status.value, "verdict": verification.get("verdict"),
                 "completed_at": run.completed_at, "state": _run_state(run),
                 "binding": "unbound" if bound is None else "current" if bound == canonical_sha256 else "stale_revision",
-                "summary_url": "/api/artifacts?" + urlencode({"target": target, "run": run.run_id, "name": "summary.json"}),
+                "artifacts": [artifact_link(target, run.run_id, "summary.json")],
             })
     counted = [item for item in evidence
                if item["binding"] == "current" and item["state"] in ("verified", "unverified", "failed", "pending")]
-    states = {item["state"] for item in counted}
+    uncovered = sorted(set(bindings) - {item["ticket"] for item in counted})
+    states_seen = {item["state"] for item in counted}
     if not counted:
         deployment = "unknown"
-    elif "failed" in states:
+    elif "failed" in states_seen:
         deployment = "failed"
-    elif "pending" in states:
+    elif "pending" in states_seen:
         deployment = "pending"
-    elif states == {"verified"}:
+    elif states_seen == {"verified"} and not uncovered:
         deployment = "verified"
     else:
         deployment = "unverified"
@@ -487,6 +501,6 @@ def verified_delivery(canonical_sha256: str, bindings: dict[int, str | None], ro
               else "verified" if deployment == "verified"
               else "unknown")
     return {
-        "deployment": {"status": deployment, "evidence": evidence},
+        "deployment": {"status": deployment, "evidence": evidence, "uncovered_tickets": uncovered},
         "health": {"status": health, "evidence": [item for item in counted if item["verdict"]]},
     }

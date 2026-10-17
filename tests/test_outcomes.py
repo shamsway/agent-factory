@@ -232,7 +232,9 @@ class VerifiedDeliveryTest(unittest.TestCase):
         return {"event": "deploy_run", "at": "2026-10-16T00:05:00Z", **run.to_dict()}
 
     def verified(self, bindings, rows):
-        return outcomes.verified_delivery(self.CURRENT, bindings, rows)
+        from factory import deploy
+
+        return outcomes.verified_delivery(self.CURRENT, bindings, deploy.replay_rows(rows))
 
     def test_healthy_run_for_a_current_binding_is_verified_with_evidence_links(self) -> None:
         result = self.verified({7: self.CURRENT}, [self.run_row(7, "succeeded", verdict="healthy")])
@@ -240,8 +242,9 @@ class VerifiedDeliveryTest(unittest.TestCase):
         self.assertEqual(result["health"]["status"], "verified")
         (item,) = result["deployment"]["evidence"]
         self.assertEqual((item["ticket"], item["target"], item["state"], item["binding"]), (7, "app", "verified", "current"))
-        self.assertEqual(item["summary_url"],
-                         "/api/artifacts?target=app&run=deploy-app-00000007-1&name=summary.json")
+        self.assertEqual(item["artifacts"], [{
+            "name": "summary.json", "url": "/api/artifacts?target=app&run=deploy-app-00000007-1&name=summary.json"}])
+        self.assertEqual(result["deployment"]["uncovered_tickets"], [])
 
     def test_failed_superseded_and_unverified_runs_never_read_as_verified(self) -> None:
         cases = {
@@ -273,7 +276,21 @@ class VerifiedDeliveryTest(unittest.TestCase):
 
     def test_runs_for_unlinked_tickets_are_ignored(self) -> None:
         result = self.verified({7: self.CURRENT}, [self.run_row(9, "succeeded", verdict="healthy")])
-        self.assertEqual(result["deployment"], {"status": "unknown", "evidence": []})
+        self.assertEqual(result["deployment"], {"status": "unknown", "evidence": [], "uncovered_tickets": [7]})
+
+    def test_a_linked_ticket_without_a_counted_run_keeps_the_initiative_unverified(self) -> None:
+        healthy = [self.run_row(7, "succeeded", verdict="healthy")]
+        for name, bindings in {"no run recorded": {7: self.CURRENT, 8: self.CURRENT},
+                               "stale binding": {7: self.CURRENT, 8: self.OLD},
+                               "unbound": {7: self.CURRENT, 8: None}}.items():
+            with self.subTest(name):
+                rows = healthy + ([self.run_row(8, "succeeded", verdict="healthy")] if name != "no run recorded" else [])
+                result = self.verified(bindings, rows)
+                self.assertEqual(result["deployment"]["status"], "unverified")
+                self.assertEqual(result["deployment"]["uncovered_tickets"], [8])
+                self.assertEqual(result["health"]["status"], "unknown")
+        superseded = self.verified({7: self.CURRENT, 8: self.CURRENT}, healthy + [self.run_row(8, "superseded")])
+        self.assertEqual(superseded["deployment"]["status"], "unverified")
 
 
 if __name__ == "__main__":

@@ -861,11 +861,15 @@ branches, or merge state.
   (`outcomes.verified_delivery`). For each ticket linked to the initiative, the
   latest `deploy_run` per target counts only if the ticket's accepted plan binding
   matches the current canonical revision. Deployment is `verified` only when every
-  counted run succeeded with a healthy, non-empty verification record. One failed
-  or pending run makes it `failed` or `pending`, and a success without health
-  evidence makes it `unverified`. Superseded, acknowledged, skipped, stale-revision
-  and unbound runs stay in the evidence list but never count. Each evidence row
-  links its `summary.json` artifact.
+  linked ticket has a counted run and each one succeeded with a healthy, non-empty
+  verification record; linked tickets without one are listed as
+  `uncovered_tickets` and keep it `unverified`. One failed or pending run makes it
+  `failed` or `pending`, and a success without health evidence makes it
+  `unverified`. Superseded, acknowledged, skipped, stale-revision and unbound runs
+  stay in the evidence list but never count. Each evidence row links its
+  `summary.json` artifact in the workspace's `/api/artifacts` form. Collection
+  replays the deploy journal once; if that replay fails, verification reads
+  `unknown` with an error note and the rest of the roadmap is still collected.
 
   Theme choices persist in this browser: Cyberpunk, GPUFlo, District, Factory,
   ROCm, Porcelain, Sandstone, Slate and Forest. Motion respects reduced-motion
