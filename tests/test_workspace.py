@@ -215,6 +215,34 @@ class WorkspaceHTTPTest(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(body["error"]["code"], "invalid_host")
 
+    def test_access_key_and_host_guard_every_api_route_including_artifacts(self) -> None:
+        # The single bind policy: no route is reachable on any bind without the key and
+        # an allowed Host; mutating routes also need exact same-origin write intent.
+        reads = [
+            "/api/data", "/api/snapshot?repository=acme/widgets", "/api/codebase?repository=acme/widgets",
+            "/api/artifacts?repository=acme/widgets&target=default&run=deploy-default-a-1&name=apply.log",
+        ]
+        for path in reads:
+            with self.subTest(path=path):
+                status, _, body = self.request("GET", path)
+                self.assertEqual((status, body["error"]["code"]), (401, "authentication_required"))
+                status, _, body = self.request("GET", path, auth="x" * 43)
+                self.assertEqual(status, 401)
+                status, _, body = self.request("GET", path, auth=True, host=f"rebind.example:{self.server.server_port}")
+                self.assertEqual((status, body["error"]["code"]), (403, "invalid_host"))
+        status, _, body = self.request("POST", "/api/decisions/apply", {"repository": REPOSITORY}, auth=True)
+        self.assertEqual((status, body["error"]["code"]), (403, "intent_required"))
+        status, _, body = self.request(
+            "POST", "/api/decisions/apply", {"repository": REPOSITORY}, auth=True, intent=True,
+            origin="http://evil.example",
+        )
+        self.assertEqual((status, body["error"]["code"]), (403, "intent_required"))
+        status, _, body = self.request(
+            "GET", "/api/artifacts?repository=acme/widgets&target=default&run=deploy-default-a-1&name=apply.log",
+            auth=True,
+        )
+        self.assertEqual((status, body["error"]["code"]), (404, "artifact_not_found"))
+
     def test_idle_and_partial_headers_release_client_capacity(self) -> None:
         self.server.header_timeout = 0.3
         self.server._clients = threading.BoundedSemaphore(1)

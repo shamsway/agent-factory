@@ -219,12 +219,12 @@ marks the `pr` sink `skipped`. Sinks are independent: one failing leaves the oth
 posted and the run's terminal state untouched. `factory apply` retries `pending` sinks
 at the start of each pass (up to 10 attempts, then `failed`).
 
-**Lookup.** *Pending MAT-193:* the upstream workspace UI does not serve this route yet, so
-artifact URLs in `factory dashboard --json` currently go nowhere. Once ported, the dashboard
-serves `/api/artifacts/<target>/<run_id>/<name>` only for names
-listed in the run's manifest whose on-disk sha256 still matches. `/api/file` refuses
-`private/`, `artifacts/`, `apply-checkout/`, raw `terraform-apply-*` logs, plan and
-state files.
+**Lookup.** The workspace serves `GET /api/artifacts?repository=<slug>&target=<target>&run=<run_id>&name=<name>`
+behind the workspace access key. It serves only names listed in the run's manifest
+whose on-disk sha256 still matches, never `manifest.json`, and files up to 8 MiB. Any other
+name, a traversal attempt, a symlink or a tampered file returns 404. The workspace has no
+generic file route, so `private/`, `apply-checkout/`, the journal (`events.jsonl` and its
+rotated segments), raw `terraform-apply-*` logs, plans and state are unreachable over HTTP.
 
 Limitations:
 
@@ -335,9 +335,9 @@ A direct commit was pushed to `main` bypassing PR review:
 3. Or revert the unapproved commit on `main`.
 
 
-## Deployment history in Ops
+## Deployment history in the workspace
 
-The Deployments panel projects all recorded deployment attempts independently
+The workspace **Deployments** view (`/?view=deployments`, per registered repository) projects all recorded deployment attempts independently
 of the GitHub issue list, including failures attached to closed tickets. It
 shows target, revision, attempt, state transitions, health evidence and
 publication status. Target and status filters narrow the visible history.
@@ -361,12 +361,23 @@ new apply passes. Historical records without timestamps remain unavailable.
 Journal retention bounds these metrics; they are not lifetime totals.
 
 Result and log viewers use only manifest-authorized sanitized artifacts and
-verify their hashes when serving them. Historical journal output is excluded
-from the deployment projection. The generic `/api/file` route refuses both
-`events.jsonl` and rotated segments (also through symlink aliases), as well as
-private plans/state and raw apply logs. No historical journal rewrite is needed.
-The dashboard binds to loopback by default and its APIs require the workspace
-access key; the fork's former hard refusal of non-loopback binds is pending MAT-193.
+verify their hashes when serving them; the viewer shows them as text, never as
+markup. Historical journal output is excluded from the deployment projection, and
+no workspace route serves the journal or private state. No historical journal
+rewrite is needed.
+
+**Bind and access policy.** The workspace has one policy: upstream's access key and
+Host validation. The fork only keeps its safer default. The former fork refused
+non-loopback binds outright because its dashboard had no authentication. The workspace
+now requires the owner-only access key (constant-time compare) on every `/api/` route,
+including artifacts. It validates the `Host` header against loopback, the bound address
+and `--allowed-host` names, which blocks DNS rebinding. Mutating routes also require an
+exact same-origin `Origin` and `X-Factory-Act: 1`. A hard loopback refusal would add no
+protection for an attacker without the key, and it would block the documented trusted-LAN
+and Tailscale use. So `factory dashboard` defaults to `127.0.0.1` (upstream: `0.0.0.0`)
+and `factory doctor` WARNs on a non-loopback bind. There is no second refusal policy.
+Anyone holding the key has operator authority: serve it only on a trusted network or
+behind an authenticated encrypted tunnel.
 
 Private plans remain in `.factory/private/<run_id>/` for recovery. Automated
 retention keeps the latest ten terminal runs per target plus protected runs (see below).

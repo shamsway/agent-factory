@@ -71,10 +71,9 @@ DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
 DEFAULT_LLM_MODEL = "qwen3:30b"
 DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "python": None, "env": {}}
 # The workspace mutates GitHub with the operator's own `gh` credentials. Its
-# APIs require the workspace access key, but the fork still defaults the bind
-# to loopback (reach it via an SSH tunnel) and `factory doctor` warns on any
-# other address. Nothing refuses a non-loopback bind any more; whether the
-# fork's old hard refusal comes back alongside the access key is MAT-193.
+# access key and Host checks are the only bind policy (see
+# docs/deployment-lifecycle.md); the fork just defaults the bind to loopback
+# (reach it via an SSH tunnel) and `factory doctor` warns on any other address.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # Host-side layer: `$XDG_CONFIG_HOME/factory/config.toml`, same table shapes

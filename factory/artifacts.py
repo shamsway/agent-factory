@@ -345,10 +345,16 @@ def retry_pending(factory_dir: Path, post: PostFn) -> dict[str, dict[str, str]]:
     return {rid: publish(factory_dir, t, rid, post) for t, rid in pending_runs(factory_dir)}
 
 
-def lookup(factory_dir: Path, target: str, run_id: str, name: str) -> tuple[bytes, str] | None:
+class ArtifactTooLarge(Exception):
+    """A manifest-listed artifact is larger than the caller will read."""
+
+
+def lookup(factory_dir: Path, target: str, run_id: str, name: str,
+           max_bytes: int | None = None) -> tuple[bytes, str] | None:
     """Authorized artifact read: only a file named in the run's manifest, whose
     on-disk sha256 still matches. Anything else (private store, traversal,
-    tampered or unlisted files) returns None."""
+    tampered or unlisted files) returns None. A listed file over max_bytes raises
+    ArtifactTooLarge before it is hashed or read."""
     try:
         d = artifact_dir(factory_dir, target, run_id)
     except ValueError:
@@ -358,7 +364,11 @@ def lookup(factory_dir: Path, target: str, run_id: str, name: str) -> tuple[byte
     if not entry:
         return None
     path = d / entry["name"]
-    if path.is_symlink() or not path.is_file() or _sha256(path) != entry["sha256"]:
+    if path.is_symlink() or not path.is_file():
+        return None
+    if max_bytes is not None and path.stat().st_size > max_bytes:
+        raise ArtifactTooLarge(name)
+    if _sha256(path) != entry["sha256"]:
         return None
     ctype = "application/json" if name.endswith(".json") else "text/plain; charset=utf-8"
     return path.read_bytes(), ctype
