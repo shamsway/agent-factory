@@ -9,6 +9,7 @@ auto-retried.
 
 from __future__ import annotations
 
+import calendar
 import fcntl
 import os
 import re
@@ -20,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from factory import lifecycle
+from factory import artifacts, lifecycle
 
 CONTRACT_VERSION = 1
 
@@ -905,6 +906,17 @@ class DeployAdapter:
         """Inspect and reconcile an interrupted run."""
         return False, f"interrupted run {interrupted_run.run_id} requires operator reconciliation"
 
+    def observe(self, target: Any, run: DeployRun, env: dict[str, str]) -> list[dict]:
+        """Observations about a recent SUCCEEDED run, made on a later apply pass.
+
+        For targets whose run ends before the change is live, such as a PR left
+        for a human merge. Each observation is a dict with `kind` and `state`, plus
+        optional `detail`, `url`, `attention` (a human should look) and `final`
+        (stop observing this run). Observations are evidence only. They never
+        change the run's status and never make its ticket selectable again.
+        """
+        return []
+
 
 def _safe_decode_stream(stream: Any) -> str:
     """Safely decode bytes or string stream into a string without TypeError."""
@@ -1121,6 +1133,119 @@ class FakeDeployAdapter(DeployAdapter):
             )
             return True, "interrupted run reconciled automatically by fake adapter"
         return False, f"fake adapter requires operator reconciliation for {interrupted_run.run_id}"
+
+
+OBSERVE_WINDOW_SEC = 7 * 24 * 3600
+# Bounds on one apply pass's observation work: per adapter call, and per target.
+OBSERVE_CALL_SEC = 60
+OBSERVE_TOTAL_SEC = 180
+# What a journal row may carry from an adapter: type and length per field.
+OBSERVATION_TEXT_LIMITS = {"kind": 64, "state": 64, "detail": 2000, "url": 2048}
+OBSERVATION_FLAGS = ("attention", "final")
+OBSERVATIONS_PER_RUN = 20
+
+
+def _capped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def clean_observations(found: Any, secrets: list[str] | None = None) -> tuple[list[dict], list[str]]:
+    """Validated copies of an adapter's observations, ready for the journal, and a
+    reason for each one dropped. Text is redacted and length-capped; `kind` and
+    `state` must be non-empty strings, `detail` a string, `url` an http(s) URL,
+    and `attention`/`final` booleans. Other keys are ignored."""
+    if found is None:
+        return [], []
+    if not isinstance(found, list):
+        return [], [f"observe returned {type(found).__name__}, not a list"]
+    clean: list[dict] = []
+    dropped: list[str] = []
+    for index, item in enumerate(found):
+        if len(clean) >= OBSERVATIONS_PER_RUN:
+            dropped.append(f"{len(found) - index} beyond the limit of {OBSERVATIONS_PER_RUN}")
+            break
+        if not isinstance(item, dict):
+            dropped.append(f"item {index}: {type(item).__name__}, not a dict")
+            continue
+        row: dict = {}
+        problem = ""
+        for key, limit in OBSERVATION_TEXT_LIMITS.items():
+            value = item.get(key)
+            if value is None and key not in ("kind", "state"):
+                continue
+            if not isinstance(value, str) or (key in ("kind", "state") and not value.strip()):
+                problem = f"`{key}` is {type(value).__name__ if value is not None else 'missing'}"
+                break
+            value = artifacts.sanitize(value, secrets)
+            if key in ("kind", "state"):
+                value = " ".join(value.split())
+            if key == "url" and not value.startswith(("https://", "http://")):
+                problem = "`url` is not an http(s) URL"
+                break
+            row[key] = _capped(value, limit)
+        for key in OBSERVATION_FLAGS:
+            if problem:
+                break
+            value = item.get(key, False)
+            if not isinstance(value, bool):
+                problem = f"`{key}` is {type(value).__name__}, not a bool"
+            row[key] = value
+        if problem:
+            dropped.append(f"item {index}: {problem}")
+            continue
+        clean.append(row)
+    return clean, dropped
+
+
+def observations_by_run(rows: list[dict]) -> dict[str, list[dict]]:
+    """Recorded `deploy_observation` rows per run, oldest first."""
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        if row.get("event") == "deploy_observation" and row.get("run_id"):
+            out.setdefault(str(row["run_id"]), []).append(row)
+    return out
+
+
+def runs_to_observe(state: TargetState, observed: dict[str, list[dict]], now: float | None = None) -> list[DeployRun]:
+    """SUCCEEDED runs that completed inside the window and have no final observation."""
+    now = time.time() if now is None else now
+    out = []
+    for run in state.runs:
+        if run.status != DeployStatus.SUCCEEDED or not run.completed_at:
+            continue
+        try:
+            completed = calendar.timegm(time.strptime(run.completed_at, "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            continue
+        if now - completed > OBSERVE_WINDOW_SEC:
+            continue
+        if any(row.get("final") for row in observed.get(run.run_id, [])):
+            continue
+        out.append(run)
+    return out
+
+
+def record_observations(run: DeployRun, found: Any, observed: list[dict], events_path: Path | None = None,
+                        secrets: list[str] | None = None) -> tuple[list[dict], list[str]]:
+    """Append each valid observation whose (kind, state) differs from the last one
+    recorded for its kind on this run. Returns the rows written and a reason for
+    each observation `clean_observations` dropped."""
+    clean, dropped = clean_observations(found, secrets)
+    last = {row.get("kind"): row.get("state") for row in observed}
+    written = []
+    for item in clean:
+        if last.get(item["kind"]) == item["state"]:
+            continue
+        row = {"event": "deploy_observation", "run_id": run.run_id, "target": run.target, "ticket": run.ticket, **item}
+        if events_path is not None:
+            lifecycle.append(events_path, {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **row})
+        else:
+            from factory import dispatch
+            dispatch.record(row.pop("event"), **row)
+            row["event"] = "deploy_observation"
+        last[item["kind"]] = item["state"]
+        written.append(row)
+    return written, dropped
 
 
 def reconcile_interrupted_run(

@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -1712,6 +1713,247 @@ if os.environ.get("FAKE_TF_MARKER"):
     open(os.environ["FAKE_TF_MARKER"], "w").write("state written")
 print("Apply complete! Resources: 1 added, 0 changed, 0 destroyed.", flush=True)
 """
+
+
+class ObservationTest(unittest.TestCase):
+    """Post-run observations are evidence only: recorded, deduplicated, projected,
+    and never a change to a terminal run or a reason to select its ticket again."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        toml = '[apply]\nenabled = true\n\n[apply.targets.app]\ndir = "deploy/app"\nadapter = "observing"\n'
+        self.cfg = config.load(make_repo(Path(self.tmp.name), toml))
+        dispatch.configure(self.cfg)
+        apply.configure(self.cfg)
+        self.cfg.factory.mkdir(parents=True, exist_ok=True)
+        self.events = dispatch.EVENTS
+        self.answers: list[list[dict]] = []
+        self.seen: list[str] = []
+        test = self
+
+        class Observing(deploy.FakeDeployAdapter):
+            def observe(self, target, run, env):
+                test.seen.append(run.run_id)
+                answer = test.answers.pop(0) if test.answers else []
+                if answer == "boom":
+                    raise RuntimeError("platform unreachable")
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+
+        self.adapters = mock.patch.dict(deploy.ADAPTERS, {"observing": Observing})
+        self.adapters.start()
+        self.addCleanup(self.adapters.stop)
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.run = deploy.DeployRun(run_id="deploy-app-c0ffee00-1", target="app", commit="c0ffee00" * 5, ticket=7,
+                                    attempt=1, pr=3, status=deploy.DeployStatus.SUCCEEDED, started_at=now,
+                                    completed_at=now)
+        deploy.record_deploy_run(self.run, events_path=self.events)
+        self.candidate = {"pr": 3, "ticket": 7, "commit": self.run.commit, "head_commit": self.run.commit,
+                          "reviewDecision": "APPROVED",
+                          "latestReviews": [{"state": "APPROVED", "commit": {"oid": self.run.commit}}]}
+
+    def apply_pass(self, *args: str):
+        with mock.patch.object(config, "load", return_value=self.cfg), \
+             mock.patch.object(dispatch, "run"), \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=[self.candidate]), \
+             mock.patch.object(apply, "touches_target_dir", return_value=True), \
+             mock.patch.object(deploy, "find_unauthorized_direct_merges", return_value=[]), \
+             mock.patch.object(apply, "apply_one") as apply_one, \
+             mock.patch.object(apply, "log") as log:
+            apply.main(list(args))
+        apply_one.assert_not_called()  # the observed ticket is terminal and never re-selected
+        return " ".join(str(c.args[0]) for c in log.call_args_list)
+
+    def observations(self) -> list[dict]:
+        return deploy.observations_by_run(lifecycle.read_events(self.events)).get(self.run.run_id, [])
+
+    def test_records_changes_only_and_stops_after_a_final_observation(self) -> None:
+        merged = {"kind": "platform_pr", "state": "merged", "url": "https://example.test/pr/9"}
+        closed = {"kind": "rollout", "state": "failed", "detail": "rollout failed", "attention": True, "final": True}
+        self.answers = [[merged], [merged], [closed], [merged]]
+        self.apply_pass()
+        self.apply_pass()
+        lines = self.apply_pass()
+        self.apply_pass()
+        self.assertIn("observed rollout failed for deploy-app-c0ffee00-1 (needs attention)", lines)
+        self.assertEqual([(o["kind"], o["state"]) for o in self.observations()],
+                         [("platform_pr", "merged"), ("rollout", "failed")])
+        self.assertEqual(len(self.seen), 3)  # nothing is asked after the final observation
+
+        state = deploy.get_target_state("app", events_path=self.events)
+        self.assertEqual(state.latest_run.status, deploy.DeployStatus.SUCCEEDED)
+        self.assertIn(7, state.terminal_tickets)
+        self.assertNotIn(7, state.unacknowledged_failed_tickets)
+
+        from factory import deployment_view
+        view = deployment_view.project(self.cfg.factory, lifecycle.read_events(self.events))
+        (shown,) = view["runs"]
+        self.assertEqual((shown["status"], shown["needs_attention"], view["attention"]), ("succeeded", True, 1))
+        self.assertEqual([o["state"] for o in shown["observations"]], ["merged", "failed"])
+
+    def test_adapter_errors_are_logged_and_never_stop_the_pass(self) -> None:
+        self.answers = ["boom"]
+        lines = self.apply_pass()
+        self.assertIn("observations skipped for deploy-app-c0ffee00-1: RuntimeError: platform unreachable", lines)
+        self.assertEqual(self.observations(), [])
+
+    def second_run(self) -> deploy.DeployRun:
+        run = deploy.DeployRun(run_id="deploy-app-c0ffee00-2", target="app", commit=self.run.commit, ticket=9,
+                               attempt=1, pr=4, status=deploy.DeployStatus.SUCCEEDED,
+                               started_at=self.run.started_at, completed_at=self.run.completed_at)
+        deploy.record_deploy_run(run, events_path=self.events)
+        return run
+
+    def test_one_failing_run_does_not_stop_the_others(self) -> None:
+        other = self.second_run()
+        self.answers = ["boom", [{"kind": "platform_pr", "state": "merged"}]]
+        lines = self.apply_pass()
+        self.assertEqual(self.seen, [self.run.run_id, other.run_id])
+        self.assertIn("observations skipped for deploy-app-c0ffee00-1: RuntimeError", lines)
+        rows = deploy.observations_by_run(lifecycle.read_events(self.events))
+        self.assertEqual([r["state"] for r in rows[other.run_id]], ["merged"])
+
+    def test_system_exit_from_an_adapter_is_one_runs_failure(self) -> None:
+        other = self.second_run()
+        self.answers = [SystemExit(3), [{"kind": "platform_pr", "state": "merged"}]]
+        lines = self.apply_pass()
+        self.assertEqual(self.seen, [self.run.run_id, other.run_id])
+        self.assertIn("observations skipped for deploy-app-c0ffee00-1: RuntimeError: observe raised SystemExit: 3",
+                      lines)
+        rows = deploy.observations_by_run(lifecycle.read_events(self.events))
+        self.assertEqual([r["state"] for r in rows[other.run_id]], ["merged"])
+
+    def test_keyboard_interrupt_from_an_adapter_still_propagates(self) -> None:
+        self.answers = [KeyboardInterrupt()]
+        with self.assertRaises(KeyboardInterrupt):
+            self.apply_pass()
+
+    def test_target_locks_are_released_when_the_observe_pass_raises(self) -> None:
+        held: list[object] = []
+        released: list[object] = []
+        real_acquire, real_release = deploy.acquire_target_lock, deploy.release_lock
+
+        def acquire(*args):
+            ok, fd = real_acquire(*args)
+            held.append(fd)
+            return ok, fd
+
+        def release(fd: object) -> None:
+            released.append(fd)
+            real_release(fd)
+            if len(released) == 1:
+                raise OSError("backend lock release failed")  # the target lock must still be released
+
+        with mock.patch.object(apply, "observe_recent_runs", side_effect=RuntimeError("observe broke")), \
+             mock.patch.object(deploy, "acquire_target_lock", side_effect=acquire), \
+             mock.patch.object(deploy, "release_lock", side_effect=release), \
+             self.assertRaises((RuntimeError, OSError)):
+            self.apply_pass()
+        (target_fd,) = held
+        self.assertIn(target_fd, released)
+
+    def test_fields_are_type_checked_redacted_and_capped_before_the_journal(self) -> None:
+        secret = "hunter2-" + "x" * 24
+        self.cfg.apply_env = {"PLATFORM_TOKEN": secret}
+        self.answers = [[
+            {"kind": "platform_pr", "state": "open", "detail": f"token={secret}\n" + "d" * 5000,
+             "url": "https://example.test/pr/9", "extra": {"nested": secret}},
+            {"kind": "rollout", "state": "ok", "url": "javascript:alert(1)"},
+            {"kind": "rollout", "state": "ok", "attention": "yes"},
+            {"kind": "rollout", "state": ["ok"]},
+            {"kind": "", "state": "ok"},
+            "not a dict",
+            *({"kind": f"k{i}", "state": "ok"} for i in range(deploy.OBSERVATIONS_PER_RUN + 5)),
+        ]]
+        lines = self.apply_pass()
+        rows = self.observations()
+        self.assertEqual(len(rows), deploy.OBSERVATIONS_PER_RUN)
+        first = rows[0]
+        self.assertNotIn(secret, json.dumps(rows))
+        self.assertNotIn("extra", first)
+        self.assertEqual(len(first["detail"]), deploy.OBSERVATION_TEXT_LIMITS["detail"])
+        self.assertEqual((first["attention"], first["final"]), (False, False))
+        self.assertIn("dropped 6 invalid observation(s)", lines)
+        for reason in ("`url` is not an http(s) URL", "`attention` is str", "`state` is list",
+                       "`kind` is str", "str, not a dict", "beyond the limit"):
+            self.assertIn(reason, lines)
+        self.assertEqual(deploy.clean_observations({"kind": "x"}), ([], ["observe returned dict, not a list"]))
+
+    def test_a_hung_adapter_is_abandoned_and_the_pass_moves_on(self) -> None:
+        self.second_run()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        test = self
+
+        class Hanging(deploy.FakeDeployAdapter):
+            def observe(self, target, run, env):
+                test.seen.append(run.run_id)
+                release.wait(10)
+                return []
+
+        with mock.patch.dict(deploy.ADAPTERS, {"observing": Hanging}), \
+             mock.patch.object(deploy, "OBSERVE_CALL_SEC", 0.2):
+            started = time.monotonic()
+            lines = self.apply_pass()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertIn("observations stopped at deploy-app-c0ffee00-1: TimeoutError", lines)
+        self.assertEqual(self.seen, [self.run.run_id])  # a wedged adapter is not asked again this pass
+
+        self.seen.clear()
+        with mock.patch.object(deploy, "OBSERVE_TOTAL_SEC", 0):
+            lines = self.apply_pass()
+        self.assertIn("2 run(s) wait for the next pass", lines)
+        self.assertEqual(self.seen, [])
+
+    def test_observations_run_after_the_targets_applies(self) -> None:
+        order: list[str] = []
+        self.answers = [[]]
+        fresh = {**self.candidate, "pr": 5, "ticket": 11, "commit": "d00dfeed" * 5, "head_commit": "d00dfeed" * 5,
+                 "latestReviews": [{"state": "APPROVED", "commit": {"oid": "d00dfeed" * 5}}]}
+        real_observe = apply.observe_recent_runs
+        with mock.patch.object(config, "load", return_value=self.cfg), \
+             mock.patch.object(dispatch, "run"), \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=[]), \
+             mock.patch.object(deploy, "select_candidates_for_target", return_value=([fresh], [])), \
+             mock.patch.object(apply, "touches_target_dir", return_value=True), \
+             mock.patch.object(deploy, "find_unauthorized_direct_merges", return_value=[]), \
+             mock.patch.object(apply, "apply_one", side_effect=lambda *a, **k: order.append("apply") or True), \
+             mock.patch.object(apply, "observe_recent_runs",
+                               side_effect=lambda t: order.append("observe") or real_observe(t)), \
+             mock.patch.object(apply, "log"):
+            apply.main([])
+        self.assertEqual(order, ["apply", "observe"])
+
+        order.clear()
+        with mock.patch.object(config, "load", return_value=self.cfg), \
+             mock.patch.object(dispatch, "run"), \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=[]), \
+             mock.patch.object(deploy, "select_candidates_for_target", return_value=([fresh], [])), \
+             mock.patch.object(apply, "touches_target_dir", return_value=True), \
+             mock.patch.object(deploy, "find_unauthorized_direct_merges", return_value=[]), \
+             mock.patch.object(apply, "apply_one", side_effect=KeyboardInterrupt), \
+             mock.patch.object(apply, "observe_recent_runs", side_effect=lambda t: order.append("observe")), \
+             mock.patch.object(apply, "log"), self.assertRaises(KeyboardInterrupt):
+            apply.main([])
+        self.assertEqual(order, [])  # an interrupted pass releases its locks without observing
+
+    def test_dry_run_and_old_or_unsuccessful_runs_are_not_observed(self) -> None:
+        self.apply_pass("--dry-run")
+        self.assertEqual(self.seen, [])
+        state = deploy.get_target_state("app", events_path=self.events)
+        later = time.time() + deploy.OBSERVE_WINDOW_SEC + 60
+        self.assertEqual(deploy.runs_to_observe(state, {}, now=later), [])
+        failed = deploy.DeployRun(run_id="deploy-app-0badf00d-1", target="app", commit="0badf00d", ticket=8,
+                                  attempt=1, status=deploy.DeployStatus.FAILED, started_at=self.run.started_at,
+                                  completed_at=self.run.completed_at)
+        deploy.record_deploy_run(failed, events_path=self.events)
+        state = deploy.get_target_state("app", events_path=self.events)
+        self.assertEqual([r.run_id for r in deploy.runs_to_observe(state, {})], [self.run.run_id])
+
+    def test_base_adapter_observes_nothing(self) -> None:
+        self.assertEqual(deploy.TerraformDeployAdapter().observe(None, self.run, {}), [])
 
 
 class UnknownAdapterTest(unittest.TestCase):

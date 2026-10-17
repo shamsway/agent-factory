@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VIEWS = ['Overview','Outcomes','Attention','Flow','Success','Codebase','Atlas','System','Settings'];
+  const VIEWS = ['Overview','Outcomes','Attention','Flow','Success','Deployments','Codebase','Atlas','System','Settings'];
   const THEMES = [['cyberpunk','Cyberpunk'],['gpuflo','GPUFlo'],['district','District'],['factory','Factory'],['rocm','ROCm'],['porcelain','Porcelain'],['sandstone','Sandstone'],['slate','Slate'],['forest','Forest']];
   const app = document.querySelector('#app');
   const overlay = document.querySelector('#overlay');
@@ -13,7 +13,7 @@
     data: {observed_at:null,repositories:[],collection:{}}, loading:true, error:'', request:null,
     ops:new Map(), inspections:new Map(),
     chats:new Map(), chatMeta:new Map(), chatOpen:new URLSearchParams(location.search).get('chat')==='1', chatCase:null, palette:false, paletteQuery:'',
-    pollTimer:null, visitBaseline:new Map()
+    pollTimer:null, visitBaseline:new Map(), deployFilter:{target:'',status:''}
   };
   try { state.themePreference = localStorage.getItem('factory-theme'); } catch {}
   const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[character]));
@@ -26,9 +26,9 @@
   const slugify = value => normalize(value);
   const tone = value => {
     const normalized = normalize(value);
-    if (['complete','ready','fresh','merged','applied','attested','owner-attested','available'].includes(normalized)) return 'good';
-    if (['partial','building','refreshing','held','waiting','escalated','needs-info','stale','interrupted'].includes(normalized)) return 'warn';
-    if (['failed','error','unavailable','invalid'].includes(normalized)) return 'bad';
+    if (['complete','ready','fresh','merged','applied','attested','owner-attested','available','succeeded','pass','healthy','opened','rolled-out'].includes(normalized)) return 'good';
+    if (['partial','building','refreshing','held','waiting','escalated','needs-info','stale','interrupted','pending','executing','verifying'].includes(normalized)) return 'warn';
+    if (['failed','fail','error','unavailable','invalid','unhealthy','timeout'].includes(normalized)) return 'bad';
     return 'unknown';
   };
   const route = () => {
@@ -271,6 +271,47 @@
     return `<header class="workspace-head"><div><p class="eyebrow">Success evidence</p><h1>Merge is not delivery.</h1><p>Engineering milestones, owner-attributed acceptance, and independently verified deployment or health never collapse into one score.</p></div></header>${body}<section class="split"><article class="section-block"><h2>Observed merge milestones</h2>${merged.slice(0,12).map(caseButton).join('')||'<p class="empty">No merge evidence in this bounded case set; not a repository-wide zero.</p>'}</article><article class="section-block"><h2>Current owner acceptance</h2>${accepted.map(({plan,delivery})=>`<article class="source-card"><strong>#${plan.number} · ${esc(plan.title)}</strong><p>${esc(delivery.detail)}</p>${attestedCell('accepted',delivery)}</article>`).join('')||'<p class="empty">No current complete-coverage owner accepted attestation. Accepted usefulness remains unknown.</p>'}</article></section>`;
   }
 
+  function deployments(repo) {
+    const ops=opsRecord(repo),snapshot=ops.data;
+    const head='<header class="workspace-head"><div><p class="eyebrow">Deployment history</p><h1>Every recorded attempt, its evidence, and its artifacts.</h1><p>Projected from the deployment journal, independent of the issue list. A pending row is shown only when one was recorded; no deployment is inferred from a merged PR.</p></div>';
+    if((ops.status==='loading'&&!snapshot)||snapshot?.status==='building')return `${head}${signal('refreshing')}</header><p class="empty">The Ops snapshot that carries deployment history is building.</p>`;
+    if(ops.error&&!snapshot)return `${head}${signal('unavailable')}</header><p class="error">${esc(ops.error)}</p>`;
+    if(!snapshot)return `${head}</header><p class="empty">Deployment history has not been requested.</p>`;
+    const data=snapshot.deployments;
+    if(!data||typeof data!=='object')return `${head}${signal('unavailable')}</header><p class="empty">Deployment history is unavailable in this snapshot. This is not a record of zero deployments.</p>`;
+    const metrics=object(data.metrics),history=object(data.history),filter=state.deployFilter;
+    const runs=array(data.runs),targets=[...new Set(runs.map(run=>run.target))].sort(),statuses=[...new Set(runs.map(run=>run.status))].sort();
+    const shown=runs.filter(run=>(!filter.target||run.target===filter.target)&&(!filter.status||run.status===filter.status));
+    const seconds=value=>typeof value==='number'&&Number.isFinite(value)?`${value.toFixed(1)} s`:'unknown';
+    const rate=typeof metrics.success_rate==='number'?`${(metrics.success_rate*100).toFixed(1)}%`:'unknown';
+    const select=(name,label,values)=>`<label>${label} <select data-deploy-filter="${name}"><option value="">All</option>${values.map(value=>`<option value="${esc(value)}"${filter[name]===value?' selected':''}>${esc(value)}</option>`).join('')}</select></label>`;
+    const verification=run=>{const v=object(run.verification);if(!v.verdict)return '<p class="muted">No verification evidence recorded.</p>';return `<p>Verification ${signal(v.verdict)} · ${seconds(v.elapsed_sec)} of ${seconds(v.timeout_sec)}</p><div class="ops-table-wrap"><table class="ops-table"><thead><tr><th>Item</th><th>State</th><th>Last detail</th></tr></thead><tbody>${array(v.items).map(item=>`<tr><th>${esc(item.id||item.name||item.address||item.kind||'item')}</th><td>${signal(item.state||'unknown')}</td><td>${esc(String(item.detail||'').split('\n').filter(Boolean).at(-1)||item.url||'')}</td></tr>`).join('')}</tbody></table></div>`;};
+    const row=run=>`<details class="deploy-run"${run.unresolved||run.needs_attention?' open':''}><summary>${signal(run.status)} <strong>${esc(run.target)}</strong> · #${esc(run.ticket)}${run.pr?` · PR #${esc(run.pr)}`:''} · <code>${esc(String(run.commit||'').slice(0,12))}</code> · attempt ${esc(run.attempt??'?')} · ${esc(date(run.started_at))}${run.unresolved?' · <b>unresolved</b>':''}${run.needs_attention?' · <b>needs attention</b>':''}</summary>
+      <dl class="kv"><dt>Run</dt><dd><code>${esc(run.run_id)}</code></dd><dt>Outcome</dt><dd>${esc(run.outcome)}</dd><dt>Completed</dt><dd>${esc(date(run.completed_at))}</dd><dt>Execution</dt><dd>${seconds(run.execution_sec)}</dd><dt>Queue</dt><dd>${seconds(run.queue_sec)}</dd><dt>Publication</dt><dd>${esc(Object.entries(object(run.publication)).map(([sink,value])=>`${sink}: ${object(value).status||value}`).join(' · ')||'none recorded')}</dd></dl>
+      ${verification(run)}
+      <p>Timeline: ${array(run.timeline).map(step=>`${esc(step.status)}/${esc(step.phase)} ${esc(date(step.at))}`).join(' → ')||'not recorded'}</p>
+      ${array(run.observations).length?`<p>After the run: ${array(run.observations).map(item=>`${signal(item.state,item.attention?'error':item.state)} ${esc(item.kind)} ${esc(date(item.at))}${item.detail?` · ${esc(item.detail)}`:''}${safeUrl(item.url)?` <a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">↗</a>`:''}`).join(' → ')}</p>`:''}
+      <div class="cluster">${array(run.artifacts).filter(item=>String(item.url||'').startsWith('/api/artifacts?')).map(item=>`<button class="btn btn-small" type="button" data-artifact-url="${esc(item.url)}" data-artifact-name="${esc(item.name)}">${esc(item.name)}</button>`).join('')||'<span class="muted">No sanitized artifacts.</span>'}${positive(run.ticket)?`<button class="btn btn-small" type="button" data-case="${run.ticket}">Inspect #${run.ticket}</button>`:''}</div></details>`;
+    return `${head}${signal(ops.error?'refresh failed':'snapshot ready',ops.error?'error':'ready')}</header>${ops.error?`<p class="error">Retaining the previous snapshot. Refresh failed: ${esc(ops.error)}</p>`:''}
+      <section class="metric-grid"><article><span>Success rate</span><strong>${rate}</strong><small>${esc(metrics.successes??0)} of ${esc(metrics.success_denominator??0)} succeeded or failed</small></article><article><span>Mean execution</span><strong>${seconds(metrics.mean_execution_sec)}</strong><small>${esc(metrics.duration_denominator??0)} timed attempts</small></article><article><span>Mean queue</span><strong>${seconds(metrics.mean_queue_sec)}</strong><small>${esc(metrics.queue_scope||'')}</small></article><article><span>Shown</span><strong>${esc(history.shown??runs.length)} of ${esc(history.total??runs.length)}</strong><small>${history.truncated?'older resolved attempts truncated':'complete retained history'}</small></article></section>
+      <section class="section-block"><header><h2>Targets</h2></header><div class="ops-table-wrap"><table class="ops-table"><thead><tr><th>Target</th><th>Last succeeded commit</th><th>Unresolved failures</th><th>Unfinished</th><th>Runner lock</th></tr></thead><tbody>${array(data.targets).map(target=>`<tr><th>${esc(target.target)}</th><td><code>${esc(String(target.last_succeeded_commit||'none').slice(0,12))}</code></td><td>${esc(target.unresolved_failures)}</td><td>${esc(target.unfinished)}</td><td>${target.runner_lock_held===true?'held':target.runner_lock_held===false?'not held':'unknown'}</td></tr>`).join('')||'<tr><td colspan="5">No deployment targets recorded.</td></tr>'}</tbody></table></div></section>
+      <section class="section-block"><header><h2>Attempts</h2><div class="cluster">${select('target','Target',targets)}${select('status','Status',statuses)}</div></header><div class="run-list">${shown.map(row).join('')||'<p class="empty">No attempts match these filters.</p>'}</div><p class="muted">An interrupted run is an ownership observation (its target lock is free), not proof that every subprocess is gone. Use <code>factory inspect --live</code> before recovery.</p></section>`;
+  }
+
+  async function openArtifact(button) {
+    const repo=currentRepo(),url=button.dataset.artifactUrl;
+    if(!repo||!url.startsWith('/api/artifacts?'))return;
+    const dialog=document.createElement('dialog');
+    dialog.className='decision-dialog';
+    dialog.innerHTML=`<div class="decision-panel"><header class="decision-head"><div><p class="eyebrow">Sanitized artifact</p><h2>${esc(button.dataset.artifactName)}</h2></div><form method="dialog"><button class="btn">Close</button></form></header><div class="decision-body"><pre class="raw">Loading…</pre></div></div>`;
+    dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+    document.body.append(dialog);
+    dialog.showModal();
+    const pre=dialog.querySelector('pre');
+    try{pre.textContent=await WorkspaceAPI.text(`${url}&${new URLSearchParams({repository:repo.slug})}`);}
+    catch(error){pre.textContent=error.message||String(error);pre.classList.add('error');}
+  }
+
   function system(repo) {
     const ops=opsRecord(repo),snapshot=ops.data,collection=object(repo.collection);
     if((ops.status==='loading'&&!snapshot)||snapshot?.status==='building')return `<header class="workspace-head"><div><p class="eyebrow">System</p><h1>Ops snapshot is building.</h1><p>The cold-start response is loading evidence, not empty or healthy state.</p></div></header><pre class="raw">${esc(JSON.stringify(snapshot?.collection||collection,null,2))}</pre>`;
@@ -298,6 +339,7 @@
     if(view==='Attention')return attention(repo);
     if(view==='Flow')return flowView(repo);
     if(view==='Success')return success(repo);
+    if(view==='Deployments')return deployments(repo);
     if(view==='System')return system(repo);
     if(view==='Settings')return WorkspaceSettings.markup(repo.slug);
     if(['Codebase','Atlas'].includes(view))return `<header class="workspace-head"><div><p class="eyebrow">Native tool</p><h1>${view}</h1><p>${view==='Codebase'?'Commit-pinned cached structure, comparison, symbols, and relationships.':'Factory reference diagrams and printed, commit-pinned source evidence.'}</p></div></header><div data-native-tool="${view.toLowerCase()}"></div>`;
@@ -306,7 +348,7 @@
 
   function render() {
     const current=route(),repo=currentRepo();
-    if(repo&&['Attention','System'].includes(current.view))ensureOps(repo);
+    if(repo&&['Attention','Deployments','System'].includes(current.view))ensureOps(repo);
     const viewKey=`${repo?.slug}:${current.view}`;
     const moving=current.view==='Flow'&&state.viewKey===viewKey&&preferences.motion&&!reducedMotion.matches&&document.visibilityState==='visible';
     const positions=new Map(moving?[...app.querySelectorAll('[data-flow-case]')].map(node=>[node.dataset.flowCase,node.dataset.stage]):[]);
@@ -314,7 +356,7 @@
     const choices=new Map([...app.querySelectorAll('[data-action-choice]')].filter(node=>node.value!=='').map(node=>[node.dataset.actionChoice,JSON.stringify(JSON.parse(node.dataset.actionOptions)[Number(node.value)])]));
     applyTheme(repo);
     const focused=document.activeElement;
-    const focusAttribute=app.contains(focused)?['data-action-choice','data-case','data-view','data-repository','data-theme','data-chat','data-refresh','data-palette','data-prepare-action'].find(name=>focused.hasAttribute(name)):null;
+    const focusAttribute=app.contains(focused)?['data-action-choice','data-case','data-view','data-repository','data-theme','data-chat','data-refresh','data-palette','data-prepare-action','data-deploy-filter'].find(name=>focused.hasAttribute(name)):null;
     const focusSelector=focusAttribute?`[${focusAttribute}="${CSS.escape(focused.getAttribute(focusAttribute))}"]`:null;
     const previousSettings=app.querySelector('.workspace-settings');
     const keepSettings=Boolean(repo&&previousSettings&&current.view==='Settings'&&previousSettings.querySelector('[data-real-settings]')?.dataset.repository===repo.slug);
@@ -511,11 +553,12 @@
   document.addEventListener('click',event=>{
     const view=event.target.closest('[data-view]');if(view){state.palette=false;renderPalette();setRoute({view:view.dataset.view,case:null});requestAnimationFrame(()=>document.querySelector('#main')?.focus({preventScroll:true}));return;}
     const caseTarget=event.target.closest('[data-case]');if(caseTarget){state.palette=false;renderPalette();setRoute({case:caseTarget.dataset.case});return;}
-    if(event.target.closest('[data-refresh]')){fetchData(true);if(['Attention','System'].includes(route().view))ensureOps(currentRepo(),true);return;}
+    if(event.target.closest('[data-refresh]')){fetchData(true);if(['Attention','Deployments','System'].includes(route().view))ensureOps(currentRepo(),true);return;}
     if(event.target.closest('[data-chat]')){if(state.chatOpen)closeChat();else{state.chatOpen=true;render();}return;}
     const chatCase=event.target.closest('[data-chat-case]');if(chatCase){state.chatOpen=true;state.chatCase=positive(chatCase.dataset.chatCase);setRoute({case:null});renderChat();return;}
     if(event.target.closest('[data-close-chat]')){closeChat();return;}
     if(event.target.closest('[data-close-drawer]')){closeDrawer();return;}
+    const artifact=event.target.closest('[data-artifact-url]');if(artifact){openArtifact(artifact);return;}
     if(event.target.closest('[data-palette]')){openPalette();return;}
     if(event.target.matches('[data-close-palette]')){closePalette();return;}
     const prepare=event.target.closest('[data-prepare-action]');if(prepare){openAction(prepare);return;}
@@ -525,7 +568,8 @@
   document.addEventListener('change',event=>{
     if(event.target.matches('[data-repository]')){state.chatCase=null;setRoute({repository:event.target.value,case:null});fetchData(false);return;}
     if(event.target.matches('[data-theme]')){state.themePreference=event.target.value;try{localStorage.setItem('factory-theme',event.target.value);}catch{}applyTheme(currentRepo());return;}
-    if(event.target.matches('[data-chat-context]')){state.chatCase=positive(event.target.value);renderChat();}
+    if(event.target.matches('[data-chat-context]')){state.chatCase=positive(event.target.value);renderChat();return;}
+    if(event.target.matches('[data-deploy-filter]')){state.deployFilter[event.target.dataset.deployFilter]=event.target.value;render();}
   });
   document.addEventListener('input',event=>{if(event.target.matches('#fm-question'))chatSession(currentRepo().slug,state.chatCase).draft=event.target.value;if(event.target.matches('[data-palette-search]')){state.paletteQuery=event.target.value;renderPalette();}});
   document.addEventListener('submit',event=>{if(event.target.matches('[data-chat-form]')){event.preventDefault();submitChat();}});
