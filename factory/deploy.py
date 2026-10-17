@@ -1232,10 +1232,21 @@ def observations_by_run(rows: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def _observation_kind(row: dict, index: int) -> object:
+    """Grouping key for a recorded observation. The writer only stores string
+    kinds; a malformed (hand-edited) row stands alone instead of raising."""
+    kind = row.get("kind")
+    return kind if isinstance(kind, str) else ("malformed", index)
+
+
 def observation_attention(rows: list[dict]) -> bool:
-    """True when the latest recorded observation of any kind asks for a human."""
-    latest = {row.get("kind"): row for row in rows}
-    return any(row.get("attention") is True for row in latest.values())
+    """True when the latest recorded observation of any kind asks for a human.
+
+    The writer stores `attention` as a bool. Any other value that is not absent
+    or false (a hand-edited "true", say) counts as attention: verification fails
+    closed rather than reading a malformed row as healthy."""
+    latest = {_observation_kind(row, index): row for index, row in enumerate(rows)}
+    return any(row.get("attention") not in (None, False) for row in latest.values())
 
 
 def runs_to_observe(state: TargetState, observed: dict[str, list[dict]], now: float | None = None) -> list[DeployRun]:
@@ -1259,14 +1270,16 @@ def runs_to_observe(state: TargetState, observed: dict[str, list[dict]], now: fl
 
 def record_observations(run: DeployRun, found: Any, observed: list[dict], events_path: Path | None = None,
                         secrets: list[str] | None = None) -> tuple[list[dict], list[str]]:
-    """Append each valid observation whose (kind, state) differs from the last one
-    recorded for its kind on this run. Returns the rows written and a reason for
-    each observation `clean_observations` dropped."""
+    """Append each valid observation whose (kind, state, attention) differs from
+    the last one recorded for its kind on this run, so an attention-only change
+    (an open PR that has gone stale) is recorded too. Returns the rows written and
+    a reason for each observation `clean_observations` dropped."""
     clean, dropped = clean_observations(found, secrets)
-    last = {row.get("kind"): row.get("state") for row in observed}
+    last = {row["kind"]: (row.get("state"), row.get("attention") is True)
+            for row in observed if isinstance(row.get("kind"), str)}
     written = []
     for item in clean:
-        if last.get(item["kind"]) == item["state"]:
+        if last.get(item["kind"]) == (item["state"], item["attention"]):
             continue
         row = {"event": "deploy_observation", "run_id": run.run_id, "target": run.target, "ticket": run.ticket, **item}
         if events_path is not None:
@@ -1275,7 +1288,7 @@ def record_observations(run: DeployRun, found: Any, observed: list[dict], events
             from factory import dispatch
             dispatch.record(row.pop("event"), **row)
             row["event"] = "deploy_observation"
-        last[item["kind"]] = item["state"]
+        last[item["kind"]] = (item["state"], item["attention"])
         written.append(row)
     return written, dropped
 

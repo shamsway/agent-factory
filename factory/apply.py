@@ -372,8 +372,10 @@ def observe_recent_runs(target: config.DeployTarget) -> None:
 
     try:
         adapter = deploy.get_adapter(target.adapter)
-        tstate = deploy.get_target_state(target=target.name, events_path=dispatch.EVENTS)
-        observed = deploy.observations_by_run(lifecycle.read_events(dispatch.EVENTS))
+        # One journal read serves both the target replay and the observations.
+        rows = lifecycle.read_events(dispatch.EVENTS)
+        tstate = deploy.replay_rows(rows).get(target.name, deploy.TargetState(target=target.name))
+        observed = deploy.observations_by_run(rows)
         pending = deploy.runs_to_observe(tstate, observed)
         env = apply_env()
     except Exception as exc:  # noqa: BLE001 - observations are optional evidence

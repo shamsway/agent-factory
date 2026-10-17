@@ -1793,6 +1793,41 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual((shown["status"], shown["needs_attention"], view["attention"]), ("succeeded", True, 1))
         self.assertEqual([o["state"] for o in shown["observations"]], ["merged", "failed"])
 
+    def test_an_attention_only_change_is_recorded(self) -> None:
+        fresh = {"kind": "platform_pr", "state": "open"}
+        stale = {"kind": "platform_pr", "state": "open", "detail": "open for 14 days", "attention": True}
+        self.answers = [[fresh], [fresh], [stale], [stale], [fresh]]
+        for _ in range(5):
+            self.apply_pass()
+        self.assertEqual([(o["state"], o["attention"]) for o in self.observations()],
+                         [("open", False), ("open", True), ("open", False)])
+        self.assertFalse(deploy.observation_attention(self.observations()))  # cleared by the latest
+
+    def test_malformed_recorded_rows_never_break_attention(self) -> None:
+        healthy = {"kind": "platform_pr", "state": "merged", "attention": False}
+        # Hand-edited rows: an unhashable kind must not raise, and a non-bool
+        # attention value fails closed (counts as attention).
+        self.assertFalse(deploy.observation_attention([healthy, {"kind": ["x"], "state": "?"}]))
+        self.assertTrue(deploy.observation_attention([healthy, {"kind": ["x"], "attention": "true"}]))
+        self.assertTrue(deploy.observation_attention([{"kind": "rollout", "attention": "yes"}]))
+        self.assertFalse(deploy.observation_attention([{"kind": "rollout", "attention": True},
+                                                       {"kind": "rollout", "attention": False}]))
+        recorded = [{"kind": ["x"], "state": "?"}, healthy]
+        written, _ = deploy.record_observations(self.run, [dict(healthy)], recorded, events_path=self.events)
+        self.assertEqual(written, [])  # the malformed row is skipped; the matching one dedupes
+
+    def test_the_observe_pass_reads_the_journal_once(self) -> None:
+        self.answers = [[{"kind": "platform_pr", "state": "merged"}]]
+        target = self.cfg.targets["app"]
+        with mock.patch.object(lifecycle, "read_events", wraps=lifecycle.read_events) as reads, \
+             mock.patch.object(deploy, "get_target_state", wraps=deploy.get_target_state) as states, \
+             mock.patch.object(apply, "apply_env", return_value={}), \
+             mock.patch.object(apply, "log"):
+            apply.observe_recent_runs(target)
+        self.assertEqual(reads.call_count, 1)
+        states.assert_not_called()
+        self.assertEqual([o["state"] for o in self.observations()], ["merged"])
+
     def test_adapter_errors_are_logged_and_never_stop_the_pass(self) -> None:
         self.answers = ["boom"]
         lines = self.apply_pass()
