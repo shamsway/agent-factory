@@ -274,6 +274,7 @@ def apply_escalate(
     target: str = "default",
     dry_run: bool = False,
     existing_run_id: str | None = None,
+    phase: str = "",
 ) -> None:
     """Post-merge escalation: the tracking issue is already closed, so this
     only comments + records an event rather than touching labels the way
@@ -302,6 +303,7 @@ def apply_escalate(
             pr=pr,
             error=reason,
             version=deploy.CONTRACT_VERSION,
+            phase=phase,
         )
         deploy.record_deploy_run(run)
         run_id = run.run_id
@@ -328,6 +330,20 @@ def apply_escalate(
     except Exception as exc:  # noqa: BLE001 - notifications are best-effort after escalation is recorded
         log(f"#{n}: notification failed: {exc}")
     log(f"#{n}: apply escalated ({reason})")
+
+
+def supersede(candidate: dict, newest: dict, target: str) -> None:
+    """Latest-wins: record an older candidate SUPERSEDED and tell its ticket why."""
+    run = deploy.supersede_candidate(target, candidate, newest, events_path=dispatch.EVENTS)
+    log(f"#{candidate['ticket']}: superseded on `{target}` by #{newest['ticket']} ({run.run_id})")
+    body = (f"`factory apply` did not deploy this revision on its own: target `{target}` deploys only "
+            f"the newest approved revision, #{newest['ticket']} ({str(newest.get('commit', ''))[:8]}), "
+            "which includes this change.")
+    try:
+        dispatch.run(["gh", "issue", "comment", str(candidate["ticket"]), "--repo", cfg.repo, "--body", body],
+                     check=False)
+    except Exception as exc:  # noqa: BLE001 - the recorded supersession is authoritative
+        log(f"#{candidate['ticket']}: notification failed: {exc}")
 
 
 def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: deploy.DeployAdapter | None = None) -> bool:
@@ -660,6 +676,7 @@ def main(argv: list[str]) -> int:
                 deploy.release_lock(t_fd)
                 continue
 
+            mode = target.supersession or cfg.apply_supersession
             try:
                 tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
                 if tstate.has_interrupted_run:
@@ -674,7 +691,7 @@ def main(argv: list[str]) -> int:
                     log(f"target `{target_name}`: {rec_msg}")
                     tstate = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
 
-                if tstate.unacknowledged_failed_tickets and cfg.apply_supersession == "sequential":
+                if tstate.unacknowledged_failed_tickets and mode in deploy.HALTING_MODES:
                     log(f"target `{target_name}`: stopped (unreconciled failed tickets: {sorted(tstate.unacknowledged_failed_tickets)})")
                     has_errors = True
                     continue
@@ -693,7 +710,7 @@ def main(argv: list[str]) -> int:
                     baseline=cfg.apply_baseline,
                     events_path=dispatch.EVENTS,
                     touches_fn=check_touch,
-                    supersession=cfg.apply_supersession,
+                    supersession=mode,
                     repo=cfg.repo,
                 )
 
@@ -709,15 +726,23 @@ def main(argv: list[str]) -> int:
                 if not candidates:
                     continue
 
+                newest, older = None, []
+                if mode == "latest":
+                    newest, older, held = deploy.latest_wins(candidates)
+                    for waiting in held[1:]:
+                        log(f"#{waiting['ticket']}: held on `{target_name}` behind unauthorized revision #{held[0]['ticket']}")
+                    candidates = ([newest] if newest else []) + held[:1]
+
                 any_candidates_found = True
                 for candidate in candidates:
                     if "unauthorized_reason" in candidate:
                         reason = candidate["unauthorized_reason"]
                         log(f"#{candidate['ticket']}: {'would reject' if args.dry_run else 'apply rejected'} ({reason})")
                         if not args.dry_run:
-                            apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name, dry_run=args.dry_run)
+                            apply_escalate(candidate["ticket"], candidate["pr"], reason, commit=candidate["commit"], target=target_name,
+                                           dry_run=args.dry_run, phase=deploy.REJECTED_PHASE)
                         has_errors = True
-                        if cfg.apply_supersession == "sequential":
+                        if mode == "sequential":
                             log(f"target `{target_name}`: stopping further applies after unauthorized revision #{candidate['ticket']}")
                             break
                         continue
@@ -730,9 +755,18 @@ def main(argv: list[str]) -> int:
                         is_failed = (success is False)
                     if is_failed:
                         has_errors = True
-                        if cfg.apply_supersession == "sequential":
+                        if mode == "sequential":
                             log(f"target `{target_name}`: stopping further applies after failure of #{candidate['ticket']}")
                             break
+                    elif candidate is newest:
+                        # Older tickets are superseded only once the revision that
+                        # includes them has actually deployed; a failed newest run
+                        # leaves them pending.
+                        for stale in older:
+                            if args.dry_run:
+                                log(f"#{stale['ticket']}: would supersede once #{newest['ticket']} succeeds")
+                            else:
+                                supersede(stale, newest, target_name)
             finally:
                 deploy.release_lock(b_fd)
                 deploy.release_lock(t_fd)

@@ -50,6 +50,14 @@ TERMINAL_STATUSES = frozenset(
 )
 
 
+# Phase recorded on the FAILED run of a revision rejected as unauthorized.
+REJECTED_PHASE = "rejected"
+# Supersession modes that stop a target on any unacknowledged failed run. In
+# latest mode a failed newest run must not let an older revision deploy behind
+# it, and a rejected revision is contained in every later one.
+HALTING_MODES = frozenset({"sequential", "latest"})
+
+
 @dataclass
 class DeployRun:
     """Versioned result contract for a deployment run attempt."""
@@ -765,7 +773,7 @@ def select_candidates_for_target(
     tstate = get_target_state(target=target_name, events_path=events_path)
     if tstate.has_interrupted_run:
         return [], []
-    if supersession == "sequential" and tstate.unacknowledged_failed_tickets:
+    if supersession in HALTING_MODES and tstate.unacknowledged_failed_tickets:
         return [], []
 
     check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root))
@@ -1121,6 +1129,50 @@ class FakeDeployAdapter(DeployAdapter):
             )
             return True, "interrupted run reconciled automatically by fake adapter"
         return False, f"fake adapter requires operator reconciliation for {interrupted_run.run_id}"
+
+
+def latest_wins(candidates: list[dict]) -> tuple[dict | None, list[dict], list[dict]]:
+    """Split topologically ordered candidates into (newest, older, held).
+
+    The walk stops at the first unauthorized candidate: every later revision
+    contains its unapproved change, so none of them may deploy or supersede
+    anything. `newest` is the last authorized candidate before that point and
+    `older` the authorized ones it would supersede once it succeeds. `held`
+    starts with the unauthorized candidate (to escalate) and keeps everything
+    after it pending."""
+    for index, candidate in enumerate(candidates):
+        if "unauthorized_reason" in candidate:
+            approved, held = candidates[:index], candidates[index:]
+            break
+    else:
+        approved, held = candidates, []
+    if not approved:
+        return None, [], held
+    return approved[-1], approved[:-1], held
+
+
+def supersede_candidate(target: str, candidate: dict, newest: dict, events_path: Path | None = None) -> DeployRun:
+    """Record an older pending candidate as SUPERSEDED without running it. The run is
+    terminal, so the candidate is never selected again."""
+    commit = candidate.get("commit", "")
+    attempt = next_attempt(target, int(candidate["ticket"]), commit, events_path=events_path)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    run = DeployRun(
+        run_id=f"deploy-{target}-{commit[:8] if commit else '0'}-{attempt}",
+        target=target,
+        commit=commit,
+        ticket=int(candidate["ticket"]),
+        attempt=attempt,
+        status=DeployStatus.SUPERSEDED,
+        started_at=now,
+        completed_at=now,
+        pr=candidate.get("pr"),
+        error=(f"superseded by #{newest['ticket']} ({str(newest.get('commit', ''))[:8]}), "
+               "a newer approved revision that includes it (latest-wins)"),
+        version=CONTRACT_VERSION,
+    )
+    record_deploy_run(run, events_path=events_path)
+    return run
 
 
 def reconcile_interrupted_run(
