@@ -2418,3 +2418,66 @@ class JournalRotationReplayTest(unittest.TestCase):
             self.assertGreaterEqual(len(list(Path(d).glob("events.jsonl.*.gz"))), 2)
             self.assertNotIn(b"deploy_", events.read_bytes())
             self.assertEqual(self.observed(events), before)
+
+
+class OperatorApprovalTest(unittest.TestCase):
+    """A host operator's recorded approval stands in for a second reviewer, for one exact head."""
+
+    def setUp(self) -> None:
+        from tests.test_factory import git
+
+        self.git = git
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = make_repo(Path(self.tmp.name), '[apply]\nenabled = true\ndir = "terraform"\n')
+        self.cfg = config.load(self.repo)
+        dispatch.configure(self.cfg)
+        apply.configure(self.cfg)
+        self.cfg.factory.mkdir(parents=True, exist_ok=True)
+        (self.repo / "terraform").mkdir()
+        (self.repo / "terraform" / "a.tf").write_text("# A\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "A")
+        self.commit = git(self.repo, "rev-parse", "HEAD")
+        # Merged by its author with no review: the case the operator approval exists for.
+        self.pr = {"pr": 30, "ticket": 30, "commit": self.commit, "head_commit": self.commit,
+                   "reviewDecision": "REVIEW_REQUIRED", "latestReviews": []}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def select(self):
+        return deploy.select_candidates_for_target(
+            target_name="default", target_dir="terraform", all_prs=[dict(self.pr)], root=self.repo,
+            events_path=dispatch.EVENTS, fetch_evidence_fn=lambda pr: None)
+
+    def test_unreviewed_merge_is_unauthorized_until_the_operator_approves_its_head(self) -> None:
+        (candidate,), _ = self.select()
+        self.assertIn("unauthorized_reason", candidate)
+
+        deploy.record_operator_approval(30, "f" * 40, "e" * 40, "alice", "other head", events_path=dispatch.EVENTS)
+        (candidate,), _ = self.select()
+        self.assertIn("unauthorized_reason", candidate, "an approval of a different head does not count")
+
+        deploy.record_operator_approval(30, self.commit, "e" * 40, "alice", "no second reviewer during testing",
+                                        events_path=dispatch.EVENTS)
+        (candidate,), _ = self.select()
+        self.assertNotIn("unauthorized_reason", candidate)
+        self.assertEqual(candidate["operator_approval"]["operator"], "alice")
+        self.assertEqual(candidate["operator_approval"]["reason"], "no second reviewer during testing")
+
+    def test_cli_records_only_merged_revisions_with_a_reason(self) -> None:
+        merged = {"state": "MERGED", "headRefOid": self.commit, "mergeCommit": {"oid": "e" * 40}}
+        with mock.patch.object(dispatch, "gh_json", return_value=merged), \
+             mock.patch.dict(os.environ, {"USER": "alice"}):
+            self.assertEqual(apply.main(["--authorize-revision", "30"]), 1)  # no reason
+            self.assertEqual(apply.main(["--authorize-revision", "30", "--reason", "r", "--dry-run"]), 0)
+            self.assertEqual(deploy.operator_approvals(lifecycle.read_events(dispatch.EVENTS)), {})
+            self.assertEqual(apply.main(["--authorize-revision", "30", "--reason", "testing phase"]), 0)
+        row = deploy.operator_approvals(lifecycle.read_events(dispatch.EVENTS))[30][self.commit]
+        self.assertEqual((row["operator"], row["reason"], row["merge_commit"]), ("alice", "testing phase", "e" * 40))
+
+        with mock.patch.object(dispatch, "gh_json", return_value={**merged, "state": "OPEN"}):
+            self.assertEqual(apply.main(["--authorize-revision", "31", "--reason", "r"]), 1)
+        with mock.patch.object(dispatch, "gh_json", side_effect=RuntimeError("gh down")):
+            self.assertEqual(apply.main(["--authorize-revision", "32", "--reason", "r"]), 1)
+        self.assertEqual(set(deploy.operator_approvals(lifecycle.read_events(dispatch.EVENTS))), {30})

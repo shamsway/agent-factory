@@ -402,6 +402,31 @@ A direct commit was pushed to `main` bypassing PR review:
 3. Or revert the unapproved commit on `main`.
 
 
+### 4. No second reviewer is available
+
+**Symptom:**
+A PR was merged by its author with no approving review on its head (for example, a
+one-person repo during a testing phase). Apply rejects it:
+```
+[apply] #30: apply rejected (reviewDecision is 'REVIEW_REQUIRED', expected APPROVED)
+```
+
+**Recovery Procedure:**
+On the Factory host, the operator records an approval of that exact merged revision:
+```bash
+factory apply --authorize-revision 30 --reason "no second reviewer available during canary testing"
+```
+- Only a merged PR can be approved. The approval is bound to its merged head commit,
+  so a later push to the same PR is not covered.
+- The `deploy_operator_approval` journal row records who ran the command (`$USER`), when
+  and why. The next pass logs `authorized by operator approval (…), not a second reviewer`
+  before deploying.
+- This replaces the second key with the host operator's explicit, per-revision
+  decision. It never applies to other PRs and isn't a config setting an app repo can
+  turn on. If the revision was already rejected, acknowledge that failed run with
+  `--acknowledge-failure` so the target resumes. A latest-mode target won't retry a
+  revision that already reached a terminal state.
+
 ## Deployment history in the workspace
 
 The workspace **Deployments** view (`/?view=deployments`, per registered repository) projects all recorded deployment attempts independently

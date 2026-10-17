@@ -582,6 +582,33 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         adapter.cleanup(ctx)
 
 
+def authorize_revision(pr: int, reason: str | None, dry_run: bool) -> int:
+    """Record an operator approval for one merged PR, bound to its merged head."""
+    if not (reason or "").strip():
+        log("error: --authorize-revision needs --reason")
+        return 1
+    try:
+        args = ["pr", "view", str(pr), "--json", "state,headRefOid,mergeCommit"]
+        if cfg.repo:
+            args[3:3] = ["--repo", cfg.repo]
+        data = dispatch.gh_json(args)
+    except Exception as exc:  # noqa: BLE001 - any lookup failure refuses the approval
+        log(f"error: could not read PR #{pr} ({type(exc).__name__})")
+        return 1
+    head = str((data or {}).get("headRefOid") or "")
+    merge = str(((data or {}).get("mergeCommit") or {}).get("oid") or "")
+    if (data or {}).get("state") != "MERGED" or not re.fullmatch(r"[0-9a-f]{40}", head):
+        log(f"error: PR #{pr} is not merged with a known head; only a merged revision can be approved")
+        return 1
+    operator = os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+    if dry_run:
+        log(f"would record operator approval of PR #{pr} head {head[:12]} by {operator}")
+        return 0
+    deploy.record_operator_approval(pr, head, merge, operator, reason.strip(), events_path=dispatch.EVENTS)
+    log(f"recorded operator approval of PR #{pr} head {head[:12]} by {operator}; the next apply pass may deploy it")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory apply",
@@ -594,8 +621,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--reconcile-note", default="manual operator reconciliation", help="reconciliation explanation")
     parser.add_argument("--acknowledge-failure", metavar="TICKET_OR_RUN", help="acknowledge a failed run or ticket to authorize repair PRs")
     parser.add_argument("--target", help="optional target name to limit apply or reconciliation")
+    parser.add_argument("--authorize-revision", metavar="PR", type=int,
+                        help="record the host operator's approval of a merged PR's exact head, for when no "
+                             "second reviewer is available; the next pass deploys it if it is a candidate")
+    parser.add_argument("--reason", help="why the operator approves (required with --authorize-revision)")
     args = parser.parse_args(argv)
     configure(config.load())
+
+    if args.authorize_revision is not None:
+        return authorize_revision(args.authorize_revision, args.reason, args.dry_run)
 
     if args.acknowledge_failure:
         target_name = args.target or "default"
@@ -825,6 +859,9 @@ def main(argv: list[str]) -> int:
                             break
                         continue
 
+                    if approval := candidate.get("operator_approval"):
+                        log(f"#{candidate['ticket']}: authorized by operator approval "
+                            f"({approval.get('operator')}: {approval.get('reason')}), not a second reviewer")
                     success = apply_one(candidate, args.dry_run, target=target_name)
                     if not args.dry_run:
                         latest_state = deploy.get_target_state(target=target_name, events_path=dispatch.EVENTS)
