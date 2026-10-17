@@ -318,7 +318,9 @@ def frontier(label: str = LABEL_AGENT) -> list[dict]:
             log(f"#{n}: skipped (assigned)")
             continue
         if any(label.get("name") == LABEL_HUMAN for label in issue.get("labels", [])):
-            log(f"#{n}: skipped (escalated to a human)")
+            # A lane label added while ready-for-human remains does not release the ticket;
+            # the human (or a manager decision) must also remove ready-for-human.
+            log(f"#{n}: skipped (still {LABEL_HUMAN}; remove it to release the ticket to {label})")
             continue
         blockers = open_blockers(n, issue.get("body", ""))
         if blockers:
@@ -895,9 +897,16 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "") -> Non
     log(f"#{n}: escalating to human ({reason})")
     wt = FACTORY / f"wt-{n}"
     packet, round_number = escalation_packet(n, reason, log_path, wt, extra=extra)
+    # Both lane labels are dropped below; record the lane so a manager RETRY can restore it.
+    try:
+        labels = {label.get("name") for label in gh_json(
+            ["issue", "view", str(n), "--repo", REPO, "--json", "labels"]).get("labels", [])}
+    except Exception:  # noqa: BLE001 - an unreadable issue escalates from the agent lane
+        labels = set()
     record(
         "escalate", ticket=n, reason=reason, log=str(log_path) if log_path else None,
         packet=str(packet), round=round_number,
+        lane=LABEL_INVESTIGATE if LABEL_INVESTIGATE in labels else LABEL_AGENT,
     )
     run(
         [

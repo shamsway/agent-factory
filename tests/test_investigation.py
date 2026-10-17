@@ -40,12 +40,18 @@ class InvestigationLaneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
             dispatch.configure(config.load(repo))
-            with mock.patch.object(dispatch, "run") as run_mock:
+            labels = {"labels": [{"name": config.LABEL_INVESTIGATE}]}
+            with mock.patch.object(dispatch, "run") as run_mock, \
+                 mock.patch.object(dispatch, "gh_json", return_value=labels):
                 dispatch.escalate(7, "investigation produced no findings report", None)
             edit = next(c.args[0] for c in run_mock.call_args_list if c.args[0][:3] == ["gh", "issue", "edit"])
             removed = {edit[i + 1] for i, arg in enumerate(edit) if arg == "--remove-label"}
             self.assertEqual({config.LABEL_AGENT, config.LABEL_INVESTIGATE}, removed)
             self.assertEqual(config.LABEL_HUMAN, edit[edit.index("--add-label") + 1])
+            from factory import lifecycle
+
+            escalation = next(e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "escalate")
+            self.assertEqual(config.LABEL_INVESTIGATE, escalation["lane"])
 
     def test_escalated_investigation_is_not_offered_by_the_next_pass(self) -> None:
         from unittest import mock
