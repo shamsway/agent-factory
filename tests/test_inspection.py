@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import chdir, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -176,6 +176,27 @@ class InspectionTest(unittest.TestCase):
             rows = verify_secrets.adapter_rows(self.cfg, True)
         self.assertEqual(rows, [{"scope": "apply", "adapter": "fake", "key": "*", "status": "unavailable",
                                  "detail": "check failed"}])
+
+    def test_token_probes_run_with_a_throwaway_home_outside_the_checkout(self):
+        # gh writes state relative to cwd without HOME; that made dispatch refuse root_dirty.
+        with tempfile.TemporaryDirectory() as d:
+            stub = Path(d) / "bin"
+            stub.mkdir()
+            for tool in ("gh", "op"):
+                (stub / tool).write_text('#!/bin/sh\nmkdir -p "$HOME/.local/state" && touch "$HOME/.local/state/x" .stray\n'
+                                         'printf "%s %s" "$HOME" "$PWD" > "' + d + '/' + tool + '.seen"\necho "[]"\n')
+                (stub / tool).chmod(0o755)
+            cwd = Path(d) / "checkout"
+            cwd.mkdir()
+            with patch.dict(os.environ, {"PATH": f"{stub}:{os.environ['PATH']}"}), chdir(cwd):
+                verify_secrets.check_gh_token(SECRET)
+                verify_secrets.check_op_token(SECRET)
+            self.assertEqual(list(cwd.iterdir()), [])
+            for tool in ("gh", "op"):
+                home, pwd = (Path(d) / f"{tool}.seen").read_text().split()
+                self.assertEqual(home, pwd)
+                self.assertNotEqual(Path(home), Path.home())
+                self.assertFalse(Path(home).exists(), "throwaway HOME is removed")
 
     def test_op_rejection_does_not_print_provider_stderr(self):
         with patch.object(verify_secrets.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", SECRET)):

@@ -360,20 +360,30 @@ def leftover_plans(root: Path) -> list[Path]:
 
 
 def checkout_state(cfg: config.Config) -> tuple[bool, str]:
-    """Whether the main checkout is on the main branch with no tracked edits.
+    """Whether the main checkout is what the dispatcher will run from: on the main branch,
+    or detached at origin/<main> (`dispatch.pin_root` detaches it there every pass), with
+    no tracked or untracked changes outside `.factory/`.
 
-    Factory loads its config (targets, gates, verify policy) from this
-    working tree, so a feature branch or local edits silently change what
-    every pass runs with.
+    Factory loads its config (targets, gates, verify policy) from this working tree, and a
+    pass refuses a root with changes outside `.factory/` (`root_dirty`), as pin_root does.
     """
     branch = sh(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=cfg.root).stdout.strip()
-    edits = [line for line in sh(["git", "status", "--porcelain", "--untracked-files=no"], cwd=cfg.root).stdout.splitlines() if line]
+    head = sh(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=cfg.root).stdout.strip()
+    pinned = sh(["git", "rev-parse", "--verify", "--quiet", f"origin/{cfg.main}"], cwd=cfg.root).stdout.strip()
+    changed = [line[3:] for line in sh(["git", "status", "--porcelain", "--", ".", ":!.factory"],
+                                        cwd=cfg.root).stdout.splitlines() if line]
     problems = []
-    if branch != cfg.main:
-        problems.append(f"on {branch or 'a detached HEAD'}, not {cfg.main}: config is read from this working tree")
-    if edits:
-        problems.append(f"{len(edits)} tracked file(s) modified; move work in progress to another worktree")
-    return (not problems), ("; ".join(problems) if problems else f"on {cfg.main}, clean")
+    if not branch and head and head == pinned:
+        where = f"detached at origin/{cfg.main}"
+    elif branch == cfg.main:
+        where = f"on {cfg.main}"
+    else:
+        where = ""
+        problems.append(f"on {branch or 'a detached HEAD'}, not {cfg.main} or origin/{cfg.main}: config is read from this working tree")
+    if changed:
+        shown = ", ".join(changed[:5]) + (", ..." if len(changed) > 5 else "")
+        problems.append(f"{len(changed)} path(s) changed outside .factory/ ({shown}); dispatch refuses the pass (root_dirty)")
+    return (not problems), ("; ".join(problems) if problems else f"{where}, clean")
 
 
 def _incident_routing_checks(cfg, report):
