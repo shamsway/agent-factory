@@ -13,9 +13,28 @@ not explicitly expected.
     run = ["python", "-m", "factory.tf_plan_check"]
     timeout = 600
 
-The binary plan holds every value the plan read, sensitive ones included,
-so it is written to a private (0700) temp directory, or to `--plan-out` when
-given, and deleted when the check ends, whatever the outcome (SHA-281).
+The binary plan holds every value the plan read, sensitive ones included.
+Cleanup boundary, honestly:
+
+- Default: the plan goes in a fresh 0700 directory under `$TMPDIR`, removed on
+  return, on an exception and on SIGTERM/SIGINT/SIGHUP (the terraform child is
+  killed first). The gate gives an unwrapped check its own `$TMPDIR` and removes
+  it after the check, so a timeout's SIGKILL of the whole check leaves nothing; a
+  later gate removes the scratch of a gate that was itself killed. Inside
+  `scripts/bwrap-sandbox.sh` the check's /tmp is a private tmpfs that disappears
+  with the sandbox, SIGKILL included.
+- `--plan-out PATH` (relative to `--dir`): created 0600 in a directory created
+  0700, never through a symlink; removed on the same exits. A plan left there by
+  a killed run is removed, with a notice, before the next run of the check plans.
+- Not covered: SIGKILL of the check outside a gate (explicit path, or the default
+  directory outside the sandbox), and host crashes or power loss. `factory
+  doctor` reports what it can find within its bounded scan: legacy
+  `.factory/tfplan` files in the checkout and worktrees, and abandoned
+  `factory-tfplan-*`/`factory-check-*` directories in the system temp directory.
+
+Failure output is bounded and sanitized: terraform's error summaries and
+source locations, never its detail bodies (provider responses can carry
+secrets) or plan contents.
 
 Allow a specific destroy/replace by adding a line to the ticket body (the
 dispatcher writes the full ticket into `.factory-prompt.md` in the
@@ -29,8 +48,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -91,6 +112,38 @@ def run_plan(cwd: Path, planfile: Path, env: dict | None = None) -> subprocess.C
     )
 
 
+DIAG_LINES = 12
+DIAG_WIDTH = 200
+# terraform's human diagnostics: `Error: <summary>` (bare, or inside the `│` box)
+# and `on <file> line <n>` locations. Detail paragraphs are never echoed.
+DIAG_RE = re.compile(r"^[\s│╷╵|]*((?:Error|Warning): .*|on \S+ line \d+.*)$")
+
+
+def diagnostics(text: str) -> str:
+    """At most DIAG_LINES summary/location lines of terraform output, each clipped."""
+    kept = [m.group(1)[:DIAG_WIDTH] for line in (text or "").splitlines() if (m := DIAG_RE.match(line))]
+    more = f"\n... {len(kept) - DIAG_LINES} more" if len(kept) > DIAG_LINES else ""
+    return "\n".join(kept[:DIAG_LINES]) + more
+
+
+def failed(step: str, proc: subprocess.CompletedProcess) -> int:
+    print(f"tf-plan-safety: terraform {step} failed (exit {proc.returncode})")
+    summary = diagnostics(proc.stdout + "\n" + (proc.stderr or ""))
+    if summary:
+        print(summary)
+    print("(details withheld: terraform output can carry provider responses and planned values;"
+          " re-run it locally to see them)")
+    return proc.returncode or 1
+
+
+class Terminated(Exception):
+    """A termination signal arrived; unwinds through `finally` so the plan is removed."""
+
+
+def _terminate(signum, _frame) -> None:
+    raise Terminated(signum)
+
+
 def show_json(cwd: Path, planfile: Path) -> dict:
     proc = subprocess.run(
         ["terraform", "show", "-json", str(planfile)],
@@ -124,26 +177,59 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     cwd = Path(args.dir)
-    private = None if args.plan_out else Path(tempfile.mkdtemp(prefix="factory-tfplan-"))
-    planfile = private / "tfplan" if private else Path(args.plan_out)
-    if not private:
-        (cwd / planfile).parent.mkdir(parents=True, exist_ok=True)
+    previous = {sig: signal.signal(sig, _terminate) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    private = planfile = None
     try:
+        if args.plan_out:
+            planfile = Path(args.plan_out)
+            explicit_target(cwd / planfile)
+        else:
+            private = Path(tempfile.mkdtemp(prefix=f"factory-tfplan-{os.getpid()}-"))
+            planfile = private / "tfplan"
         return check(cwd, planfile, Path(args.ticket_file))
+    except Terminated as exc:
+        print(f"tf-plan-safety: terminated by signal {exc.args[0]}; plan removed")
+        return 128 + exc.args[0]
     finally:
         if private:
             shutil.rmtree(private, ignore_errors=True)
-        else:
-            (cwd / planfile).unlink(missing_ok=True)
+        elif planfile is not None:
+            target = cwd / planfile
+            if target.is_file() and not target.is_symlink():
+                target.unlink()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def explicit_target(path: Path) -> None:
+    """Make `--plan-out`'s directory (0700 when created here) and clear a plan a killed
+    run left there. Never follows a symlink at the path or creates through one."""
+    if path.is_symlink():
+        raise SystemExit(f"tf-plan-safety: --plan-out {path} is a symlink; refusing")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.exists():
+        if not path.is_file():
+            raise SystemExit(f"tf-plan-safety: --plan-out {path} is not a regular file; refusing")
+        path.unlink()
+        print(f"tf-plan-safety: removed a plan an interrupted earlier run left at {path}")
 
 
 def check(cwd: Path, planfile: Path, ticket_path: Path) -> int:
-    proc = run_plan(cwd, planfile)
+    umask = os.umask(0o077)  # the plan terraform writes is 0600, wherever it goes
+    try:
+        proc = run_plan(cwd, planfile)
+    finally:
+        os.umask(umask)
     if proc.returncode != 0:
-        print(proc.stdout + proc.stderr)
-        return proc.returncode
+        return failed("init/plan", proc)
 
-    plan = show_json(cwd, planfile)
+    try:
+        plan = show_json(cwd, planfile)
+    except subprocess.CalledProcessError as exc:
+        return failed("show", subprocess.CompletedProcess(exc.cmd, exc.returncode, exc.stdout or "", exc.stderr or ""))
+    except json.JSONDecodeError:
+        print("tf-plan-safety: terraform show -json output was not JSON (content withheld)")
+        return 1
     ticket_text = ticket_path.read_text() if ticket_path.exists() else ""
     changes = destructive_changes(plan)
     if not changes:

@@ -11,9 +11,12 @@ import fcntl
 import fnmatch
 import os
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 
 from factory import config, gitguard, lifecycle
@@ -36,7 +39,8 @@ def configure(c: Config) -> None:
     CHECK_TIMEOUT = cfg.check_timeout
 
 
-def timed(cmd: list[str], timeout: int | None = None, configured: bool = False) -> subprocess.CompletedProcess:
+def timed(cmd: list[str], timeout: int | None = None, configured: bool = False,
+          extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run a command with the per-check timeout (or `timeout` if given).
 
     Built-in checks are Factory's own git reads: they keep the Git paths the
@@ -54,6 +58,7 @@ def timed(cmd: list[str], timeout: int | None = None, configured: bool = False) 
     env = execution.env() if execution else dict(os.environ)
     env.pop(lifecycle.CONTEXT_ENV, None)
     env = gitguard.strip(env) if configured else {**env, **gitguard.HARDENED}
+    env.update(extra_env or {})
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
         env=env,
@@ -85,9 +90,62 @@ def timed(cmd: list[str], timeout: int | None = None, configured: bool = False) 
             execution.child_done(proc.pid)
 
 
+SCRATCH_PREFIX = "factory-check-"
+SWEEP_LIMIT = 4096  # temp-directory entries examined per gate run
+
+
+@contextmanager
+def scratch():
+    """A private (0700) `TMPDIR` for one unwrapped configured check, removed by the gate
+    after the check ends however it ends (a timeout SIGKILLs the check's whole process
+    group; the gate survives it). A wrapped check keeps the wrap's own /tmp instead:
+    this host directory may not be visible inside it, and bwrap-sandbox.sh's private
+    tmpfs already vanishes with the sandbox."""
+    if cfg.check_wrap:
+        yield {}
+        return
+    path = tempfile.mkdtemp(prefix=f"{SCRATCH_PREFIX}{os.getpid()}-")
+    try:
+        yield {"TMPDIR": path}
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def sweep_abandoned(directory: Path | None = None, limit: int = SWEEP_LIMIT) -> list[str]:
+    """Remove `factory-check-<pid>-*` scratch directories (ours, not symlinks) whose gate
+    process is gone: the leftovers of a gate killed mid-check. Examines at most `limit`
+    entries of the temp directory; a live or foreign pid is left alone."""
+    removed = []
+    directory = Path(directory or tempfile.gettempdir())
+    try:
+        entries = os.scandir(directory)
+    except OSError:
+        return removed
+    with entries:
+        for i, entry in enumerate(entries):
+            if i >= limit:
+                break
+            match = re.fullmatch(re.escape(SCRATCH_PREFIX) + r"(\d+)-[^/]+", entry.name)
+            if not match or entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                if entry.stat(follow_symlinks=False).st_uid != os.getuid():
+                    continue
+                os.kill(int(match.group(1)), 0)
+                continue  # still running (or a reused pid): leave it
+            except ProcessLookupError:
+                pass
+            except (OSError, PermissionError):
+                continue
+            shutil.rmtree(entry.path, ignore_errors=True)
+            removed.append(entry.name)
+    return removed
+
+
 def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
     """Run a configured check (inside the host `check_wrap`, if any); return (passed, combined output)."""
-    proc = timed(cfg.check_cmd(cmd, Path.cwd()), timeout, configured=True)
+    with scratch() as extra:
+        proc = timed(cfg.check_cmd(cmd, Path.cwd()), timeout, configured=True, extra_env=extra)
     execution = lifecycle.current()
     if execution and proc.returncode != 0 and execution.outcome == "completed":
         execution.outcome = "product_feedback"
@@ -290,6 +348,7 @@ def execute(args: argparse.Namespace, execution) -> int:
     global CHECK_TIMEOUT
     host = toolchain()
     execution.emit("toolchain", **host)
+    swept = sweep_abandoned()
     if args.base is None:
         args.base = f"origin/{cfg.main}"
     if args.check_timeout is not None:
@@ -364,6 +423,8 @@ def execute(args: argparse.Namespace, execution) -> int:
         "# Gate report" if args.tier == "attempt" else f"# Gate report ({args.tier} tier)", "", "## Host toolchain",
         f"ROCm: {host['rocm']}", f"Kernel: {host['kernel']}", f"amdgpu: {host['amdgpu']}", "",
     ]
+    if swept:
+        lines[-1:-1] = [f"Removed {len(swept)} check scratch dir(s) a killed earlier gate left behind."]
     for name, status, _ in results:
         lines.append(f"- {name}: {status}")
     for name, status, output in results:
