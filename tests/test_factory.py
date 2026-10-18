@@ -843,14 +843,26 @@ class HostConfigTest(unittest.TestCase):
             row = lambda: next(r for r in json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]
                                if r["label"] == "main checkout")
             self.assertEqual((row()["status"], row()["detail"]), ("PASS", "on main, clean"))
-            (repo / "scratch.txt").write_text("untracked files are fine\n")
+            (repo / ".factory").mkdir(exist_ok=True)
+            (repo / ".factory" / "scratch").write_text("factory state is fine\n")
             self.assertEqual(row()["status"], "PASS")
+            # dispatch.pin_root leaves the root detached at origin/main: that is the expected state.
+            git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            git(repo, "checkout", "-q", "--detach", "origin/main")
+            self.assertEqual((row()["status"], row()["detail"]), ("PASS", "detached at origin/main, clean"))
+            # Untracked files outside .factory/ make the pass refuse (root_dirty), so doctor warns.
+            (repo / ".local").mkdir()
+            (repo / ".local" / "device-id").write_text("x\n")
+            r = row()
+            self.assertEqual(r["status"], "WARN")
+            self.assertIn("1 path(s) changed outside .factory/ (.local/)", r["detail"])
+            self.assertIn("root_dirty", r["detail"])
             git(repo, "switch", "-q", "-c", "feature")
             (repo / "README.md").write_text("edited\n")
             r = row()
             self.assertEqual(r["status"], "WARN")
             self.assertIn("on feature, not main", r["detail"])
-            self.assertIn("1 tracked file(s) modified", r["detail"])
+            self.assertIn("2 path(s) changed outside .factory/", r["detail"])
 
     def test_doctor_expands_wrap_placeholders_before_lookup(self) -> None:
         host_file('[defaults.worker_wrap]\ncommand = ["{root}/wrap.sh", "--"]\n'

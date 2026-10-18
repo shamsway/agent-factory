@@ -19,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 
 from . import config
@@ -93,12 +94,21 @@ def sync_rows(cfg: config.Config, unit_env_fn=None) -> list[tuple[str, str, str]
     return rows
 
 
+def _probe(argv: list[str], name: str, token: str) -> subprocess.CompletedProcess:
+    """Run one token probe with only that token, PATH and a throwaway HOME. Without HOME,
+    gh writes its state (`.local/state/gh/device-id`) relative to the cwd -- the checkout
+    root, which dispatch then refuses as root_dirty -- and the operator's own gh/op
+    configuration must not stand in for the token under test anyway."""
+    with tempfile.TemporaryDirectory(prefix="factory-probe-") as home:
+        return subprocess.run(
+            argv, cwd=home,
+            env={name: token, "PATH": os.environ.get("PATH", ""), "HOME": home},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+
+
 def check_gh_token(token: str) -> str:
-    r = subprocess.run(
-        ["gh", "api", "-i", "user"],
-        env={"GH_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True, timeout=10, check=False,
-    )
+    r = _probe(["gh", "api", "-i", "user"], "GH_TOKEN", token)
     if r.returncode != 0:
         return "auth FAILED"
     m = re.search(r"^x-oauth-scopes:\s*(.*)$", r.stdout, re.IGNORECASE | re.MULTILINE)
@@ -106,11 +116,7 @@ def check_gh_token(token: str) -> str:
 
 
 def check_op_token(token: str) -> str:
-    r = subprocess.run(
-        ["op", "vault", "list", "--format=json"],
-        env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True, timeout=10, check=False,
-    )
+    r = _probe(["op", "vault", "list", "--format=json"], "OP_SERVICE_ACCOUNT_TOKEN", token)
     if r.returncode != 0:
         return "FAILED: authentication check rejected"
     try:
