@@ -81,9 +81,9 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # Only these tables/keys are taken from the host: a clone on another machine
 # must run the same gate, so gate checks, leak scan and upstream never come
 # from here. Everything else in the host file is left for other tools (District).
-# `worker_wrap` is host-only: a committed `[worker_wrap]` is refused, never merged.
+# `worker_wrap` and `check_wrap` are host-only: a committed table is refused, never merged.
 # `leak_scan.extra` is read from both and concatenated: host terms only add to the scan.
-HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "review", "manager", "install", "prices", "investigation", "publisher"})
+HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "review", "manager", "install", "prices", "investigation", "publisher"})
 # `apply.env` is credential-shaped like `install.env` -- host-owned so it
 # never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
 # are policy about this repo (does merging it trigger terraform apply, and
@@ -98,6 +98,7 @@ KNOWN_KEYS = {
                  "review_rounds", "cost_pattern", "signoff"),
     "workers": None,
     "worker_wrap": ("command",),
+    "check_wrap": ("command",),
     "review": ("command",),
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
     "gate": ("timeout", "lock", "check", "protected_paths"),
@@ -270,6 +271,8 @@ class Config:
     prices: dict[str, dict] = field(default_factory=dict)
     # Host-only argv prefix for every worker launch: a trusted operator executable, not a sandbox.
     worker_wrap: list[str] = field(default_factory=list)
+    # Host-only argv prefix for every configured `[[gate.check]]` run (built-in checks excluded).
+    check_wrap: list[str] = field(default_factory=list)
     reviewer: list[str] = field(default_factory=lambda: list(DEFAULT_REVIEWER))
     manager: list[str] | None = None
     manager_rounds: int = 1
@@ -329,6 +332,11 @@ class Config:
         argv = self.workers[self.worker_key(labels)]
         return expand([*self.worker_wrap, *argv], prompt=str(prompt), cwd=str(cwd),
                       root=str(self.root), repo=self.repo, home=str(Path.home()))
+
+    def check_cmd(self, argv: list[str], cwd: Path) -> list[str]:
+        """argv for one configured gate check: the host wrap (expanded) before the check's own argv."""
+        wrap = expand(self.check_wrap, cwd=str(cwd), root=str(self.root), repo=self.repo, home=str(Path.home()))
+        return [*wrap, *argv]
 
     def review_cmd(self, prompt: str) -> list[str]:
         return expand(self.reviewer, prompt=prompt)
@@ -586,8 +594,9 @@ def load(start: Path | None = None) -> Config:
             raise ConfigError("host publisher must be a table")
         if "investigation" in section and not isinstance(section["investigation"], dict):
             raise ConfigError("host investigation must be a table")
-        if "worker_wrap" in section and not isinstance(section["worker_wrap"], dict):
-            raise ConfigError(f"{host_config_path()}: worker_wrap must be a table")
+        for table in ("worker_wrap", "check_wrap"):
+            if table in section and not isinstance(section[table], dict):
+                raise ConfigError(f"{host_config_path()}: {table} must be a table")
     layered = merge(host_filter(host_sections[0]), host_filter(host_sections[1]))
     raw, raw_repo = merge(layered, raw), raw
     repo_t, dispatch, workers = raw.get("repo", {}), raw.get("dispatch", {}), raw.get("workers", {})
@@ -630,15 +639,16 @@ def load(start: Path | None = None) -> Config:
                 cfg.worker_usage[label] = usage_spec(label, entry["usage"])
             if when:
                 cfg.worker_when[label] = when
-    if "worker_wrap" in raw_repo:
-        raise ConfigError(f"{path}: [worker_wrap] is host-only; set it in {host_config_path()} "
-                          "[defaults.worker_wrap] or [repo.\"<slug>\".worker_wrap]")
-    wrap = raw.get("worker_wrap", {})
-    if "command" in wrap:
-        command = wrap["command"]
-        if not isinstance(command, list) or not command or any(not isinstance(a, str) for a in command) or not command[0]:
-            raise ConfigError("worker_wrap.command needs a non-empty argv array of strings")
-        cfg.worker_wrap = command
+    for table in ("worker_wrap", "check_wrap"):
+        if table in raw_repo:
+            raise ConfigError(f"{path}: [{table}] is host-only; set it in {host_config_path()} "
+                              f"[defaults.{table}] or [repo.\"<slug>\".{table}]")
+        wrap = raw.get(table, {})
+        if "command" in wrap:
+            command = wrap["command"]
+            if not isinstance(command, list) or not command or any(not isinstance(a, str) for a in command) or not command[0]:
+                raise ConfigError(f"{table}.command needs a non-empty argv array of strings")
+            setattr(cfg, table, command)
     if "command" in raw.get("review", {}):
         cfg.reviewer = list(raw["review"]["command"])
     cfg.manager, cfg.manager_model = manager_settings(manager)

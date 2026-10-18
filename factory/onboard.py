@@ -502,6 +502,8 @@ def doctor(argv: list[str]) -> int:
         report(which(argv_t[0]) is not None, f"worker `{label}`: {argv_t[0]}", on_path)
     if cfg.worker_wrap:
         report(which(cfg.worker_wrap[0]) is not None, f"worker wrap: {cfg.worker_wrap[0]}", on_path)
+    if cfg.check_wrap:
+        report(which(cfg.check_wrap[0]) is not None, f"check wrap: {cfg.check_wrap[0]}", on_path)
     report(which(cfg.reviewer[0]) is not None, f"reviewer: {cfg.reviewer[0]}", on_path)
     if not cfg.manager:
         report(None, "manager command", "[manager].command is unset; escalations get no automated diagnosis")

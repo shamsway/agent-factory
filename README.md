@@ -717,6 +717,41 @@ launch environment. A containing wrapper must expose the prompt (inside the
 worktree) and the linked worktree's common Git directory (under `{root}/.git`)
 at the same absolute paths.
 
+`[check_wrap]` is the same host-only hook for the gate: its `command` argv is
+prepended to every configured `[[gate.check]]` run (both tiers), with the same
+`{cwd}` (the worktree being gated), `{root}`, `{repo}` and `{home}`
+placeholders; the check's own argv is passed unexpanded after it. The built-in
+`conflict-markers`, `protected-paths` and `leak-scan` checks are Factory's own
+git reads and are not wrapped. Checks execute worker-written code (tests,
+`terraform plan` providers and `external` data sources), so a host that
+confines its worker should confine checks with the same wrapper; otherwise the
+gate is the way out of the worker's sandbox. Doctor reports whether the wrap
+executable is on the unit's PATH.
+
+```toml
+[defaults.check_wrap]
+command = ["/usr/local/bin/my-wrapper", "--worktree", "{cwd}"]
+```
+
+`scripts/bwrap-sandbox.sh` is a bubblewrap wrapper usable for both. It mounts
+the filesystem read-only and makes `$HOME` an empty tmpfs; it then exposes the
+worktree and the checkout's `.git` (writable, except `.git/config` and
+`.git/hooks`), the PATH entries under `$HOME`, git identity, and whatever the
+host passes with `--ro`, `--rw` or `--bind-at`. It hides the runtime-dir and
+container/VM sockets and drops agent sockets, `GH_TOKEN`, and any `--drop-env`
+names. bwrap's no_new_privs stops sudo. The network stays shared. Put a copy
+outside every worktree and pass the omp or agent state the worker needs:
+
+```toml
+[repo."owner/name".worker_wrap]
+command = ["{home}/.local/libexec/factory/bwrap-sandbox.sh", "--cwd", "{cwd}", "--root", "{root}",
+           "--bind-at", "{home}/.local/state/factory-worker/omp", "{home}/.omp",
+           "--ro", "{home}/.local/share/agent-factory/runtimes", "--"]
+[repo."owner/name".check_wrap]
+command = ["{home}/.local/libexec/factory/bwrap-sandbox.sh", "--cwd", "{cwd}", "--root", "{root}",
+           "--ro", "{home}/.local/share/agent-factory/runtimes", "--drop-env", "ANTHROPIC_API_KEY", "--"]
+```
+
 Leak terms that must not appear in a public repository, such as codenames or
 internal hostnames, go in host config: `extra` under `[defaults.leak_scan]` or
 `[repo."owner/name".leak_scan]`. Host, per-repo host, and committed `extra`
