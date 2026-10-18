@@ -81,8 +81,8 @@ def timed(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedPro
 
 
 def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
-    """Run a command, return (passed, combined output)."""
-    proc = timed(cmd, timeout)
+    """Run a configured check (inside the host `check_wrap`, if any); return (passed, combined output)."""
+    proc = timed(cfg.check_cmd(cmd, Path.cwd()), timeout)
     execution = lifecycle.current()
     if execution and proc.returncode != 0 and execution.outcome == "completed":
         execution.outcome = "product_feedback"

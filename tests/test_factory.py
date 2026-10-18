@@ -467,6 +467,26 @@ class HostConfigTest(unittest.TestCase):
             host_file('[defaults.worker_wrap]\n')
             self.assertEqual(config.load(repo).worker(set(), Path("/p"), Path("/w")), config.expand(config.DEFAULT_WORKER, prompt="/p", cwd="/w"))
 
+    def test_check_wrap_is_host_owned_and_prefixes_configured_checks(self) -> None:
+        host_file('[repo."acme/widgets".check_wrap]\ncommand = ["wrap", "{cwd}", "{root}", "{repo}", "{home}"]\n')
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            cfg = config.load(repo)
+            self.assertEqual(cfg.check_cmd(["t", "{cwd}"], Path("/w")),
+                             ["wrap", "/w", str(cfg.root), "acme/widgets", str(Path.home()), "t", "{cwd}"])
+            self.assertEqual(cfg.worker_wrap, [])
+            (repo / config.CONFIG_NAME).write_text('[check_wrap]\ncommand = ["mine"]\n')
+            with self.assertRaisesRegex(SystemExit, "host-only"):
+                config.load(repo)
+            (repo / config.CONFIG_NAME).unlink()
+            for bad in ('[defaults.check_wrap]\ncommand = []\n', '[defaults]\ncheck_wrap = "x"\n'):
+                with self.subTest(bad=bad):
+                    host_file(bad)
+                    with self.assertRaises(config.ConfigError):
+                        config.load(repo)
+            host_file("")
+            self.assertEqual(config.load(repo).check_cmd(["t"], Path("/w")), ["t"])
+
     def test_unknown_keys(self) -> None:
         raw = {"triage": {"mdoel": "x"}, "gate": {"check": [{"name": "a", "run": [], "exclusiv": True}]}, "bogus": {}}
         self.assertEqual(config.unknown_keys(raw), ["triage.mdoel", "gate.check[0].exclusiv", "bogus"])
@@ -1495,6 +1515,22 @@ class GateTest(unittest.TestCase):
             self.assertIsNotNone(leak.search(f"GH_TOKEN={prefix}{body}"), prefix)
         for clean in ("ghp_short", "sk-ant-", "the ops_team runbook", "github_pat_ rotation steps"):
             self.assertIsNone(leak.search(clean), clean)
+
+    def test_host_check_wrap_runs_configured_checks_only(self) -> None:
+        wrap = Path(self.id().replace(".", "-"))  # unique name; the wrapper writes it beside the repo
+        toml = '[[gate.check]]\nname = "ran"\nrun = ["sh", "-c", "touch ran"]\n'
+        with tempfile.TemporaryDirectory() as d:
+            log = Path(d) / wrap.name
+            host_file('[defaults.check_wrap]\ncommand = ["sh", "-c", "echo \\"$PWD $*\\" >> %s; exec \\"$@\\"", "wrap"]\n' % log)
+            self.addCleanup(host_file, "")
+            repo = make_repo(Path(d), toml)
+            code, out, report = gate(repo)
+            self.assertEqual(code, 0, out)
+            self.assertIn("- ran: PASS", report)
+            self.assertIn("- conflict-markers: PASS", report)
+            self.assertTrue((repo / "ran").exists())
+            # One wrapped launch: the configured check, run from the worktree. Built-ins are not wrapped.
+            self.assertEqual(log.read_text().splitlines(), [f"{repo.resolve()} sh -c touch ran"])
 
     def test_protected_edit_stops_gate_before_checks(self) -> None:
         toml = ('[gate]\nprotected_paths = [".factory.toml", "checks/**"]\n'
