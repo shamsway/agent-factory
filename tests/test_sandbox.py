@@ -141,6 +141,41 @@ class SandboxTest(unittest.TestCase):
         self.assertNotIn(SENTINEL, out)
         self.assertNotIn(".config", out)
 
+    def test_sigkilled_plan_in_the_sandbox_leaves_nothing_on_the_host(self) -> None:
+        import json
+        import signal
+        import time
+
+        from tests.test_tf_plan_check import FAKE_TERRAFORM
+        from tests.test_tf_plan_check import SENTINEL as PLAN_SECRET
+
+        bin_dir = self.c.wt / "fakebin"  # inside the worktree: visible in the sandbox
+        bin_dir.mkdir()
+        (bin_dir / "terraform").write_text(FAKE_TERRAFORM.format(python=sys.executable, secret=PLAN_SECRET))
+        (bin_dir / "terraform").chmod(0o755)
+        (self.c.wt / "tf").mkdir()
+        seen = self.c.wt / "seen.json"
+        host_temp = Path(tempfile.gettempdir())
+        before = {p.name for p in host_temp.glob("factory-tfplan-*")}
+        source = Path(__file__).resolve().parents[1]
+        env = {**self.env, "PATH": f"{bin_dir}:{self.env['PATH']}", "FAKE_TF": "sleep",
+               "FAKE_TF_SEEN": str(seen), "PYTHONPATH": str(source)}
+        proc = subprocess.Popen(
+            [str(SCRIPT), "--cwd", str(self.c.wt), "--root", str(self.c.root), "--ro", str(source), "--",
+             sys.executable, "-m", "factory.tf_plan_check", "--dir", "tf"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        self.addCleanup(proc.kill)
+        deadline = time.monotonic() + 30
+        while not seen.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        plan = Path(json.loads(seen.read_text())["path"])
+        self.assertEqual(plan.parts[1], "tmp")  # the sandbox's private /tmp
+        os.killpg(proc.pid, signal.SIGKILL)  # what the gate's timeout does to a wrapped check
+        proc.communicate(timeout=30)
+        self.assertFalse(plan.exists())
+        self.assertFalse(plan.parent.exists())
+        self.assertEqual({p.name for p in host_temp.glob("factory-tfplan-*")}, before)
+
 
 if __name__ == "__main__":
     unittest.main()

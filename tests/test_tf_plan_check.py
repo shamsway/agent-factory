@@ -151,13 +151,10 @@ class TfPlanCheckTest(unittest.TestCase):
             tf_root = Path(d).resolve() / "terraform" / "collectors"
             tf_root.mkdir(parents=True)
             for label, kwargs, expect in (("pass", {}, 0), ("plan fails", {"plan_rc": 1}, 1),
-                                          ("show fails", {"show_error": True}, subprocess.CalledProcessError)):
+                                          ("show fails", {"show_error": True}, 1)):
                 with self.subTest(label):
                     result, path, mode = self._run_main(tf_root, [], **kwargs)
-                    if isinstance(expect, int):
-                        self.assertEqual(result, expect)
-                    else:
-                        self.assertIsInstance(result, expect)
+                    self.assertEqual(result, expect)
                     self.assertEqual(mode, 0o700)
                     self.assertNotIn(tf_root, path.parents)
                     self.assertFalse(path.exists())
@@ -167,10 +164,221 @@ class TfPlanCheckTest(unittest.TestCase):
     def test_explicit_plan_out_is_removed_when_show_fails(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             tf_root = Path(d).resolve()
-            result, path, _ = self._run_main(tf_root, ["--plan-out", ".factory/tfplan"], show_error=True)
-            self.assertIsInstance(result, subprocess.CalledProcessError)
+            result, path, mode = self._run_main(tf_root, ["--plan-out", ".factory/tfplan"], show_error=True)
+            self.assertEqual(result, 1)
+            self.assertEqual(mode, 0o700)
             self.assertEqual(path, tf_root / ".factory" / "tfplan")
             self.assertFalse(path.exists())
+
+SENTINEL = "SENTINEL-PLAN-SECRET"
+FAKE_TERRAFORM = '''#!{python}
+import json, os, sys, time
+args, mode = sys.argv[1:], os.environ.get("FAKE_TF", "ok")
+if args[0] == "init":
+    if mode == "init-fail":
+        print("Error: Failed to query available provider packages\\n\\nprovider said: {secret}")
+        sys.exit(1)
+    sys.exit(0)
+if args[0] == "plan":
+    out = os.path.abspath(args[args.index("-out") + 1])
+    with open(out, "w") as f:
+        f.write("{secret}")
+    with open(os.environ["FAKE_TF_SEEN"], "w") as f:
+        json.dump({{"path": out, "mode": os.stat(out).st_mode & 0o777,
+                   "dir_mode": os.stat(os.path.dirname(out)).st_mode & 0o777}}, f)
+    if mode == "sleep":
+        time.sleep(120)
+    if mode == "plan-fail":
+        print("\\u2577\\n\\u2502 Error: Invalid provider configuration\\n\\u2502\\n"
+              "\\u2502   on main.tf line 3, in provider \\"x\\":\\n\\u2502 response body: {secret}\\n\\u2575")
+        sys.exit(1)
+    sys.exit(0)
+if args[0] == "show":
+    if mode == "show-fail":
+        sys.stderr.write("Error: Failed to read plan\\n{secret}\\n")
+        sys.exit(1)
+    print("{secret} is not json" if mode == "show-badjson" else json.dumps({{"resource_changes": []}}))
+'''
+
+
+class PlanLifecycleTest(unittest.TestCase):
+    """The real CLI against a fake terraform that writes a sentinel plan: no plan or
+    scratch survives any outcome the check can observe, and no sentinel reaches output."""
+
+    def setUp(self) -> None:
+        import shutil
+        import sys
+
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        tf = self.bin / "terraform"
+        tf.write_text(FAKE_TERRAFORM.format(python=sys.executable, secret=SENTINEL))
+        tf.chmod(0o755)
+        self.temp = self.tmp / "temp"  # the check's TMPDIR: residue is visible here
+        self.temp.mkdir()
+        self.dir = self.tmp / "repo" / "terraform" / "svc"
+        self.dir.mkdir(parents=True)
+        self.seen = self.tmp / "seen.json"
+        root = Path(__file__).resolve().parents[1]
+        self.env = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "TMPDIR": str(self.temp),
+                    "FAKE_TF_SEEN": str(self.seen), "PYTHONPATH": str(root)}
+        self.env.pop("FACTORY_LIFECYCLE_CONTEXT", None)
+
+    def argv(self, *extra: str) -> list[str]:
+        import sys
+
+        return [sys.executable, "-m", "factory.tf_plan_check", "--dir", str(self.dir), *extra]
+
+    def plan(self) -> dict:
+        import json
+
+        return json.loads(self.seen.read_text())
+
+    def assert_no_residue(self) -> None:
+        self.assertFalse(Path(self.plan()["path"]).exists())
+        self.assertEqual(list(self.temp.iterdir()), [])
+
+    def test_every_outcome_removes_the_plan_and_withholds_details(self) -> None:
+        cases = {"ok": (0, "no destroy/replace"), "plan-fail": (1, "on main.tf line 3"),
+                 "show-fail": (1, "Error: Failed to read plan"), "show-badjson": (1, "not JSON")}
+        for explicit in (False, True):
+            for mode, (code, expected) in cases.items():
+                with self.subTest(mode=mode, explicit=explicit):
+                    extra = ("--plan-out", ".factory/tfplan") if explicit else ()
+                    proc = subprocess.run(self.argv(*extra), env={**self.env, "FAKE_TF": mode},
+                                          capture_output=True, text=True, check=False)
+                    self.assertEqual(proc.returncode, code, proc.stdout + proc.stderr)
+                    self.assertIn(expected, proc.stdout)
+                    self.assertNotIn(SENTINEL, proc.stdout + proc.stderr)
+                    self.assertEqual(self.plan()["mode"], 0o600)
+                    if explicit:
+                        self.assertEqual(self.plan()["path"], str(self.dir / ".factory" / "tfplan"))
+                        self.assertEqual(self.plan()["dir_mode"], 0o700)
+                    else:
+                        self.assertEqual(self.plan()["dir_mode"], 0o700)
+                        self.assertIn(str(self.temp), self.plan()["path"])
+                    self.assert_no_residue()
+        proc = subprocess.run(self.argv(), env={**self.env, "FAKE_TF": "init-fail"},
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("Error: Failed to query available provider packages", proc.stdout)
+        self.assertNotIn(SENTINEL, proc.stdout + proc.stderr)
+        self.assertEqual(list(self.temp.iterdir()), [])
+
+    def started(self, extra: tuple[str, ...] = ()) -> subprocess.Popen:
+        import time
+
+        self.seen.unlink(missing_ok=True)
+        proc = subprocess.Popen(self.argv(*extra), env={**self.env, "FAKE_TF": "sleep"},
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(proc.kill)
+        deadline = time.monotonic() + 30
+        while not self.seen.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(Path(self.plan()["path"]).exists())
+        return proc
+
+    def test_sigterm_removes_the_plan(self) -> None:
+        import signal
+
+        for extra in ((), ("--plan-out", ".factory/tfplan")):
+            with self.subTest(extra=extra):
+                proc = self.started(extra)
+                proc.send_signal(signal.SIGTERM)
+                out, _ = proc.communicate(timeout=30)
+                self.assertEqual(proc.returncode, 128 + signal.SIGTERM, out)
+                self.assertIn("plan removed", out)
+                self.assert_no_residue()
+
+    def test_sigkilled_explicit_plan_is_cleared_by_the_next_run(self) -> None:
+        import signal
+
+        proc = self.started(("--plan-out", ".factory/tfplan"))
+        proc.send_signal(signal.SIGKILL)
+        proc.communicate(timeout=30)
+        left = self.dir / ".factory" / "tfplan"
+        self.assertTrue(left.exists())  # the documented limit: no process survives to remove it
+        self.assertEqual(left.stat().st_mode & 0o777, 0o600)
+        proc = subprocess.run(self.argv("--plan-out", ".factory/tfplan"), env={**self.env, "FAKE_TF": "ok"},
+                              capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("removed a plan an interrupted earlier run left", proc.stdout)
+        self.assertFalse(left.exists())
+
+    def test_symlinked_plan_out_is_refused(self) -> None:
+        target = self.tmp / "elsewhere"
+        target.write_text("keep\n")
+        (self.dir / ".factory").mkdir()
+        (self.dir / ".factory" / "tfplan").symlink_to(target)
+        proc = subprocess.run(self.argv("--plan-out", ".factory/tfplan"), env=self.env,
+                              capture_output=True, text=True, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("symlink; refusing", proc.stdout + proc.stderr)
+        self.assertEqual(target.read_text(), "keep\n")
+        self.assertFalse(self.seen.exists())
+
+    def gate_repo(self, run: list[str], timeout: int = 3) -> Path:
+        from tests.test_factory import git, make_repo
+
+        repo = make_repo(self.tmp / "gate", '[[gate.check]]\nname = "tf"\nrun = '
+                         + "[" + ", ".join(f'"{a}"' for a in run) + f"]\ntimeout = {timeout}\n")
+        (repo / "tf").mkdir()
+        (repo / "tf" / "main.tf").write_text("# fake\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "tf")
+        git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        return repo
+
+    def gate(self, repo: Path, **env: str) -> subprocess.CompletedProcess:
+        import sys
+
+        return subprocess.run([sys.executable, "-m", "factory", "gate", "--skip", "leak-scan"], cwd=repo,
+                              env={**self.env, **env}, capture_output=True, text=True, check=False)
+
+    def test_gate_timeout_sigkill_leaves_no_default_plan(self) -> None:
+        import sys
+
+        (self.tmp / "gate").mkdir()
+        repo = self.gate_repo([sys.executable, "-m", "factory.tf_plan_check", "--dir", "tf"])
+        proc = self.gate(repo, FAKE_TF="sleep")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("check timed out after 3s", (repo / ".factory" / "gate-report.md").read_text())
+        self.assertIn("factory-check-", self.plan()["path"])  # the gate's scratch held it
+        self.assert_no_residue()
+
+    def test_gate_sweeps_scratch_a_killed_gate_left(self) -> None:
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        abandoned = self.temp / f"factory-check-{dead.pid}-x"
+        (abandoned / "factory-tfplan-1-y").mkdir(parents=True)
+        (abandoned / "factory-tfplan-1-y" / "tfplan").write_text(SENTINEL)
+        live = self.temp / f"factory-check-{os.getpid()}-z"
+        live.mkdir()
+        (self.tmp / "gate").mkdir()
+        repo = self.gate_repo(["true"])
+        proc = self.gate(repo)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(abandoned.exists())
+        self.assertTrue(live.exists())
+        self.assertIn("Removed 1 check scratch dir(s)", (repo / ".factory" / "gate-report.md").read_text())
+
+    def test_doctor_finds_abandoned_plan_dirs_by_name_only(self) -> None:
+        from factory import onboard
+
+        (self.temp / "factory-tfplan-123-a").mkdir()
+        (self.temp / "factory-check-456-b").mkdir()
+        (self.temp / "unrelated").mkdir()
+        (self.temp / "factory-tfplan-link").symlink_to(self.temp / "unrelated")
+        self.assertEqual(onboard.abandoned_plan_dirs(self.temp), ["factory-check-456-b", "factory-tfplan-123-a"])
+        self.assertEqual(onboard.abandoned_plan_dirs(self.temp, limit=0), [])
+        repo = self.tmp / "walk"
+        for i in range(3):
+            (repo / f"d{i}" / ".factory").mkdir(parents=True)
+            (repo / f"d{i}" / ".factory" / "tfplan").write_text("plan\n")
+        self.assertEqual(len(onboard.leftover_plans(repo)[0]), 3)
+        self.assertTrue(onboard.leftover_plans(repo, limit=2)[1])
 
 
 if __name__ == "__main__":

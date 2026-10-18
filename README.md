@@ -839,6 +839,17 @@ confines its worker should confine checks with the same wrapper; otherwise the
 gate is the way out of the worker's sandbox. Doctor reports whether the wrap
 executable is on the unit's PATH.
 
+An unwrapped configured check gets its own 0700 `TMPDIR`
+(`$TMPDIR/factory-check-<gate pid>-*`), which the gate removes when the check
+ends, however it ends: a timeout SIGKILLs the check's process group, not the
+gate. The next gate removes the scratch dirs of a gate that was itself killed.
+A wrapped check keeps the wrap's own `/tmp`, so a wrap must give it a private
+one; `scripts/bwrap-sandbox.sh` uses a tmpfs that disappears with the sandbox.
+`factory.tf_plan_check` writes its plan there (or to `--plan-out`, 0600) and
+documents what it cannot clean up: SIGKILL outside a gate, and host crashes.
+Doctor's "terraform plan files" row reports leftovers it finds within a bounded
+scan.
+
 The gate process itself is unwrapped and starts in the worktree. The dispatcher
 (and `factory release`'s release-tier gate) launches it isolated, `python -I`
 with the running engine's package first on `sys.path` (`factory/launch.py`),

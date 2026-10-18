@@ -16,8 +16,10 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 
 from factory import __version__, config
@@ -348,14 +350,40 @@ def _dashboard_port_check(cfg: config.Config, host: str, port: int) -> tuple[boo
     return True, f"owned by {unit} (pid {main_pid})"
 
 
-def leftover_plans(root: Path) -> list[Path]:
-    """`.factory/tfplan` files the tf-plan-safety check used to leave behind (SHA-281):
-    a saved plan holds every value the plan read, secrets included."""
+PLAN_SCAN_DIRS = 20000  # directories doctor walks looking for legacy plans
+PLAN_TEMP_PREFIXES = ("factory-tfplan-", "factory-check-")
+
+
+def leftover_plans(root: Path, limit: int = PLAN_SCAN_DIRS) -> tuple[list[Path], bool]:
+    """(`.factory/tfplan` files the tf-plan-safety check used to leave behind, truncated):
+    a saved plan holds every value the plan read, secrets included. Walks at most `limit`
+    directories of the checkout and its worktrees, never following symlinks."""
     found = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    for seen, (dirpath, dirnames, filenames) in enumerate(os.walk(root)):
+        if seen >= limit:
+            return sorted(found), True
         dirnames[:] = [d for d in dirnames if d not in (".git", ".terraform", "node_modules")]
         if Path(dirpath).name == ".factory" and "tfplan" in filenames:
             found.append(Path(dirpath, "tfplan").relative_to(root))
+    return sorted(found), False
+
+
+def abandoned_plan_dirs(directory: Path | None = None, limit: int = 4096) -> list[str]:
+    """Plan and check scratch directories in the temp directory that a killed check or
+    gate left (tf_plan_check's cleanup boundary). Names only; at most `limit` entries read."""
+    found = []
+    try:
+        entries = os.scandir(directory or tempfile.gettempdir())
+    except OSError:
+        return found
+    with entries:
+        for i, entry in enumerate(entries):
+            if i >= limit:
+                break
+            if entry.name.startswith(PLAN_TEMP_PREFIXES) and entry.is_dir(follow_symlinks=False):
+                with suppress(OSError):
+                    if entry.stat(follow_symlinks=False).st_uid == os.getuid():
+                        found.append(entry.name)
     return sorted(found)
 
 
@@ -437,10 +465,14 @@ def doctor(argv: list[str]) -> int:
     report(True if tracked else None, f"{CONFIG_NAME} committed", "" if tracked else "commit it so clones see it")
     ok, detail = checkout_state(cfg)
     report(True if ok else None, "main checkout", detail)
-    plans = leftover_plans(cfg.root)
-    report(None if plans else True, "terraform plan files",
-           f"{len(plans)} saved plan(s) may hold secrets; delete them: {', '.join(map(str, plans[:5]))}"
-           + (" ..." if len(plans) > 5 else "") if plans else "none left in the checkout or worktrees")
+    plans, truncated = leftover_plans(cfg.root)
+    temps = abandoned_plan_dirs()
+    found = [*map(str, plans), *(f"{tempfile.gettempdir()}/{name}" for name in temps)]
+    scope = f"first {PLAN_SCAN_DIRS} directories of the checkout and worktrees" if truncated else "the checkout or worktrees"
+    report(None if found or truncated else True, "terraform plan files",
+           f"{len(found)} saved plan(s) or plan scratch dir(s) may hold secrets; delete them: {', '.join(found[:5])}"
+           + (" ..." if len(found) > 5 else "") + (f" (scanned only the {scope})" if truncated else "")
+           if found else (f"none in the {scope} or temp dir" + ("; scan truncated" if truncated else "")))
 
     unknown = config.unknown_keys(cfg.raw_repo)
     report(
