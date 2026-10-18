@@ -403,6 +403,7 @@ class _Observation:
         self.at = lifecycle._now()
         self.processes = {}
         self.lock_files = {}
+        self.missing = set()  # lock paths that do not exist; _resources judges them
         self.kernel = None
         self.kernel_read = False
         try:
@@ -485,6 +486,8 @@ class _Observation:
                     value.update(device=info.st_dev, inode=info.st_ino)
                 else:
                     _error(self.errors, "filesystem", "resources", "not_regular")
+            except FileNotFoundError:
+                self.missing.add(path)  # removed after release (merge cleanup) or never created
             except OSError:
                 _error(self.errors, "filesystem", "resources", "lock_unavailable")
             self.lock_files[path] = value
@@ -645,12 +648,42 @@ def _executions(retained: list, history: dict, gaps: list, observation: _Observa
     return result, groups
 
 
+def _removed_lock_state(observation: _Observation, recorded: dict, acquired: bool, reused: bool) -> tuple[str, list | None]:
+    """A lock the journal recorded as a file that is now gone (merge cleanup removes a
+    ticket's lock after release). Nobody can take it through the path any more, so it is
+    free unless an active execution still records an acquisition, or a process still
+    holds the recorded inode (an flock survives unlink): those stay lock_unavailable.
+    An inode number later recorded for another lock, or in use by another existing lock
+    file, cannot be the removed one (an unlinked file keeps its number while open), so
+    its holders are that lock's."""
+    if acquired:
+        _error(observation.errors, "filesystem", "resources", "lock_unavailable")
+        return "unknown", None
+    key = (recorded.get("device"), recorded.get("inode"))
+    if None in key:  # never observed as a file (a configured or not-yet-created lock): unchanged
+        _error(observation.errors, "filesystem", "resources", "lock_unavailable")
+        return "unknown", None
+    if reused:
+        return "free", None
+    if any((value["device"], value["inode"]) == key for value in observation.lock_files.values()):
+        return "free", None
+    holders = observation.holders(recorded)
+    if holders is None:
+        return "unknown", None
+    if holders:
+        _error(observation.errors, "filesystem", "resources", "lock_unavailable")
+        return "unknown", None
+    return "free", holders
+
+
 def _resources(path: Path, paths, retained: list, executions: list, groups: dict, observation: _Observation) -> list:
-    descriptors, acquisitions, requests, recorded = {}, {}, {}, {}
+    descriptors, acquisitions, requests, recorded, inodes = {}, {}, {}, {}, {}
     for _, event in retained:
         resource = event.get("resource")
         if resource is not None:
             descriptors[resource["id"]] = resource
+            lock = resource.get("lock") or {}
+            inodes[(resource.get("host_id"), lock.get("device"), lock.get("inode"))] = resource["id"]
             if event["kind"] == "resource_observation":
                 recorded[resource["id"]] = event
         if event["kind"] == "wait" and event["wait"]["resource"] is not None:
@@ -690,13 +723,23 @@ def _resources(path: Path, paths, retained: list, executions: list, groups: dict
         host = observation.host
         resource = {"id": lifecycle._resource_id(host, repository, canonical), "scope": scope,
                     "host_id": host, "repository": repository, "lock": observation.lock_file(canonical)}
-        descriptors[resource["id"]] = resource
+        # Keep a journal descriptor's recorded inode: the lock is re-observed below anyway.
+        descriptors.setdefault(resource["id"], resource)
     active = {row["execution_id"] for row in executions if row["state"] == "active"}
+    for descriptor in descriptors.values():  # stat every local lock first: removed ones are judged against them
+        if observation.host is not None and descriptor["host_id"] == observation.host:
+            observation.lock_file(descriptor["lock"]["path"])
     result = []
     for resource_id, descriptor in descriptors.items():
         local = observation.host is not None and descriptor["host_id"] == observation.host
         resource = {**descriptor, "lock": observation.lock_file(descriptor["lock"]["path"])} if local else descriptor
-        state, holders = observation.lock_state(resource["lock"]) if local else ("unknown", None)
+        if local and resource["lock"]["path"] in observation.missing:
+            held = any(candidate_id == resource_id and key in active for candidate_id, key, _ in acquisitions)
+            lock = descriptor["lock"]
+            reused = inodes.get((descriptor["host_id"], lock.get("device"), lock.get("inode")), resource_id) != resource_id
+            state, holders = _removed_lock_state(observation, lock, held, reused)
+        else:
+            state, holders = observation.lock_state(resource["lock"]) if local else ("unknown", None)
         candidates = []
         for (candidate_id, key, _), event in acquisitions.items():
             if candidate_id != resource_id or key not in active or state != "held":

@@ -184,6 +184,63 @@ class RuntimeCliTest(unittest.TestCase):
         self.assertEqual(release["acquisition_id"], acquisition["acquisition_id"])
         self.assertIn(release["event_id"], [row["event_id"] for row in third["events"]])
 
+    def test_ticket_lock_removed_after_release_is_free_not_unavailable(self):
+        # Merge cleanup deletes .factory/locks/<n>.lock after the ticket released it; the
+        # journal still names the lock, which must read as free, not lock_unavailable.
+        self.journal.parent.mkdir()
+        (self.journal.parent / "locks").mkdir()
+        # The configured locks exist, as on a host that has run passes; a missing one that
+        # was never a file still reports lock_unavailable.
+        (self.root / "gpu.lock").touch()
+        (self.journal.parent / "locks/merge.lock").touch()
+
+        def ticket(n, *, release, keep_flock):
+            path = self.journal.parent / f"locks/{n}.lock"
+            handle = open(path, "w")  # noqa: SIM115 - the flock must outlive this helper
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            execution = lifecycle.Execution(self.journal, "ticket", ticket=n, attempt=1)
+            execution.emit("enter")
+            execution.resource("acquired", path, scope="repository")
+            if release:
+                if not keep_flock:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+                execution.resource("released", path, scope="repository")
+                execution.outcome = "completed"
+                execution.emit("exit")
+            path.unlink()
+            if not keep_flock:
+                handle.close()
+            return path, handle
+
+        def observe():
+            data = self.invoke()
+            rows = {row["resource"]["lock"]["path"]: row for row in data["resources"]}
+            codes = [e["code"] for e in data["errors"] if e.get("source") == "filesystem"]
+            return rows, codes
+
+        merged, _ = ticket(7, release=True, keep_flock=False)
+        rows, codes = observe()
+        self.assertNotIn("lock_unavailable", codes)
+        self.assertEqual((rows[str(merged)]["state"], rows[str(merged)]["ownership"]), ("free", "none"))
+        self.assertEqual(rows[str(merged)]["evidence"]["holder_pids"], [])
+        # A later ticket's lock file may reuse the removed inode number; its holder is not #7's.
+
+        # An flock survives unlink: a process still holding the removed inode is not free.
+        stale, handle = ticket(8, release=True, keep_flock=True)
+        self.addCleanup(handle.close)
+        rows, codes = observe()
+        self.assertIn("lock_unavailable", codes)
+        self.assertEqual(rows[str(stale)]["state"], "unknown")
+        self.assertEqual(rows[str(merged)]["state"], "free")
+        handle.close()
+
+        # An active execution whose acquired lock file vanished stays an error.
+        active, handle = ticket(9, release=False, keep_flock=True)
+        self.addCleanup(handle.close)
+        rows, codes = observe()
+        self.assertIn("lock_unavailable", codes)
+        self.assertEqual(rows[str(active)]["state"], "unknown")
+
     def test_corruption_duplicates_and_uncommitted_tail_preserve_valid_terminal(self):
         done = lifecycle.Execution(self.journal, "review", ticket=3, review_round=1)
         entry = done.emit("enter")
