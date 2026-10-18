@@ -1517,11 +1517,10 @@ class GateTest(unittest.TestCase):
             self.assertIsNone(leak.search(clean), clean)
 
     def test_host_check_wrap_runs_configured_checks_only(self) -> None:
-        wrap = Path(self.id().replace(".", "-"))  # unique name; the wrapper writes it beside the repo
         toml = '[[gate.check]]\nname = "ran"\nrun = ["sh", "-c", "touch ran"]\n'
         with tempfile.TemporaryDirectory() as d:
-            log = Path(d) / wrap.name
-            host_file('[defaults.check_wrap]\ncommand = ["sh", "-c", "echo \\"$PWD $*\\" >> %s; exec \\"$@\\"", "wrap"]\n' % log)
+            log = Path(d) / "wrap.log"  # beside the repo, so the wrapper's log is not part of the diff
+            host_file(f'[defaults.check_wrap]\ncommand = ["sh", "-c", "echo \\"$PWD $*\\" >> {log}; exec \\"$@\\"", "wrap"]\n')
             self.addCleanup(host_file, "")
             repo = make_repo(Path(d), toml)
             code, out, report = gate(repo)
