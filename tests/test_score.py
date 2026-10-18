@@ -179,6 +179,15 @@ class ScoreTest(unittest.TestCase):
         score.run(self.cfg)
         self.assertIsNone(self.scores()[0]["compliance"])
 
+    def test_judge_number_followed_by_reasons_is_read_from_the_first_line(self) -> None:
+        for answer, expected in (("0\n\nThe ticket requires seven observations; three were not run.", 0.0),
+                                 ("**0.8**\nMost items addressed.", 0.8), ("`1`", 1.0),
+                                 ("<think>weighing</think>\n0.5\n", 0.5),
+                                 ("0.7 because two items are missing", None), ("Score:\n0.7", None)):
+            with self.subTest(answer=answer):
+                self.judge.return_value = answer
+                self.assertEqual(score.judge("scope", "final", "handoff"), expected)
+
     def test_out_of_range_judge_answer_is_not_guessed(self) -> None:
         self.judge.return_value = "1.5"
         self.journal({"attempt": 1, "gate": "PASS"})

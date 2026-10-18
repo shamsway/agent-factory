@@ -115,8 +115,10 @@ def scope(prompt: str) -> str:
 
 
 def judge(ticket: str, final: str, handoff: str) -> float | None:
-    """0-1 compliance from the local model; None when it is unreachable or answers with
-    anything but a number."""
+    """0-1 compliance from the local model; None when it is unreachable or its answer does
+    not open with a number. Models often add reasons after the number despite the
+    instruction, so only the first line counts (markdown emphasis or code ticks around it
+    allowed); a number with words on the same line is still not guessed."""
     messages = [
         {"role": "system", "content": JUDGE_SYSTEM},
         {"role": "user", "content": f"## Ticket scope and exit gate\n\n{ticket}\n\n## Agent's final message\n\n"
@@ -126,7 +128,8 @@ def judge(ticket: str, final: str, handoff: str) -> float | None:
         answer = re.sub(r"<think>.*?</think>", "", triage.call_llm(messages), flags=re.DOTALL).strip()
     except (SystemExit, ValueError, LookupError, TypeError):
         return None
-    return float(answer) if _NUMBER.fullmatch(answer) else None
+    first = answer.split("\n", 1)[0].strip().strip("*`").strip()
+    return float(first) if _NUMBER.fullmatch(first) else None
 
 
 def run(cfg: config.Config, last: int | None = None, dry_run: bool = False) -> list[dict]:
