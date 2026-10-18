@@ -240,8 +240,25 @@ class RuntimeCliTest(unittest.TestCase):
         self.assertFalse(data["history"]["complete"])
         self.assertIsNone(data["executions"][0]["entered_at"])
         self.assertEqual(data["events"][0]["event_id"], waiting["event_id"])
-        missing = next(error for error in data['errors'] if error['code'] == 'missing_enter')
-        self.assertTrue(runtime_events.coverage_only(missing, data['history']))
+        # Upstream #269: a clipped window's hidden entry is coverage, not a missing_enter error.
+        self.assertFalse([error for error in data['errors'] if error['code'] == 'missing_enter'])
+
+    def test_clipped_entry_is_not_a_missing_enter_error(self):
+        execution = lifecycle.Execution(self.journal, "worker", ticket=12)
+        execution.emit("enter")
+        waiting = execution.wait("capacity_reached", mode="admission", active=2, max_active=2)
+        row = json.dumps(waiting).encode() + b"\n"
+        self.journal.write_bytes(row)
+        unclipped = self.invoke()
+        self.assertIn({"source": "events.jsonl", "scope": "executions", "code": "missing_enter"}, unclipped["errors"])
+        with self.journal.open("wb") as handle:
+            handle.write(b" " * (2 * 1024 * 1024) + b"\n")
+            handle.write(row)
+        clipped = self.invoke()
+        self.assertTrue(clipped["history"]["truncated"])
+        self.assertNotIn("missing_enter", clipped["history"]["gaps"])
+        self.assertNotIn("missing_enter", [error["code"] for error in clipped["errors"]])
+        self.assertEqual(clipped["executions"][0]["observation"], "partial")
 
     def test_truncated_old_history_does_not_poison_current_observations(self):
         import shutil
@@ -355,6 +372,21 @@ class RuntimeCliTest(unittest.TestCase):
         self.assertEqual(data["executions"][0]["state"], "unknown")
         self.assertEqual(data["executions"][0]["observation"], "partial")
         self.assertIn("duplicate_conflict", data["history"]["gaps"])
+
+    def test_ticket_scope_advancing_attempt_and_round_is_not_an_identity_conflict(self):
+        # The dispatcher's ticket scope advances attempt/review_round so children inherit them.
+        ticket = lifecycle.Execution(self.journal, "ticket", ticket=15)
+        ticket.emit("enter")
+        ticket.attempt = 1
+        ticket.emit("check", check="compile")
+        ticket.attempt, ticket.review_round = 2, 1
+        ticket.emit("exit")
+        data = self.invoke()
+        self.assertNotIn({"source": "events.jsonl", "scope": "executions", "code": "identity_conflict"},
+                         data["errors"])
+        self.assertTrue(data["history"]["complete"])
+        self.assertEqual([(row["state"], row["attempt"], row["review_round"]) for row in data["executions"]],
+                         [("completed", 2, 1)])
 
     def test_accepted_check_and_admission_outcomes_remain_supported(self):
         execution = lifecycle.Execution(self.journal, "gate-check", ticket=14)

@@ -9,7 +9,8 @@
 # under it is visible unless exposed), /tmp and $XDG_RUNTIME_DIR are private
 # and empty (no session bus, agent or credential-daemon sockets), and the
 # container and VM sockets are hidden. The worktree and the main checkout's .git
-# are writable; .git/config and .git/hooks are not, because Factory's own git
+# are writable (and, for a ticket worktree, that ticket's .factory/transcripts/<n>);
+# .git/config and .git/hooks are not, because Factory's own git
 # commands run outside the sandbox and would otherwise run hooks or
 # config-defined commands the worker planted. bwrap sets no_new_privs, so
 # setuid helpers such as sudo cannot raise privilege. The network is shared:
@@ -57,7 +58,15 @@ for p in "${ro[@]}"; do args+=(--ro-bind "$p" "$p"); done
 # store writable, git's executable configuration not.
 args+=(--ro-bind "$root" "$root" --tmpfs "$root/.factory" --bind "$cwd" "$cwd"
        --bind "$root/.git" "$root/.git")
+# A run from the checkout itself (cwd = root) must not re-expose .factory through the cwd bind.
+[[ $cwd == "$root" ]] && args+=(--tmpfs "$root/.factory")
 for p in config hooks; do args+=(--ro-bind-try "$root/.git/$p" "$root/.git/$p"); done
+# A ticket worktree's OMP session dir (dispatch keeps transcripts per ticket under the
+# hidden .factory): only this ticket's, so a worker never reads another ticket's sessions.
+ticket=${cwd#"$root/.factory/wt-"}
+if [[ $ticket != "$cwd" && $ticket =~ ^[0-9]+$ && -d $root/.factory/transcripts/$ticket ]]; then
+  args+=(--bind "$root/.factory/transcripts/$ticket" "$root/.factory/transcripts/$ticket")
+fi
 for p in "${rw[@]}"; do args+=(--bind "$p" "$p"); done
 for ((i = 0; i < ${#bind_at[@]}; i += 2)); do args+=(--bind "${bind_at[i]}" "${bind_at[i+1]}"); done
 

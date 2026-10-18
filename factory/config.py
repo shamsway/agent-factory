@@ -33,6 +33,7 @@ LABEL_INVESTIGATE = "ready-for-investigation"
 LABEL_HUMAN = "ready-for-human"
 LABEL_APPROVED = "factory-approved"
 LABEL_PROTECTED_OVERRIDE = "factory-protected-override"
+LABEL_ADD_ONLY_OVERRIDE = "factory-add-only-override"
 LABEL_CHORE = "chore"
 # Reporter/detector-applied marker, never a triage decision itself: exempts an
 # issue from the acceptance-criteria lint so "service is down, cause unknown"
@@ -52,6 +53,7 @@ LABELS = {
     LABEL_CHORE: ("C2E0C6", "Mechanical maintenance work routed to the chore worker"),
     LABEL_OPS: ("5319E7", "Operational/infra issue; exempt from the acceptance-criteria triage lint"),
     LABEL_PROTECTED_OVERRIDE: ("B60205", "Human authorization for worker edits to protected paths"),
+    LABEL_ADD_ONLY_OVERRIDE: ("B60205", "Manager or human authorization for edits to existing files under gate.add_only_paths"),
     LABEL_WONTFIX: ("EDEDED", "Triage or manager proposes not to action this; a human decides"),
     LABEL_INITIATIVE: ("1D76DB", "Shared initiative plan read by `factory plan`; never triaged, dispatched, managed or merged"),
 }
@@ -83,7 +85,7 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # from here. Everything else in the host file is left for other tools (District).
 # `worker_wrap` and `check_wrap` are host-only: a committed table is refused, never merged.
 # `leak_scan.extra` is read from both and concatenated: host terms only add to the scan.
-HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "review", "manager", "install", "prices", "investigation", "publisher"})
+HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "review", "manager", "install", "prices", "investigation", "publisher", "watch"})
 # `apply.env` is credential-shaped like `install.env` -- host-owned so it
 # never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
 # are policy about this repo (does merging it trigger terraform apply, and
@@ -101,7 +103,9 @@ KNOWN_KEYS = {
     "check_wrap": ("command",),
     "review": ("command",),
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
-    "gate": ("timeout", "lock", "check", "protected_paths"),
+    "release": ("auto", "version_file", "min_tickets"),
+    "watch": ("enabled", "repo", "labels"),
+    "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
     "leak_scan": ("pattern", "exclude", "extra"),
     "triage": ("url", "model", "key", "timeout"),
     "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
@@ -117,7 +121,7 @@ KNOWN_KEYS = {
 # Normalized numeric fields of an `llm-usage` event; a worker profile maps each to JSON paths.
 USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "cached_tokens", "cost")
 CHECK_KEYS = ("name", "run", "exclusive", "timeout", "when")
-CHECK_TIERS = ("attempt", "pr")
+CHECK_TIERS = ("attempt", "pr", "release")
 VERIFY_KEYS = ("nomad", "nomad_addr", "timeout", "interval", "periodic", "check")
 VERIFY_CHECK_KEYS = ("name", "run", "timeout")
 PERIODIC_POLICIES = ("registered", "launch")
@@ -237,7 +241,9 @@ class Check:
     so two worktrees never run them at once. `timeout` overrides the gate's
     global per-check timeout for this one check (e.g. a live-system health
     probe wants seconds, a Terraform plan wants minutes). `when = "pr"` checks
-    skip the attempt gate and run once per PR head, before review.
+    skip the attempt gate and run once per PR head, before review;
+    `when = "release"` checks run only from `factory gate --tier release` (CI,
+    on a `v*` tag).
     """
 
     name: str
@@ -281,8 +287,18 @@ class Config:
     # Ceilings for the fleet manager (`district manage`) raising `max_active`/`budget_min`; None = no cap.
     manager_max_active_cap: int | None = None
     manager_budget_min_cap: int | None = None
+    release_auto: bool = False
+    release_version_file: str = "factory/__init__.py"
+    release_min_tickets: int = 5
+    # `factory watch` (post-pass monitor): where it files the factory's own runtime failures.
+    # None = this repository. A host whose target repo is not the factory's own can point it
+    # elsewhere or turn it off; `needs-triage` hands a filed bug to triage like any issue.
+    watch_enabled: bool = True
+    watch_repo: str | None = None
+    watch_labels: list[str] = field(default_factory=lambda: ["bug", "needs-triage"])
     checks: list[Check] = field(default_factory=list)
     protected_paths: list[str] = field(default_factory=list)
+    add_only_paths: list[str] = field(default_factory=list)
     check_timeout: int = 1200
     lock: Path = Path("/tmp/factory.lock")  # host-wide: one GPU, many repos
     leak_pattern: str | None = DEFAULT_LEAK_PATTERN
@@ -606,6 +622,9 @@ def load(start: Path | None = None) -> Config:
         raise ConfigError("[publisher] is host-only")
     if "investigation" in raw_repo:
         raise ConfigError("[investigation] is host-only")
+    release = raw.get("release", {})
+    if not isinstance(release, dict):
+        raise ConfigError("[release] must be a table")
     cfg = Config(root=root, repo=slug, raw_repo=raw_repo)
     from .investigation_model import policy
     cfg.investigation = policy(raw.get("investigation", {}))
@@ -664,6 +683,28 @@ def load(start: Path | None = None) -> Config:
         if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
             raise ConfigError(f"manager.{key} must be a positive integer")
         setattr(cfg, f"manager_{key}", cap)
+    auto = release.get("auto", cfg.release_auto)
+    version_file = release.get("version_file", cfg.release_version_file)
+    min_tickets = release.get("min_tickets", cfg.release_min_tickets)
+    if type(auto) is not bool:
+        raise ConfigError("release.auto must be true or false")
+    if not isinstance(version_file, str) or not version_file or Path(version_file).is_absolute() or ".." in Path(version_file).parts:
+        raise ConfigError("release.version_file must be a nonempty repository-relative path")
+    if isinstance(min_tickets, bool) or not isinstance(min_tickets, int) or min_tickets < 1:
+        raise ConfigError("release.min_tickets must be a positive integer")
+    cfg.release_auto, cfg.release_version_file, cfg.release_min_tickets = auto, version_file, min_tickets
+    watch = raw.get("watch", {})
+    if not isinstance(watch, dict):
+        raise ConfigError("[watch] must be a table")
+    enabled, watch_repo = watch.get("enabled", cfg.watch_enabled), watch.get("repo", cfg.watch_repo)
+    labels = watch.get("labels", cfg.watch_labels)
+    if not isinstance(enabled, bool):
+        raise ConfigError("watch.enabled must be true or false")
+    if watch_repo is not None and (not isinstance(watch_repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", watch_repo)):
+        raise ConfigError('watch.repo must be "owner/name"')
+    if not isinstance(labels, list) or not labels or any(not isinstance(x, str) or not x or "," in x for x in labels):
+        raise ConfigError("watch.labels must be a non-empty array of label names")
+    cfg.watch_enabled, cfg.watch_repo, cfg.watch_labels = enabled, watch_repo, list(labels)
     journal = raw.get("journal", {})
     for key in ("max_mb", "retention"):
         value = journal.get(key, getattr(cfg, f"journal_{key}"))
@@ -674,16 +715,17 @@ def load(start: Path | None = None) -> Config:
         cfg.collaboration = collaboration_settings(raw["collaboration"])
     cfg.prices = price_table(raw.get("prices", {}))
     cfg.check_timeout = int(gate.get("timeout", cfg.check_timeout))
-    paths = gate.get("protected_paths", [])
-    if not isinstance(paths, list) or any(not isinstance(p, str) or not p for p in paths):
-        raise ConfigError("gate.protected_paths must be an array of nonempty globs")
-    cfg.protected_paths = paths
+    for key in ("protected_paths", "add_only_paths"):
+        paths = gate.get(key, [])
+        if not isinstance(paths, list) or any(not isinstance(p, str) or not p for p in paths):
+            raise ConfigError(f"gate.{key} must be an array of nonempty globs")
+        setattr(cfg, key, paths)
     cfg.lock = Path(gate.get("lock", cfg.lock))
     cfg.checks = []
     for i, c in enumerate(gate.get("check", [])):
         when = c.get("when", "attempt")
         if when not in CHECK_TIERS:
-            raise ConfigError(f'{path}: gate.check[{i}].when must be "attempt" or "pr", got {when!r}')
+            raise ConfigError(f'{path}: gate.check[{i}].when ({c.get("name")!r}) must be "attempt", "pr" or "release", got {when!r}')
         cfg.checks.append(Check(c["name"], list(c["run"]), bool(c.get("exclusive", False)), c.get("timeout"), when))
     names = [c.name for c in cfg.checks]
     if len(set(names)) != len(names) or {"conflict-markers", "leak-scan", "protected-paths"} & set(names):

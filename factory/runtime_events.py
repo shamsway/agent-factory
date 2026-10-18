@@ -21,6 +21,8 @@ LOCK_LIMIT = 512
 LOCK_BYTES = 1024 * 1024
 ERROR_LIMIT = 32
 IDENTITY = lifecycle._IDENTITY_FIELDS
+# A ticket scope advances attempt/review_round in place so its children inherit them.
+FIXED_IDENTITY = tuple(field for field in IDENTITY if field not in {"attempt", "review_round"})
 KINDS = {
     "enter", "exit", "handoff", "child_start", "child_exit", "check", "result", "timeout",
     "lock_acquired", "lock_released", "resource_requested", "wait", "wait_end",
@@ -33,12 +35,12 @@ OUTCOMES = {
 }
 REASONS = {
     "APPROVE", "REVISE", "unparsed_verdict", "merge_conflict", "upstream_gate_failed",
-    "upstream_sync", "check_terminated_by_signal", "check_timeout", "configured_check_failed",
+    "upstream_sync", "upstream_staged", "check_terminated_by_signal", "check_timeout", "configured_check_failed",
     "conflict_markers", "git_grep_failed", "git_diff_failed", "leak_scan_matches",
     "github_command_failed", "triage_endpoint_timeout", "triage_endpoint_unavailable",
     "no_tickets", "unparseable_decision", "triage_feedback", "ci_pending", "no_passing_ci",
-    "exclusive_resource", "merge_lock_contended", "ticket_lock_contended", "capacity_reached",
-    "state_changed", "check_failed", "stuck", "hung_after_done", "budget_exceeded",
+    "exclusive_resource", "merge_lock_contended", "ticket_lock_contended", "capacity_reached", "worker_unavailable",
+    "state_changed", "check_failed", "stuck", "hung_after_done", "budget_exceeded", "root_dirty",
     "scheduled_next_pass", "scope exited before its registered children were reaped",
     "recorded execution ended according to process and lock evidence",
 }
@@ -548,11 +550,14 @@ def _executions(retained: list, history: dict, gaps: list, observation: _Observa
         terminal = next((row for row in events if row["kind"] == "exit"), None)
         sequences = [row["sequence"] for row in events]
         inconsistent = any(
-            any(row[field] != events[0][field] for field in IDENTITY) for row in events
+            any(row[field] != events[0][field] for field in FIXED_IDENTITY) for row in events
         )
         causal_gap = sequences != list(range(sequences[0], sequences[0] + len(sequences)))
-        if inconsistent or causal_gap or entry is None or entry["sequence"] != 1:
-            code = "identity_conflict" if inconsistent else "missing_enter" if entry is None else "sequence_gap"
+        # A clipped window hides the entry of executions that began before it; that is
+        # already reported as byte_limit/event_limit, not a missing enter.
+        clipped = entry is None and history["truncated"] and sequences[0] > 1
+        if inconsistent or causal_gap or entry is None and not clipped or entry is not None and entry["sequence"] != 1:
+            code = "identity_conflict" if inconsistent else "missing_enter" if entry is None and not clipped else "sequence_gap"
             if code not in history["gaps"]:
                 history["gaps"].append(code)
             history["complete"] = False

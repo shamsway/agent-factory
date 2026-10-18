@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from factory import briefing, config, decisions
+from factory import actions, briefing, config, decisions
 from factory.workspace import ACCESS_FILE, MAX_CHAT_BODY, Handler, Server, Workspace
 
 REPOSITORY = "acme/widgets"
@@ -267,6 +267,14 @@ class WorkspaceHTTPTest(unittest.TestCase):
     def test_idle_and_partial_headers_release_client_capacity(self) -> None:
         self.server.header_timeout = 0.3
         self.server._clients = threading.BoundedSemaphore(1)
+        admitted = threading.Event()
+        bounded_request = self.server._bounded_request
+
+        def observe_admission(request, address) -> None:
+            admitted.set()
+            bounded_request(request, address)
+
+        self.server._bounded_request = observe_admission
 
         def slot_available() -> bool:
             if not self.server._clients.acquire(blocking=False):
@@ -279,10 +287,16 @@ class WorkspaceHTTPTest(unittest.TestCase):
             ("partial headers", b"GET / HTTP/1.1\r\nHost: localhost"),
         ):
             with self.subTest(client=label):
+                # A complete response can arrive before its handler releases the slot.
+                self.assertTrue(self.server._clients.acquire(timeout=2))
+                self.server._clients.release()
+                admitted.clear()
                 client = socket.create_connection(self.server.server_address, timeout=1)
                 try:
                     if prefix:
                         client.sendall(prefix)
+                    # Probing before admission can take the only slot and cause a 503.
+                    self.assertTrue(admitted.wait(2), f"{label} client was not admitted")
                     occupied = False
                     deadline = time.monotonic() + 2
                     while time.monotonic() < deadline:
@@ -358,6 +372,18 @@ class WorkspaceHTTPTest(unittest.TestCase):
             called_cfg, called_requests = prepare.call_args.args
             self.assertEqual(called_cfg.root, self.root.resolve())
             self.assertEqual(called_requests, preview["requests"])
+            self.assertEqual(prepare.call_args.kwargs, {"caller": "dashboard"})
+        with mock.patch.object(actions, "prepare", return_value=preview) as prepare:
+            action_body = {"repository": REPOSITORY, "action": "requeue_agent", "args": {"number": 7}}
+            status, _, result = self.request("POST", "/api/decisions/prepare", action_body, auth=True, intent=True)
+            self.assertEqual((status, result["proposal_id"]), (200, "a" * 32))
+            self.assertEqual(prepare.call_args.args[1:], ("requeue_agent", {"number": 7}))
+            self.assertEqual(prepare.call_args.kwargs, {"caller": "dashboard"})
+            prepare.side_effect = decisions.DecisionError("issue is not open", "precondition_failed")
+            status, _, result = self.request("POST", "/api/decisions/prepare", action_body, auth=True, intent=True)
+            self.assertEqual((status, result["error"]["code"]), (409, "precondition_failed"))
+            status, _, result = self.request("POST", "/api/decisions/prepare", {**action_body, "requests": []}, auth=True, intent=True)
+            self.assertEqual((status, result["error"]["code"]), (400, "invalid_request"))
 
         receipt = {"proposal_id": "a" * 32, "status": "success", "ok": True}
         with mock.patch.object(decisions, "apply", return_value=receipt) as apply:

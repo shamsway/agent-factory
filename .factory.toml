@@ -2,7 +2,8 @@
 # Gate checks proposed by District from: --check
 
 [gate]
-protected_paths = [".factory.toml", "tests/**", "**/acceptance/**", "**/*review*prompt*", "TRACKING*", "**/TRACKING*"]
+protected_paths = [".factory.toml", "**/acceptance/**", "**/*review*prompt*", "TRACKING*", "**/TRACKING*"]
+add_only_paths = ["tests/**"]
 
 [[gate.check]]
 name = "test"
@@ -44,3 +45,12 @@ when = "pr"
 
 [dashboard]
 theme = ".factory-dashboard.css"
+
+[dispatch]
+review_rounds = 3
+
+[release]
+auto = true
+
+[manager]
+rounds = 3

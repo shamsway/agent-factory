@@ -43,7 +43,7 @@ class InvestigationLaneTest(unittest.TestCase):
             labels = {"labels": [{"name": config.LABEL_INVESTIGATE}]}
             with mock.patch.object(dispatch, "run") as run_mock, \
                  mock.patch.object(dispatch, "gh_json", return_value=labels):
-                dispatch.escalate(7, "investigation produced no findings report", None)
+                dispatch.escalate(7, "investigation produced no findings report", None, code="investigation_empty")
             edit = next(c.args[0] for c in run_mock.call_args_list if c.args[0][:3] == ["gh", "issue", "edit"])
             removed = {edit[i + 1] for i, arg in enumerate(edit) if arg == "--remove-label"}
             self.assertEqual({config.LABEL_AGENT, config.LABEL_INVESTIGATE}, removed)
@@ -121,6 +121,7 @@ class InvestigationLaneTest(unittest.TestCase):
                  mock.patch("factory.plan.is_initiative", return_value=False), \
                  mock.patch.object(dispatch, "run", side_effect=fake_run), \
                  mock.patch.object(dispatch, "ensure_worktree", return_value=wt), \
+                 mock.patch.object(dispatch.shutil, "which", return_value="/usr/bin/worker"), \
                  mock.patch.object(dispatch, "build_prompt", return_value="prompt") as build_prompt_mock, \
                  mock.patch.object(dispatch, "run_worker", autospec=True, return_value=(0, None)) as run_worker_mock, \
                  mock.patch.object(dispatch, "finish_investigation") as finish_mock, \
