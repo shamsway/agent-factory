@@ -176,12 +176,14 @@ def _review_command(prompt: str) -> tuple[list[str], bool]:
         command[1:1] = ["--mode", "json"]
     return command, True
 
-def _with_transcript(argv: list[str], n: int) -> tuple[list[str], Path | None]:
+def _with_transcript(argv: list[str], n: int, wrap: int = 0) -> tuple[list[str], Path | None]:
     """Keep an OMP worker's session under .factory/transcripts/<n> so the full
     transcript (tool calls, reasoning) survives per ticket for `learn`/scoring.
-    Non-OMP workers, `--no-session`, or an explicit `--session-dir` are left alone."""
-    at = next((i for i, a in enumerate(argv) if Path(a).name == "omp"), None)
-    if at is None or any(a == "--no-session" or a.startswith("--session-dir") for a in argv):
+    Non-OMP workers, `--no-session`, or an explicit `--session-dir` are left alone.
+    The first `wrap` arguments are the host's [worker_wrap], never the worker: a
+    wrap argument naming an omp path (a bind of the worker's omp home) is not omp."""
+    at = next((i for i, a in enumerate(argv) if i >= wrap and Path(a).name == "omp"), None)
+    if at is None or any(a == "--no-session" or a.startswith("--session-dir") for a in argv[wrap:]):
         return argv, None
     where = FACTORY / "transcripts" / str(n)
     where.mkdir(parents=True, exist_ok=True)
@@ -2337,7 +2339,7 @@ def worker_round(
     started = time.monotonic()
     wall = time.time()
     worker = cfg.worker_key({selected_worker} if selected_worker else labels)
-    argv, session_dir = _with_transcript(cfg.worker({worker}, promptfile, wt), n)
+    argv, session_dir = _with_transcript(cfg.worker({worker}, promptfile, wt), n, len(cfg.worker_wrap))
     # The gate compares against main as it was before the worker could touch any ref.
     base = trusted_rev(f"origin/{cfg.main}")
     code, fired = run_worker(

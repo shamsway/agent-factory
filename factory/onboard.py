@@ -468,11 +468,11 @@ def doctor(argv: list[str]) -> int:
     plans, truncated = leftover_plans(cfg.root)
     temps = abandoned_plan_dirs()
     found = [*map(str, plans), *(f"{tempfile.gettempdir()}/{name}" for name in temps)]
-    scope = f"first {PLAN_SCAN_DIRS} directories of the checkout and worktrees" if truncated else "the checkout or worktrees"
+    scope = f"the first {PLAN_SCAN_DIRS} directories of the checkout and worktrees," if truncated else "the checkout, worktrees"
     report(None if found or truncated else True, "terraform plan files",
            f"{len(found)} saved plan(s) or plan scratch dir(s) may hold secrets; delete them: {', '.join(found[:5])}"
-           + (" ..." if len(found) > 5 else "") + (f" (scanned only the {scope})" if truncated else "")
-           if found else (f"none in the {scope} or temp dir" + ("; scan truncated" if truncated else "")))
+           + (" ..." if len(found) > 5 else "") + (f" (scanned only {scope.rstrip(',')})" if truncated else "")
+           if found else (f"none in {scope} or temp dir" + ("; scan truncated" if truncated else "")))
 
     unknown = config.unknown_keys(cfg.raw_repo)
     report(
