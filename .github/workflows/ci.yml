@@ -8,7 +8,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the privacy check reads every commit of the PR
       - uses: astral-sh/setup-uv@v6
+      - name: Publication privacy (added lines, commit messages, branch name)
+        # Generic rules only here; operator terms live in a private denylist, run locally.
+        # Upstream sync merges carry the upstream history and are reviewed separately.
+        if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'sync/')
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.head_ref }}
+        run: python3 scripts/privacy-check.py --range "$BASE...$HEAD" --branch "$BRANCH"
       - name: Ruff
         run: uvx ruff@0.16.10 check .
       - run: |

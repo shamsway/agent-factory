@@ -33,16 +33,16 @@ class DeployTargetConfigTest(unittest.TestCase):
     """Test target configuration loading and backward compatibility."""
 
     def test_single_apply_table_maps_to_default_target(self) -> None:
-        toml = '[apply]\nenabled = true\ndir = "terraform/homelab-collectors"\n'
+        toml = '[apply]\nenabled = true\ndir = "terraform/collectors"\n'
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), toml)
             cfg = config.load(repo)
             self.assertTrue(cfg.apply_enabled)
-            self.assertEqual(cfg.apply_dir, "terraform/homelab-collectors")
+            self.assertEqual(cfg.apply_dir, "terraform/collectors")
             self.assertIn("default", cfg.targets)
             default_t = cfg.targets["default"]
             self.assertEqual(default_t.name, "default")
-            self.assertEqual(default_t.dir, "terraform/homelab-collectors")
+            self.assertEqual(default_t.dir, "terraform/collectors")
             self.assertTrue(default_t.enabled)
 
     def test_explicit_multi_targets_list_syntax(self) -> None:
@@ -52,14 +52,14 @@ enabled = true
 
 [[apply.targets]]
 name = "collectors"
-dir = "terraform/homelab-collectors"
-backend_key = "homelab/collectors.tfstate"
+dir = "terraform/collectors"
+backend_key = "infra/collectors.tfstate"
 
 [[apply.targets]]
 name = "network"
 dir = "terraform/network"
 enabled = false
-backend_key = "homelab/network.tfstate"
+backend_key = "infra/network.tfstate"
 """
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d), toml)
@@ -67,13 +67,13 @@ backend_key = "homelab/network.tfstate"
             self.assertIn("collectors", cfg.targets)
             self.assertIn("network", cfg.targets)
             c = cfg.targets["collectors"]
-            self.assertEqual(c.dir, "terraform/homelab-collectors")
+            self.assertEqual(c.dir, "terraform/collectors")
             self.assertTrue(c.enabled)
-            self.assertEqual(c.backend_key, "homelab/collectors.tfstate")
+            self.assertEqual(c.backend_key, "infra/collectors.tfstate")
             n = cfg.targets["network"]
             self.assertEqual(n.dir, "terraform/network")
             self.assertFalse(n.enabled)
-            self.assertEqual(n.backend_key, "homelab/network.tfstate")
+            self.assertEqual(n.backend_key, "infra/network.tfstate")
 
     def test_explicit_multi_targets_dict_syntax(self) -> None:
         toml = """
@@ -81,7 +81,7 @@ backend_key = "homelab/network.tfstate"
 enabled = true
 
 [apply.targets.collectors]
-dir = "terraform/homelab-collectors"
+dir = "terraform/collectors"
 enabled = true
 
 [apply.targets.monitoring]
@@ -93,7 +93,7 @@ enabled = true
             cfg = config.load(repo)
             self.assertIn("collectors", cfg.targets)
             self.assertIn("monitoring", cfg.targets)
-            self.assertEqual(cfg.targets["collectors"].dir, "terraform/homelab-collectors")
+            self.assertEqual(cfg.targets["collectors"].dir, "terraform/collectors")
             self.assertEqual(cfg.targets["monitoring"].dir, "terraform/monitoring")
 
 
@@ -422,7 +422,7 @@ class DeploySelectionAndAuthorizationTest(unittest.TestCase):
         from factory import apply, dispatch
 
         with tempfile.TemporaryDirectory() as d:
-            toml = '[apply]\nenabled = true\nbackend = "homelab/shared.tfstate"\n'
+            toml = '[apply]\nenabled = true\nbackend = "infra/shared.tfstate"\n'
             repo = make_repo(Path(d), toml)
             cfg = config.load(repo)
             dispatch.configure(cfg)
@@ -669,12 +669,12 @@ enabled = true
 [[apply.targets]]
 name = "collectors"
 dir = "terraform/collectors"
-backend_key = "shared_homelab"
+backend_key = "shared_state"
 
 [[apply.targets]]
 name = "monitoring"
 dir = "terraform/monitoring"
-backend_key = "shared_homelab"
+backend_key = "shared_state"
 """
             repo = make_repo(Path(d), toml)
             cfg = config.load(repo)
@@ -682,11 +682,11 @@ backend_key = "shared_homelab"
             apply.configure(cfg)
             cfg.factory.mkdir(parents=True, exist_ok=True)
 
-            self.assertEqual(cfg.targets["collectors"].backend_key, "shared_homelab")
-            self.assertEqual(cfg.targets["monitoring"].backend_key, "shared_homelab")
+            self.assertEqual(cfg.targets["collectors"].backend_key, "shared_state")
+            self.assertEqual(cfg.targets["monitoring"].backend_key, "shared_state")
 
-            # Holding backend lock for 'shared_homelab' prevents both targets from running
-            b_ok, b_fd = deploy.acquire_backend_lock(cfg.factory, "shared_homelab")
+            # Holding backend lock for 'shared_state' prevents both targets from running
+            b_ok, b_fd = deploy.acquire_backend_lock(cfg.factory, "shared_state")
             self.assertTrue(b_ok)
 
             with mock.patch.object(config, "load", return_value=cfg), \

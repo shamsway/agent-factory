@@ -99,7 +99,7 @@ class TfPlanCheckTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d).resolve()
-            tf_root = tmp / "terraform" / "homelab-collectors"
+            tf_root = tmp / "terraform" / "collectors"
             tf_root.mkdir(parents=True)
             invocation_cwd = tmp / "worktree-root"
             invocation_cwd.mkdir()
