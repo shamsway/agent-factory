@@ -499,6 +499,13 @@ def doctor(argv: list[str]) -> int:
         "none: the merge stage refuses PRs with no passing check (factory init writes one)" if not flows
         else (f"{CI_WORKFLOW} still runs the placeholder step; make it run the gate commands" if placeholder else ", ".join(p.name for p in flows)),
     )
+    if any(check.when == "release" for check in cfg.checks):
+        release_flows = [p.name for p in flows if "--tier release" in p.read_text()]
+        report(
+            True if release_flows else None, "release gate workflow",
+            ", ".join(release_flows) if release_flows
+            else f'{CONFIG_NAME} has `when = "release"` checks but no workflow runs `factory gate --tier release` on a v* tag',
+        )
 
     if cfg.upstream:
         ok = sh(["git", "remote", "get-url", cfg.upstream], cwd=cfg.root).returncode == 0
@@ -782,6 +789,15 @@ def interpreter_probe(cfg: config.Config) -> tuple[bool, str]:
     return True, f"{python} loads {identity}"
 
 
+def systemd_environment(key: str, value: str) -> str:
+    """One `Environment=` line; systemd splits unquoted assignments on whitespace, so
+    `UV_EXCLUDE_NEWER=24 hours` would set `24` and drop `hours`."""
+    assignment = f"{key}={value}".replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if re.fullmatch(r"[A-Za-z0-9_./:@+,=-]+", assignment):
+        return f"Environment={assignment}\n"
+    return f'Environment="{assignment}"\n'
+
+
 def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
     exe = f"{systemd_argument(str(service_python(cfg)))} -P -m factory"
     # At boot the user manager's PATH is the systemd default (no ~/.local/bin),
@@ -789,14 +805,17 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
     # [install].env (host config) adds one line each: policy such as UV_EXCLUDE_NEWER.
     # [install].dispatch_env goes only into the triage+dispatcher unit: its GitHub identity.
     env = f"Environment=PATH={os.environ['PATH']}\n"
-    env += "".join(f"Environment={k}={v}\n" for k, v in cfg.install["env"].items())
-    dispatch_env = env + "".join(f"Environment={k}={v}\n" for k, v in cfg.install.get("dispatch_env", {}).items())
+    env += "".join(systemd_environment(k, v) for k, v in cfg.install["env"].items())
+    dispatch_env = env + "".join(systemd_environment(k, v) for k, v in cfg.install.get("dispatch_env", {}).items())
     return {
         f"{cfg.unit}.service": (
             f"[Unit]\nDescription=factory triage + dispatcher for {cfg.repo} (one pass)\n\n"
             # `-` prefix: an offline triage model must not stop the dispatch pass.
             f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{dispatch_env}"
             f"ExecStart=-{exe} triage\nExecStart={exe} dispatch\n"
+            # Post-pass monitor, after success or failure: systemd hands it $SERVICE_RESULT,
+            # so a crashed pass files itself. `-`: the monitor never fails the unit.
+            f"ExecStopPost=-{exe} watch\n"
         ),
         f"{cfg.unit}.timer": (
             f"[Unit]\nDescription=Run the factory pass for {cfg.repo} every {every}\n\n"

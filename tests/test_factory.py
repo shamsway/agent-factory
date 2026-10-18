@@ -34,6 +34,11 @@ from datetime import UTC
 
 from factory import __version__, config, lifecycle, manage, runtime_events
 
+# A worker runs this suite inside the dispatcher's handoff env; an inherited context would
+# redirect every fixture's lifecycle rows (gate timeouts, review verdicts...) into the live
+# journal, where `factory watch` files them as factory bugs. Tests that need a context set one.
+os.environ.pop(lifecycle.CONTEXT_ENV, None)
+
 
 def host_file(text: str) -> None:
     path = XDG / "factory" / "config.toml"
@@ -617,6 +622,7 @@ class HostConfigTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertFalse(marker.exists(), "service imported the checkout package")
             self.assertEqual(commands, ["triage", "dispatch", "dashboard"])
+            self.assertRegex(generated.stdout, r"\nExecStopPost=-.* -P -m factory watch\n")
 
             installed = run("install", "--no-dashboard")
             self.assertEqual(installed.returncode, 0, installed.stderr)
@@ -780,6 +786,7 @@ class HostConfigTest(unittest.TestCase):
                 (f'ExecStart="{escaped}" -P -m factory dashboard'
                  ' --host 127.0.0.1 --port 8765 --no-open'),
             ])
+            self.assertIn(f'ExecStopPost=-"{escaped}" -P -m factory watch\n', rendered.stdout)
             accepted = run("install", "--no-dashboard")
             self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
             self.assertIn(str(literal), accepted.stdout)
@@ -878,6 +885,29 @@ class HostConfigTest(unittest.TestCase):
             self.assertIn("2 saved plan(s)", r["detail"])
             self.assertIn(".factory/wt-7/terraform/a/.factory/tfplan", r["detail"])
             self.assertNotIn("terraform/c", r["detail"])
+
+    def test_init_writes_release_gate_job_and_doctor_warns_when_missing(self) -> None:
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            stubs = stub_bin(Path(d), gh=gh, systemctl="echo inactive")
+            doctor = lambda: {r["label"]: r for r in json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]}
+            proc = factory(repo, "init", "--no-labels")
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            ci = repo / ".github/workflows/ci.yml"
+            text = ci.read_text()
+            release = text[text.index("  release:"):]
+            self.assertIn("tags: ['v*']", text[:text.index("jobs:")])
+            self.assertIn("startsWith(github.ref, 'refs/tags/v')", release)
+            self.assertIn("factory gate --tier release", release)
+            self.assertNotIn("release gate workflow", doctor())
+            toml = repo / config.CONFIG_NAME
+            toml.write_text(toml.read_text() + '\n[[gate.check]]\nname = "e2e"\nrun = ["true"]\nwhen = "release"\n')
+            self.assertEqual(doctor()["release gate workflow"]["status"], "PASS")
+            ci.write_text(text[:text.index("  release:")])
+            row = doctor()["release gate workflow"]
+            self.assertEqual(row["status"], "WARN")
+            self.assertIn("--tier release", row["detail"])
 
     def test_doctor_accepts_district_engine_metadata_without_loading_it(self) -> None:
         metadata = (
@@ -1364,7 +1394,8 @@ unused = ["agent"]
             from factory import dashboard
 
             totals = stats.human_touch_metrics([row], datetime(2026, 9, 8, 0, 12, tzinfo=UTC))
-            self.assertEqual(totals, {"escalations_per_week": 2, "human_resolved_pct": 50.0})
+            self.assertEqual(totals, {"escalations_per_week": 2, "escalations_by_code": {"unknown": 2},
+                                      "human_resolved_pct": 50.0})
             dashboard.configure(stats.cfg)
             ticket_issue = {
                 **details, "url": "", "updatedAt": details["closedAt"],
@@ -1473,10 +1504,12 @@ class DashboardTest(unittest.TestCase):
             ticket["human_touch"] = {"escalation_count": count}
         m = dashboard.metrics(tickets)
         self.assertEqual(m, {"first_pass": 0.5, "bounce_rate": 0.5, "escalations": 2, "med_attempts": 2,
-                             "escalations_per_week": 0, "human_resolved_pct": None, "human_touched_pct": None})
+                             "escalations_per_week": 0, "escalations_by_code": {}, "human_resolved_pct": None,
+                             "human_touched_pct": None})
         self.assertEqual(dashboard.metrics([]), {"first_pass": None, "bounce_rate": None, "escalations": 0,
                                                "med_attempts": None, "escalations_per_week": 0,
-                                               "human_resolved_pct": None, "human_touched_pct": None})
+                                               "escalations_by_code": {}, "human_resolved_pct": None,
+                                               "human_touched_pct": None})
 
     def test_consecutive_failures_from_journal(self) -> None:
         from factory import dashboard
@@ -1530,6 +1563,51 @@ class GateTest(unittest.TestCase):
             self.assertIn("- leak-scan: FAIL", report)
             self.assertIn("CONFIDENTIAL", report)
             self.assertIn("notes.md:1: [CONFIDENTI\x41L] see the", report)
+
+    def test_release_gate_tier_runs_only_release_checks(self) -> None:
+        toml = (
+            '[[gate.check]]\nname = "unit"\nrun = ["sh", "-c", "touch unit"]\n'
+            '[[gate.check]]\nname = "slow"\nrun = ["sh", "-c", "touch slow"]\nwhen = "pr"\n'
+            '[[gate.check]]\nname = "e2e"\nrun = ["sh", "-c", "touch e2e"]\nwhen = "release"\n'
+        )
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), toml)
+            ran = lambda: sorted(n for n in ("unit", "slow", "e2e") if (repo / n).exists())
+            code, out, report = gate(repo)
+            self.assertEqual(code, 0, out)
+            self.assertTrue(report.startswith("# Gate report\n"), report[:40])
+            self.assertIn("- unit: PASS", report)
+            self.assertIn("- slow: SKIP (pr tier)", report)
+            self.assertIn("- e2e: SKIP (release tier)", report)
+            self.assertEqual(ran(), ["unit"])
+            (repo / "unit").unlink()
+
+            code, out, report = gate(repo, "--tier", "pr")
+            self.assertEqual(code, 0, out)
+            self.assertIn("- slow: PASS", report)
+            self.assertIn("- e2e: SKIP (release tier)", report)
+            self.assertNotIn("- unit:", report)
+            self.assertEqual(ran(), ["slow"])
+            (repo / "slow").unlink()
+
+            code, out, report = gate(repo, "--tier", "release")
+            self.assertEqual(code, 0, out)
+            self.assertIn("# Gate report (release tier)", report)
+            self.assertIn("- e2e: PASS", report)
+            self.assertNotIn("- unit:", report)
+            self.assertNotIn("- slow:", report)
+            self.assertNotIn("conflict-markers", report)
+            self.assertNotIn("leak-scan", report)
+            self.assertEqual(ran(), ["e2e"])
+
+    def test_unknown_gate_check_tier_is_a_config_error_naming_the_check(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[[gate.check]]\nname = "dashboard-smoke"\nrun = ["true"]\nwhen = "nightly"\n')
+            code, out, _ = gate(repo)
+            self.assertEqual(code, 1)
+            self.assertIn("gate.check[0].when", out)
+            self.assertIn("dashboard-smoke", out)
+            self.assertIn("nightly", out)
 
     # \x escapes keep these fixtures from tripping this repo's own leak scan.
     def test_default_leak_pattern_skips_generic_words(self) -> None:
@@ -2240,6 +2318,50 @@ PY
                     review.assert_not_called()
                     escalate.assert_called_once()
 
+    def test_add_only_edit_escalates_with_add_only_reason(self) -> None:
+        """#228 AC3: changing an existing line under `[gate].add_only_paths` escalates with the add-only wording."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d), '[repo]\nslug = "acme/widgets"\n[gate]\nadd_only_paths = ["tests/**"]\n')
+            (repo / "tests").mkdir()
+            (repo / "tests" / "test_old.py").write_text("assert True\n")
+            git(repo, "add", "tests/test_old.py")
+            git(repo, "commit", "-q", "-m", "add test")
+            git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            bare = Path(d) / "origin.git"
+            git(repo, "init", "-q", "--bare", str(bare))
+            git(repo, "remote", "set-url", "origin", str(bare))
+            cfg = config.Config(
+                root=repo, repo="acme/widgets",
+                workers={"default": ["sh", "-c", "printf 'assert False\\n' > tests/test_old.py"]},
+            )
+            dispatch.configure(cfg)
+            wt = cfg.factory / "wt-7"
+            wt.parent.mkdir()
+            git(repo, "worktree", "add", "-q", str(wt), "-b", "agent/7")
+            issue = {
+                "number": 7, "title": "Weaken test", "body": "Weaken", "comments": [], "state": "OPEN",
+                "assignees": [], "labels": [{"name": config.LABEL_AGENT}],
+            }
+            original_run = dispatch.run
+
+            def fake_run(cmd, *args, original_run=original_run, **kwargs):
+                if cmd[0] == "gh":
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                return original_run(cmd, *args, **kwargs)
+
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(ROOT)}), \
+                    mock.patch.object(dispatch, "gh_json", return_value=issue), \
+                    mock.patch.object(dispatch, "run", side_effect=fake_run), \
+                    mock.patch.object(dispatch, "escalate") as escalate:
+                dispatch.process_ticket(issue, 5, False)
+            escalate.assert_called_once()
+            self.assertEqual(escalate.call_args.args[1], "worker removed or changed existing tests")
+            self.assertIn("-assert True", escalate.call_args.kwargs["extra"])
+
     def test_red_ci_pr_is_fixed_relabelled_and_merged_on_the_next_pass(self) -> None:
         """#15 exit gate: red CI withdrew the label; FIX + green gate + APPROVE relabel; next pass merges."""
         repo, stubs, packet = self.scenario()
@@ -2251,6 +2373,8 @@ PY
             + '\n[review]\ncommand = ["printf", "VERDICT: APPROVE"]'
             + '\n[[gate.check]]\nname = "unit"\nrun = ["true"]\n[repo]\nslug = "acme/widgets"\n'
         )
+        git(repo, "add", config.CONFIG_NAME)
+        git(repo, "commit", "-qm", "config")
         wt = repo / ".factory/wt-7"
         git(repo, "worktree", "add", "-q", str(wt), "-b", "agent/7")
         remote = repo.parent / "origin.git"
@@ -2910,6 +3034,7 @@ class DispatchTest(unittest.TestCase):
             cfg = config.load(repo)
             dispatch.configure(cfg)
             with mock.patch.object(config, "load", return_value=cfg), \
+                    mock.patch.object(dispatch, "pin_root", return_value=[]), \
                     mock.patch.object(dispatch, "gh_json", side_effect=github), \
                     mock.patch.object(dispatch, "land_pass"), \
                     mock.patch.object(dispatch, "review_external_pr"), \
@@ -2959,7 +3084,7 @@ class DispatchTest(unittest.TestCase):
             worker_log.parent.mkdir()
             worker_log.write_text("worker detail\n")
             with mock.patch.object(dispatch, "run"):
-                dispatch.escalate(7, "gate failed", worker_log)
+                dispatch.escalate(7, "gate failed", worker_log, code="gate_failed")
 
             packet = dispatch.FACTORY / "escalations" / "7.md"
             text = packet.read_text()
@@ -2974,7 +3099,7 @@ class DispatchTest(unittest.TestCase):
             self.assertEqual(escalation["packet"], str(packet))
             self.assertEqual(escalation["round"], 1)
             with mock.patch.object(dispatch, "run"):
-                dispatch.escalate(7, "gate failed again", worker_log)
+                dispatch.escalate(7, "gate failed again", worker_log, code="gate_failed")
             escalation = json.loads(dispatch.EVENTS.read_text().splitlines()[-1])
             self.assertEqual(escalation["round"], 2)
 
@@ -3196,35 +3321,49 @@ class DispatchTest(unittest.TestCase):
                 self.assertNotIn("## Brief", dispatch.build_prompt(8, repo))
             self.assertFalse((repo / ".factory" / "brief-8.md").exists())
 
-    def test_sync_escalation_writes_same_packet_shape(self) -> None:
+    def test_worker_gate_rejects_a_sync_head_without_the_upstream_tip(self) -> None:
         from unittest import mock
 
         from factory import dispatch
 
         with tempfile.TemporaryDirectory() as d:
             repo = make_repo(Path(d))
-            dispatch.configure(config.load(repo))
-            wt = dispatch.FACTORY / "wt-upstream"
-            (wt / ".factory").mkdir(parents=True)
-            response = subprocess.CompletedProcess([], 0, "https://github.com/acme/widgets/issues/42\n", "")
-            with mock.patch.object(dispatch, "run", return_value=response):
-                url = dispatch.sync_escalate("abc123", "gate failed", "upstream gate detail")
+            dispatch.configure(config.Config(root=repo, repo="acme/widgets"))
+            dispatch.LOGS.mkdir(parents=True)
+            base = git(repo, "rev-parse", "HEAD")
+            (repo / "u1.txt").write_text("u1")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "upstream u1")
+            tip = git(repo, "rev-parse", "HEAD")
+            git(repo, "reset", "-q", "--hard", base)  # the worker "fixed" the gate by dropping upstream
+            dispatch.sync_record(ticket=7, upstream=tip, commits="1", result="staged", head=base, gate="FAIL")
+            gates: list[dict] = []
 
-            self.assertEqual(url, "https://github.com/acme/widgets/issues/42")
-            packet = dispatch.FACTORY / "escalations" / "42.md"
-            text = packet.read_text()
-            self.assertIn("## Reason\n\ngate failed", text)
-            self.assertIn("## Attempts", text)
-            self.assertIn("## Last gate report\n\nupstream gate detail", text)
-            self.assertIn("## Latest review findings\n\n(none recorded)", text)
-            self.assertIn("## Handoff\n\n(none recorded)", text)
-            self.assertIn("## Log paths\n\n- none recorded", text)
-            self.assertIn(f"## Worktree path\n\n`{wt}`", text)
-            escalation = json.loads(dispatch.EVENTS.read_text().splitlines()[-1])
-            self.assertEqual(escalation["ticket"], 42)
-            self.assertEqual(escalation["upstream"], "abc123")
-            self.assertEqual(escalation["packet"], str(packet))
-            self.assertEqual(escalation["round"], 1)
+            def gate(*_args, **kwargs):
+                gates.append(kwargs)
+                return True, "PASS"
+
+            def worker_round(attempt: int) -> tuple:
+                with mock.patch.object(dispatch, "build_prompt", return_value="prompt"), \
+                        mock.patch.object(dispatch, "run_worker", return_value=(0, None)), \
+                        mock.patch.object(dispatch, "commit_leftovers"), \
+                        mock.patch.object(dispatch, "run_gate", side_effect=gate):
+                    return dispatch.worker_round(7, repo, set(), "ticket", "", attempt, float("inf"))
+
+            ok, report, _, _ = worker_round(1)
+            self.assertFalse(ok)
+            self.assertIn(f"does not contain upstream tip {tip}", report)
+            # No bypass for the worker: the human label still gates protected paths; the gate
+            # exempts only content equal to the tip or the staged candidate and leak-scans from the tip.
+            self.assertEqual(gates, [{"protected_override": False, "upstream": [tip, base]}])
+            attempt = [e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "attempt"][-1]
+            self.assertEqual((attempt["gate"], attempt["head"], attempt["actual_head"]), ("FAIL", base, base))
+
+            git(repo, "merge", "-q", "--no-ff", "-m", "merge upstream tip", tip)
+            ok, report, _, head = worker_round(2)
+            self.assertTrue(ok)
+            self.assertEqual(head, git(repo, "rev-parse", "HEAD"))
+            self.assertNotIn("Gate evidence rejected", report)
 
     def test_learn_writes_lessons_from_events(self) -> None:
         from unittest import mock
@@ -3521,6 +3660,18 @@ class DispatchTest(unittest.TestCase):
                 self.assertNotIn("agent/curate-", (Path(stubs) / "gh.log").read_text())
                 self.assertEqual(git(bare, "branch", "--list", "agent/curate-*"), "")
 
+    def test_learn_curate_accepts_regression_test_under_add_only_paths(self) -> None:
+        """#228: moving `tests/**` to `[gate].add_only_paths` keeps the CURATE regression-test path open."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo, bare, stubs, _ = self.learn_scenario(root, "", '[gate]\nadd_only_paths = ["tests/**"]\n')
+            self.reply_with(root, curate_diff("tests/test_regression.py"))
+            result = factory(repo, "learn", path=stubs)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("CURATE rejected", result.stdout)
+            branch = git(bare, "branch", "--list", "agent/curate-*").lstrip("* ")
+            self.assertEqual(git(bare, "diff", "--name-only", "main", branch).split(), ["tests/test_regression.py"])
+
     def test_cost_pattern_sums_worker_log(self) -> None:
         from factory import dispatch
 
@@ -3607,6 +3758,41 @@ class DispatchTest(unittest.TestCase):
                                  {"ticket": 7, "stage": "worker", "attempt": 1, **expected[label]})
                 attempt = next(e for e in events if e.get("event") == "attempt")
                 self.assertEqual(attempt["cost"], expected[label]["cost"])
+
+    def test_worker_round_keeps_omp_transcript_per_ticket(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        cases = {  # worker argv -> session file expected under .factory/transcripts/7
+            "omp": (["nice", "omp", "-p", "@{prompt}"], True),
+            "ephemeral": (["omp", "-p", "--no-session", "@{prompt}"], False),
+            "other": (["droid", "exec", "{prompt}"], False),
+        }
+        for label, (argv, kept) in cases.items():
+            with self.subTest(worker=label), tempfile.TemporaryDirectory() as d:
+                repo = make_repo(Path(d))
+                dispatch.configure(config.Config(root=repo, repo="acme/widgets", workers={"default": argv}))
+                dispatch.LOGS.mkdir(parents=True)
+
+                def worker(cmd, _wt, logfile, *_args):
+                    logfile.write_text("Working...\n")
+                    if "--session-dir" in cmd:
+                        where = Path(cmd[cmd.index("--session-dir") + 1])
+                        self.assertEqual(cmd[cmd.index("--session-dir") - 1], "omp")
+                        (where / "2026-10-16T00-00-00-000Z_abc.jsonl").write_text('{"type": "session"}\n')
+                    return 0, None
+
+                with mock.patch.object(dispatch, "build_prompt", return_value="prompt"), \
+                        mock.patch.object(dispatch, "run_worker", side_effect=worker), \
+                        mock.patch.object(dispatch, "commit_leftovers"), \
+                        mock.patch.object(dispatch, "run_gate", return_value=(True, "PASS")):
+                    dispatch.worker_round(7, repo, set(), "ticket", "", 1, float("inf"))
+                attempt = next(e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "attempt")
+                if kept:
+                    self.assertEqual(Path(attempt["transcript"]).parent, dispatch.FACTORY / "transcripts" / "7")
+                else:
+                    self.assertIsNone(attempt["transcript"])
 
     def test_worker_round_rejects_gate_that_mutates_head(self) -> None:
         from unittest import mock
@@ -3993,8 +4179,8 @@ class DispatchTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, json.dumps(list(annotations)), "")
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        def escalate(n, reason, log_path, extra=""):
-            dispatch.record("escalate", ticket=n, reason=reason)
+        def escalate(n, reason, log_path, extra="", *, code):
+            dispatch.record("escalate", ticket=n, code=code, reason=reason)
 
         with mock.patch.object(dispatch, "gh_json", side_effect=query), \
                 mock.patch.object(dispatch, "pr_checks", return_value=checks), \
@@ -4735,7 +4921,31 @@ class DispatchTest(unittest.TestCase):
         self.assertIn("plan summary Revision is stale", reason)
         self.assertIn("main changed terraform/app", reason)
 
-    def test_sync_lands_the_clean_prefix_and_escalates_only_the_remainder(self) -> None:
+    def sync_pass_with(self, root: Path, open_issues: list[dict]) -> tuple[list[list[str]], object]:
+        """Run sync_pass with `gh` stubbed: issue creation returns #42; returns (gh argv list, run_gate mock)."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        cfg = config.Config(root=root, repo="acme/widgets", upstream="upstream", main="main")
+        with mock.patch.object(config, "remote_slug", return_value="acme/upstream-widgets"):
+            dispatch.configure(cfg)
+        real_run = dispatch.run
+        gh_calls: list[list[str]] = []
+
+        def run_spy(cmd, **kw):
+            if cmd[0] == "gh":
+                gh_calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "https://github.com/acme/widgets/issues/42\n", "")
+            return real_run(cmd, **kw)
+
+        with mock.patch.object(dispatch, "gh_json", return_value=open_issues), \
+             mock.patch.object(dispatch, "run", side_effect=run_spy), \
+             mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")) as gated:
+            dispatch.sync_pass(False)
+        return gh_calls, gated
+
+    def test_sync_stages_the_clean_tip_as_a_sync_ticket_without_moving_main(self) -> None:
         from unittest import mock
 
         from factory import dispatch
@@ -4743,13 +4953,50 @@ class DispatchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             root, origin, upstream = build_fork(tmp)
-            # origin can be pushed to even though main is checked out there.
+            git(origin, "config", "receive.denyCurrentBranch", "ignore")
+            (upstream / "u1.txt").write_text("u1")
+            git(upstream, "add", "-A")
+            git(upstream, "commit", "-q", "-m", "u1")
+            u1 = git(upstream, "rev-parse", "HEAD")
+            fork_main = git(origin, "rev-parse", "main")
+
+            gh_calls, gated = self.sync_pass_with(root, [])
+
+            gated.assert_called_once_with(mock.ANY, "upstream", skip="leak-scan", protected_override=True)
+            self.assertEqual(git(origin, "rev-parse", "main"), fork_main, "a clean tip must not move main")
+            create = next(c for c in gh_calls if c[:3] == ["gh", "issue", "create"])
+            self.assertEqual(create[create.index("--label") + 1], "ready-for-agent")
+            body = Path(create[create.index("--body-file") + 1]).read_text()
+            self.assertIn(u1, body)
+            self.assertIn("gate on it passed", body)
+            wt = root / ".factory" / "wt-42"
+            self.assertEqual(git(wt, "branch", "--show-current"), "agent/42")
+            self.assertEqual(
+                subprocess.run(["git", "-C", str(wt), "merge-base", "--is-ancestor", u1, "HEAD"], check=False).returncode, 0,
+            )
+            head = git(wt, "rev-parse", "HEAD")
+            self.assertEqual(dispatch.sync_event(42)["upstream"], u1)
+            self.assertEqual(dispatch.sync_staged(42, wt), ("ok", head))
+            attempt = next(e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "attempt")
+            self.assertEqual(
+                (attempt["ticket"], attempt["attempt"], attempt["gate"], attempt["head"], attempt["actual_head"]),
+                (42, 0, "PASS", head, head),
+            )
+            self.assertFalse((root / ".factory" / "wt-upstream").exists())
+
+    def test_sync_stages_the_clean_prefix_but_never_lands_it(self) -> None:
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            root, origin, upstream = build_fork(tmp)
             git(origin, "config", "receive.denyCurrentBranch", "ignore")
 
             # The fork edits shared.txt; upstream later edits the same line.
             (origin / "shared.txt").write_text("fork\n")
             git(origin, "add", "-A")
             git(origin, "commit", "-q", "-m", "fork edit")
+            fork_main = git(origin, "rev-parse", "main")
 
             (upstream / "u1.txt").write_text("u1")
             git(upstream, "add", "-A")
@@ -4760,70 +5007,44 @@ class DispatchTest(unittest.TestCase):
             git(upstream, "commit", "-q", "-m", "u2 conflicting")
             u2 = git(upstream, "rev-parse", "HEAD")
 
-            cfg = config.Config(root=root, repo="acme/widgets", upstream="upstream", main="main")
-            with mock.patch.object(config, "remote_slug", return_value="acme/upstream-widgets"):
-                dispatch.configure(cfg)
+            gh_calls, gated = self.sync_pass_with(root, [])
 
-            with mock.patch.object(dispatch, "gh_json", return_value=[]), \
-                 mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")) as gated, \
-                 mock.patch.object(
-                     dispatch, "sync_escalate", return_value="https://x/issues/1",
-                 ) as escalate:
-                dispatch.sync_pass(False)
-            gated.assert_called_once_with(mock.ANY, "upstream", skip="leak-scan", protected_override=True)
+            gated.assert_not_called()  # a conflicted candidate is the worker's evidence, not a gate run
+            self.assertEqual(git(origin, "rev-parse", "main"), fork_main, "a staged prefix must not land")
+            wt = root / ".factory" / "wt-42"
+            ancestor = lambda rev: subprocess.run(
+                ["git", "-C", str(wt), "merge-base", "--is-ancestor", rev, "HEAD"], check=False,
+            ).returncode == 0
+            self.assertTrue(ancestor(u1), "the conflict-free prefix is staged on the candidate")
+            self.assertFalse(ancestor(u2), "the conflicting tip is left for the worker")
+            create = next(c for c in gh_calls if c[:3] == ["gh", "issue", "create"])
+            body = Path(create[create.index("--body-file") + 1]).read_text()
+            self.assertIn(f"conflict-free prefix through `{u1}`", body)
+            self.assertIn("shared.txt", body)
+            self.assertIn(u2, body)
+            self.assertEqual(dispatch.sync_event(42)["upstream"], u2)
+            self.assertIsNone(dispatch.sync_staged(42, wt))
+            attempt = next(e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "attempt")
+            self.assertEqual((attempt["attempt"], attempt["gate"]), (0, None))
 
-            # Assert in root: it has every upstream object, so a missing commit
-            # cannot make the negative check pass for the wrong reason.
-            git(root, "fetch", "-q", "origin", "main")
-            git(root, "rev-parse", "--verify", f"{u2}^{{commit}}")
-            self.assertEqual(
-                subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", u1, "origin/main"], check=False).returncode,
-                0,
-                "the conflict-free prefix should have landed",
-            )
-            self.assertNotEqual(
-                subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", u2, "origin/main"], check=False).returncode,
-                0,
-                "the conflicting commit must not land",
-            )
-            escalate.assert_called_once()
-            self.assertIn("1 upstream commit(s) remain", escalate.call_args.args[2])
-            self.assertIn("shared.txt", escalate.call_args.args[2])
-
-    def test_sync_escalation_is_not_duplicated_when_the_search_index_lags(self) -> None:
-        from unittest import mock
-
-        from factory import dispatch
-
+    def test_sync_waits_on_an_open_sync_ticket_whoever_owns_it(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
-            root, origin, upstream = build_fork(tmp)
-
-            (origin / "shared.txt").write_text("fork\n")
-            git(origin, "add", "-A")
-            git(origin, "commit", "-q", "-m", "fork edit")
-            (upstream / "shared.txt").write_text("upstream\n")
+            root, _origin, upstream = build_fork(tmp)
+            (upstream / "u1.txt").write_text("u1")
             git(upstream, "add", "-A")
-            git(upstream, "commit", "-q", "-m", "u1 conflicting")
+            git(upstream, "commit", "-q", "-m", "u1")
 
-            cfg = config.Config(root=root, repo="acme/widgets", upstream="upstream", main="main")
-            with mock.patch.object(config, "remote_slug", return_value="acme/upstream-widgets"):
-                dispatch.configure(cfg)
+            # A human-owned escalation from an earlier release is still a sync ticket:
+            # it is never re-claimed or duplicated while open.
+            gh_calls, gated = self.sync_pass_with(
+                root, [{"number": 7, "title": "upstream sync: merge conflict at abc123456789"}],
+            )
 
-            # GitHub's search index has not picked the escalation up yet; the
-            # issue list has. Reading the index would open a second issue for a
-            # conflict a human is already looking at.
-            def lagging_gh_json(cmd, *args, **kwargs):
-                if "--search" in cmd:
-                    return []
-                return [{"number": 7, "title": "upstream sync: merge conflict at abc123456789"}]
-
-            with mock.patch.object(dispatch, "gh_json", side_effect=lagging_gh_json), \
-                 mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")), \
-                 mock.patch.object(dispatch, "sync_escalate") as escalate:
-                dispatch.sync_pass(False)
-
-            escalate.assert_not_called()
+            gated.assert_not_called()
+            self.assertEqual(gh_calls, [])
+            self.assertFalse((root / ".factory" / "wt-7").exists())
+            self.assertFalse((root / ".factory" / "wt-upstream").exists())
 
 
 class FeedbackSnapshotTest(unittest.TestCase):
@@ -5085,13 +5306,17 @@ esac
                                  and r.get("at", "") > "2026-01-01T00:00:00Z" for r in rows))
 
     def test_forced_ticket_and_stale_frontier_never_claim_an_initiative(self) -> None:
-        toml = '[workers]\ndefault = ["worker-stub", "{prompt}"]\n'
+        toml = '[repo]\nslug = "acme/widgets"\n[workers]\ndefault = ["worker-stub", "{prompt}"]\n'
         for argv, listed in ((("--ticket", "9"), '{"name":"ready-for-agent"}'),
                              (("--ticket", "9", "--dry-run"), '{"name":"ready-for-agent"}'),
                              ((), '{"name":"ready-for-agent"}'),                       # frontier row lags the label
                              ((), '{"name":"ready-for-agent"},{"name":"initiative"}')):  # accidentally ready-labelled
             with self.subTest(argv=argv, listed=listed), tempfile.TemporaryDirectory() as d:
                 repo = make_repo(Path(d), toml)
+                remote = Path(d) / "origin.git"
+                git(repo, "init", "-q", "--bare", str(remote))
+                git(repo, "remote", "set-url", "origin", str(remote))
+                git(repo, "push", "-q", "origin", "main")
                 stubs = self.stubs(listed)
                 result = factory(repo, "dispatch", *argv, path=stubs)
                 if "initiative" in listed:
