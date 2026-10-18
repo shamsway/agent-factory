@@ -85,7 +85,7 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # from here. Everything else in the host file is left for other tools (District).
 # `worker_wrap` and `check_wrap` are host-only: a committed table is refused, never merged.
 # `leak_scan.extra` is read from both and concatenated: host terms only add to the scan.
-HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "review", "manager", "install", "prices", "investigation", "publisher"})
+HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "review", "manager", "install", "prices", "investigation", "publisher", "watch"})
 # `apply.env` is credential-shaped like `install.env` -- host-owned so it
 # never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
 # are policy about this repo (does merging it trigger terraform apply, and
@@ -104,6 +104,7 @@ KNOWN_KEYS = {
     "review": ("command",),
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
     "release": ("auto", "version_file", "min_tickets"),
+    "watch": ("enabled", "repo", "labels"),
     "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
     "leak_scan": ("pattern", "exclude", "extra"),
     "triage": ("url", "model", "key", "timeout"),
@@ -289,6 +290,12 @@ class Config:
     release_auto: bool = False
     release_version_file: str = "factory/__init__.py"
     release_min_tickets: int = 5
+    # `factory watch` (post-pass monitor): where it files the factory's own runtime failures.
+    # None = this repository. A host whose target repo is not the factory's own can point it
+    # elsewhere or turn it off; `needs-triage` hands a filed bug to triage like any issue.
+    watch_enabled: bool = True
+    watch_repo: str | None = None
+    watch_labels: list[str] = field(default_factory=lambda: ["bug", "needs-triage"])
     checks: list[Check] = field(default_factory=list)
     protected_paths: list[str] = field(default_factory=list)
     add_only_paths: list[str] = field(default_factory=list)
@@ -686,6 +693,18 @@ def load(start: Path | None = None) -> Config:
     if isinstance(min_tickets, bool) or not isinstance(min_tickets, int) or min_tickets < 1:
         raise ConfigError("release.min_tickets must be a positive integer")
     cfg.release_auto, cfg.release_version_file, cfg.release_min_tickets = auto, version_file, min_tickets
+    watch = raw.get("watch", {})
+    if not isinstance(watch, dict):
+        raise ConfigError("[watch] must be a table")
+    enabled, watch_repo = watch.get("enabled", cfg.watch_enabled), watch.get("repo", cfg.watch_repo)
+    labels = watch.get("labels", cfg.watch_labels)
+    if not isinstance(enabled, bool):
+        raise ConfigError("watch.enabled must be true or false")
+    if watch_repo is not None and (not isinstance(watch_repo, str) or not re.fullmatch(r"[\w.-]+/[\w.-]+", watch_repo)):
+        raise ConfigError('watch.repo must be "owner/name"')
+    if not isinstance(labels, list) or not labels or any(not isinstance(x, str) or not x or "," in x for x in labels):
+        raise ConfigError("watch.labels must be a non-empty array of label names")
+    cfg.watch_enabled, cfg.watch_repo, cfg.watch_labels = enabled, watch_repo, list(labels)
     journal = raw.get("journal", {})
     for key in ("max_mb", "retention"):
         value = journal.get(key, getattr(cfg, f"journal_{key}"))

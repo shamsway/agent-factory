@@ -115,6 +115,33 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(len(self.gh.created), 2, "recurrence after close refiles")
         self.assertEqual([r["issue"] for r in self.events("watch")], [101, 102])
 
+    def test_watch_table_redirects_relabels_or_disables_filing(self) -> None:
+        self.journal(exit_row("manage", "mechanism_failure", "KeyError: 'state'"))
+        self.cfg.watch_enabled = False
+        self.assertEqual(watch.run_pass(self.cfg), [])
+        self.assertEqual(self.gh.calls, [])
+
+        self.cfg.watch_enabled, self.cfg.watch_repo, self.cfg.watch_labels = True, "acme/factory", ["bug"]
+        watch.run_pass(self.cfg)
+        create = self.gh.created[0]
+        self.assertEqual((create[create.index("--repo") + 1], create[create.index("--label") + 1]), ("acme/factory", "bug"))
+        self.assertEqual(self.events("watch")[0]["repo"], "acme/factory")
+        # A filing in another repository does not cover this one: moving back files here.
+        self.cfg.watch_repo = None
+        watch.run_pass(self.cfg)
+        self.assertEqual([c[c.index("--repo") + 1] for c in self.gh.created], ["acme/factory", REPO])
+
+    def test_watch_table_is_validated(self) -> None:
+        for body, message in (('[watch]\nenabled = "no"\n', "watch.enabled"),
+                              ('[watch]\nrepo = "factory"\n', "watch.repo"),
+                              ('[watch]\nlabels = []\n', "watch.labels")):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                subprocess.run(["git", "init", "-q", str(root)], check=True)
+                (root / config.CONFIG_NAME).write_text('[repo]\nslug = "acme/widgets"\n' + body)
+                with self.assertRaisesRegex(config.ConfigError, message):
+                    config.load(root)
+
     def test_no_signals_makes_no_call(self) -> None:
         self.journal(exit_row("dispatch", "completed", None), exit_row("worker", "unknown", "scope exited early"),
                      exit_row("review", "interrupted", "stuck"))

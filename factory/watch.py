@@ -4,7 +4,8 @@ One pass reads four local signals (lifecycle exit rows that name a mechanism fai
 failed `factory-*` systemd units, `dashboard --runtime-json` source errors, one escalation
 code repeating across REPEAT_MIN tickets within REPEAT_DAYS days), fingerprints each by
 reason, unit or journal source (not by stage or reader code: one defect is one issue), and
-opens one `bug,needs-triage` issue per fingerprint not already covered by an open issue.
+opens one issue per fingerprint not already covered by an open issue: `bug,needs-triage` in
+this repository unless `[watch]` names another repository or labels, or turns filing off.
 Filing is journaled as a `watch` row so the next pass can skip or refile.
 """
 from __future__ import annotations
@@ -22,7 +23,6 @@ from pathlib import Path
 
 from factory import config, dispatch, lifecycle
 
-LABELS = "bug,needs-triage"
 MAX_ISSUES = 5
 MAX_ROWS = 20
 MAX_LOG_LINES = 40
@@ -202,9 +202,9 @@ def body(signal: dict) -> str:
     return "\n".join(parts) + "\n"
 
 
-def _closed_before(issue: int, latest: str | None) -> bool:
+def _closed_before(issue: int, latest: str | None, repo: str) -> bool:
     """True when the issue is closed and the newest evidence (None: still present) postdates the close."""
-    state = dispatch.gh_json(["issue", "view", str(issue), "--repo", dispatch.REPO, "--json", "state,closedAt"])
+    state = dispatch.gh_json(["issue", "view", str(issue), "--repo", repo, "--json", "state,closedAt"])
     if state["state"].upper() == "OPEN":
         return False
     # ponytail: gh reports closedAt to the second; a recurrence inside that second refiles once.
@@ -213,8 +213,14 @@ def _closed_before(issue: int, latest: str | None) -> bool:
 
 def run_pass(cfg: config.Config, dry_run: bool = False) -> list[dict]:
     """File at most MAX_ISSUES new fingerprints; return the signals filed (or, dry, would be)."""
+    if not cfg.watch_enabled:
+        dispatch.log("watch: filing disabled ([watch].enabled = false)")
+        return []
+    repo = cfg.watch_repo or dispatch.REPO
     events = lifecycle.read_events(dispatch.EVENTS)
-    filings = {r["fingerprint"]: r for r in events if r.get("event") == "watch"}
+    # A filing names its repository; rows without one predate [watch].repo and were filed here.
+    filings = {r["fingerprint"]: r for r in events
+               if r.get("event") == "watch" and r.get("repo", dispatch.REPO) == repo}
     filed = []
     for signal in signals(cfg, events):
         if len(filed) >= MAX_ISSUES:
@@ -225,18 +231,18 @@ def run_pass(cfg: config.Config, dry_run: bool = False) -> list[dict]:
             continue  # already filed; nothing newer than that filing
         if dry_run:
             verb = f"re-check #{previous['issue']} for" if previous else "would file"
-            print(f"[watch] {verb} {signal['fingerprint']}: {title(signal)}")
+            print(f"[watch] {verb} {signal['fingerprint']} in {repo}: {title(signal)}")
             filed.append(signal)
             continue
-        if previous is not None and not _closed_before(previous["issue"], signal["latest"]):
+        if previous is not None and not _closed_before(previous["issue"], signal["latest"], repo):
             continue
         url = dispatch.run([
-            "gh", "issue", "create", "--repo", dispatch.REPO, "--title", title(signal),
-            "--label", LABELS, "--body", body(signal),
+            "gh", "issue", "create", "--repo", repo, "--title", title(signal),
+            "--label", ",".join(cfg.watch_labels), "--body", body(signal),
         ]).stdout.strip().splitlines()[-1]
         number = int(url.rstrip("/").rsplit("/", 1)[-1])
-        dispatch.record("watch", fingerprint=signal["fingerprint"], issue=number, at=lifecycle._now())
-        dispatch.log(f"watch: filed #{number} for {signal['fingerprint']} ({title(signal)})")
+        dispatch.record("watch", fingerprint=signal["fingerprint"], issue=number, repo=repo, at=lifecycle._now())
+        dispatch.log(f"watch: filed {repo}#{number} for {signal['fingerprint']} ({title(signal)})")
         filed.append(signal)
     return filed
 
