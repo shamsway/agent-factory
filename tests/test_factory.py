@@ -861,6 +861,24 @@ class HostConfigTest(unittest.TestCase):
             self.assertEqual(status["worker wrap"], ("PASS", f"worker wrap: {root}/wrap.sh"))
             self.assertEqual(status["check wrap"], ("FAIL", f"check wrap: {root}/missing.sh"))
 
+    def test_doctor_warns_about_leftover_terraform_plans(self) -> None:
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            stubs = stub_bin(Path(d), gh=gh, systemctl="echo inactive")
+            row = lambda: next(r for r in json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]
+                               if r["label"] == "terraform plan files")
+            self.assertEqual(row()["status"], "PASS")
+            for rel in (".factory/wt-7/terraform/a/.factory/tfplan", "terraform/b/.factory/tfplan",
+                        "terraform/c/.terraform/x/.factory/tfplan"):  # provider caches are skipped
+                (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (repo / rel).write_text("plan\n")
+            r = row()
+            self.assertEqual(r["status"], "WARN")
+            self.assertIn("2 saved plan(s)", r["detail"])
+            self.assertIn(".factory/wt-7/terraform/a/.factory/tfplan", r["detail"])
+            self.assertNotIn("terraform/c", r["detail"])
+
     def test_doctor_accepts_district_engine_metadata_without_loading_it(self) -> None:
         metadata = (
             '[defaults.triage]\nurl = "http://127.0.0.1:1/v1/chat/completions"\n'

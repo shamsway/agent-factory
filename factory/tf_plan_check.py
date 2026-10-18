@@ -13,6 +13,10 @@ not explicitly expected.
     run = ["python", "-m", "factory.tf_plan_check"]
     timeout = 600
 
+The binary plan holds every value the plan read, sensitive ones included,
+so it is written to a private (0700) temp directory, or to `--plan-out` when
+given, and deleted when the check ends, whatever the outcome (SHA-281).
+
 Allow a specific destroy/replace by adding a line to the ticket body (the
 dispatcher writes the full ticket into `.factory-prompt.md` in the
 worktree before the worker runs; that file is still on disk, just
@@ -26,8 +30,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ALLOW_RE = re.compile(r"(?im)^AllowedDestroy:\s*(\S+)\s*$")
@@ -104,7 +110,9 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--dir", default=".", help="terraform root (default: cwd)")
     parser.add_argument(
-        "--plan-out", default=".factory/tfplan", help="path to write the plan file"
+        "--plan-out", default=None,
+        help="path for the plan file, relative to --dir; deleted when the check ends "
+        "(default: a private temp directory)",
     )
     parser.add_argument(
         "--ticket-file",
@@ -116,16 +124,26 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     cwd = Path(args.dir)
-    planfile = Path(args.plan_out)
-    (cwd / planfile).parent.mkdir(parents=True, exist_ok=True)
+    private = None if args.plan_out else Path(tempfile.mkdtemp(prefix="factory-tfplan-"))
+    planfile = private / "tfplan" if private else Path(args.plan_out)
+    if not private:
+        (cwd / planfile).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        return check(cwd, planfile, Path(args.ticket_file))
+    finally:
+        if private:
+            shutil.rmtree(private, ignore_errors=True)
+        else:
+            (cwd / planfile).unlink(missing_ok=True)
 
+
+def check(cwd: Path, planfile: Path, ticket_path: Path) -> int:
     proc = run_plan(cwd, planfile)
     if proc.returncode != 0:
         print(proc.stdout + proc.stderr)
         return proc.returncode
 
     plan = show_json(cwd, planfile)
-    ticket_path = Path(args.ticket_file)
     ticket_text = ticket_path.read_text() if ticket_path.exists() else ""
     changes = destructive_changes(plan)
     if not changes:
