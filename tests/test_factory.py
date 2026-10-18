@@ -845,6 +845,22 @@ class HostConfigTest(unittest.TestCase):
             self.assertIn("on feature, not main", r["detail"])
             self.assertIn("1 tracked file(s) modified", r["detail"])
 
+    def test_doctor_expands_wrap_placeholders_before_lookup(self) -> None:
+        host_file('[defaults.worker_wrap]\ncommand = ["{root}/wrap.sh", "--"]\n'
+                  '[defaults.check_wrap]\ncommand = ["{root}/missing.sh", "--"]\n')
+        self.addCleanup(host_file, "")
+        gh = 'case "$1 $2" in "repo view") echo ADMIN;; "label list") echo "[]";; esac\nexit 0'
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            (repo / "wrap.sh").write_text("#!/bin/sh\nexec \"$@\"\n")
+            (repo / "wrap.sh").chmod(0o755)
+            stubs = stub_bin(Path(d), gh=gh, systemctl="echo inactive")
+            rows = json.loads(factory(repo, "doctor", "--json", path=stubs).stdout)["rows"]
+            status = {r["label"].split(":")[0]: (r["status"], r["label"]) for r in rows if "wrap" in r["label"]}
+            root = str(config.load(repo).root)
+            self.assertEqual(status["worker wrap"], ("PASS", f"worker wrap: {root}/wrap.sh"))
+            self.assertEqual(status["check wrap"], ("FAIL", f"check wrap: {root}/missing.sh"))
+
     def test_doctor_accepts_district_engine_metadata_without_loading_it(self) -> None:
         metadata = (
             '[defaults.triage]\nurl = "http://127.0.0.1:1/v1/chat/completions"\n'
