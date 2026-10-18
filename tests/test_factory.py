@@ -5,6 +5,7 @@ Run: python -m unittest discover -s tests
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -18,6 +19,7 @@ import unittest
 import venv
 from pathlib import Path
 from typing import Self
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -4578,6 +4580,91 @@ class DispatchTest(unittest.TestCase):
             self.assertIn("- agent line", pushed)
             self.assertIn("- main line", pushed)
             self.assertNotIn("<<<<<<<", pushed)
+
+    def _terraform_refresh(self, main_path: str) -> tuple[list, mock.MagicMock, mock.MagicMock, Path, str]:
+        """SHA-279 fixture: agent/7 changes terraform/app/main.tf with a plan
+        summary naming its head; main then moves by committing `main_path`."""
+        from factory import dispatch
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        root, origin, _upstream = build_fork(tmp)
+        (origin / "terraform/app").mkdir(parents=True)
+        (origin / "terraform/app/main.tf").write_text('resource "x" "y" {}\n')
+        git(origin, "add", "-A")
+        git(origin, "commit", "-qm", "app root")
+        git(root, "fetch", "-q", "origin")
+        git(root, "reset", "-q", "--hard", "origin/main")
+        git(origin, "checkout", "-qb", "agent/7")
+        (origin / "terraform/app/main.tf").write_text('resource "x" "y" { a = 1 }\n')
+        git(origin, "commit", "-qam", "change app")
+        old_head = git(origin, "rev-parse", "HEAD")
+        git(origin, "checkout", "-q", "main")
+        Path(origin / main_path).parent.mkdir(parents=True, exist_ok=True)
+        (origin / main_path).write_text("landed\n")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-qm", "other PR landed")
+
+        cfg = config.Config(root=root, repo="acme/widgets", upstream="upstream", main="main")
+        cfg.apply_enabled = True
+        with mock.patch.object(config, "remote_slug", return_value="acme/upstream-widgets"):
+            dispatch.configure(cfg)
+        body = ("Closes #7\n\n## Terraform plan summary\n\nRevision: " + old_head +
+                "\n\nTarget: app. Plan: 0 to add, 1 to change, 0 to destroy. "
+                "Validated with a read-only terraform plan.\n")
+        gh_calls: list = []
+        real_run = dispatch.run
+
+        def run_spy(cmd, *args, **kwargs):
+            if cmd[0] == "gh":
+                gh_calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return real_run(cmd, *args, **kwargs)
+
+        def fake_gh_json(args):
+            if "body,headRefOid" in args:
+                return {"body": body, "headRefOid": git(origin, "rev-parse", "agent/7")}
+            return {"baseRefName": "main"} if args[0] == "pr" else {"labels": []}
+
+        stack = self.enterContext(contextlib.ExitStack())
+        stack.enter_context(mock.patch.object(dispatch, "gh_json", side_effect=fake_gh_json))
+        stack.enter_context(mock.patch.object(dispatch, "run", side_effect=run_spy))
+        stack.enter_context(mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")))
+        stack.enter_context(mock.patch.object(dispatch, "pr_comment"))
+        stack.enter_context(mock.patch.object(dispatch, "approve_pr", return_value=True))
+        review = stack.enter_context(mock.patch.object(dispatch, "review", return_value=("APPROVE", "fine")))
+        esc = stack.enter_context(mock.patch.object(dispatch, "escalate"))
+        return gh_calls, review, esc, origin, old_head
+
+    def test_refresh_restamps_terraform_summary_when_main_moved_elsewhere(self) -> None:
+        # SHA-279: an unchanged patch rebased past unrelated commits keeps its plans.
+        from factory import dispatch, plan_summary
+
+        gh_calls, review, esc, origin, old_head = self._terraform_refresh("docs/other.md")
+        self.assertTrue(dispatch.refresh_pr_branch(7, 100, False))
+
+        new_head = git(origin, "rev-parse", "agent/7")
+        self.assertNotEqual(new_head, old_head)
+        esc.assert_not_called()
+        review.assert_called_once_with(dispatch.FACTORY / "wt-7", 7, "ok", new_head)
+        edits = [c for c in gh_calls if c[:3] == ["gh", "pr", "edit"] and "--body-file" in c]
+        self.assertEqual(len(edits), 1)
+        restamped = Path(edits[0][edits[0].index("--body-file") + 1]).read_text()
+        self.assertIsNone(plan_summary.validate(restamped, new_head))
+        self.assertIn(f"Revision restamped by Factory from {old_head}", restamped)
+        self.assertIn("terraform/app", restamped)
+
+    def test_refresh_escalates_stale_summary_when_main_changed_the_same_root(self) -> None:
+        from factory import dispatch
+
+        gh_calls, review, esc, _origin, _old = self._terraform_refresh("terraform/app/variables.tf")
+        self.assertFalse(dispatch.refresh_pr_branch(7, 100, False))
+
+        review.assert_not_called()
+        self.assertFalse([c for c in gh_calls if "--body-file" in c])
+        esc.assert_called_once()
+        reason = esc.call_args.args[1]
+        self.assertIn("plan summary Revision is stale", reason)
+        self.assertIn("main changed terraform/app", reason)
 
     def test_sync_lands_the_clean_prefix_and_escalates_only_the_remainder(self) -> None:
         from unittest import mock

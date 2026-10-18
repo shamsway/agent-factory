@@ -203,6 +203,7 @@ event. `{}` is a runtime value.
 | `dispatch.refresh_pr_branch` | ``nothing ahead of {} after {}; refusing to push`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``gate failed after {} onto moved main`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``remote head changed while refreshed evidence was being produced`` | refresh → escalate |
+| `dispatch.refresh_pr_branch` | ``Terraform plan summary Revision is stale after {} onto moved main: {}; re-plan at {} and update the summary`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``fresh review requested changes after {} onto moved main`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``approval evidence, head, or human review state changed before refreshed approval`` | refresh → escalate |
 | `dispatch.review_intake_pass` | ``PR #{}: unresolved after {} automated review attempt(s)`` | external PR → ready-for-human |

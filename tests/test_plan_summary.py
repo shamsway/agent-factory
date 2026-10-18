@@ -17,6 +17,29 @@ Validation: terraform plan against the reviewed target at this head
 
 
 class PlanSummaryTest(unittest.TestCase):
+    def test_restamp_moves_only_the_summary_revision(self):
+        body = "Intro Revision: aaa\n\n" + SUMMARY.replace("Revision: head", "Revision: aaa") + "\n## Other\nRevision: aaa\n"
+        out = plan_summary.restamp(body, "aaa", "bbb", "Revision restamped by Factory from aaa.")
+        self.assertIsNone(plan_summary.validate(out, "bbb"))
+        self.assertIn("Revision restamped by Factory from aaa.", plan_summary.section(out))
+        self.assertTrue(out.startswith("Intro Revision: aaa"))
+        self.assertTrue(out.rstrip().endswith("## Other\nRevision: aaa"))
+        again = plan_summary.restamp(out, "bbb", "ccc", "Revision restamped by Factory from bbb.")
+        self.assertIsNone(plan_summary.validate(again, "ccc"))
+        self.assertEqual(plan_summary.section(again).count("Revision restamped by Factory"), 1)
+
+    def test_restamp_refuses_a_summary_naming_another_revision(self):
+        body = SUMMARY.replace("Revision: head", "Revision: zzz")
+        self.assertIsNone(plan_summary.restamp(body, "aaa", "bbb", "note"))
+        self.assertIsNone(plan_summary.restamp("no summary", "aaa", "bbb", "note"))
+
+    def test_normalize_patch_ignores_blob_ids_and_line_numbers_only(self):
+        a = "diff --git a/x b/x\nindex 111..222 100644\n@@ -3,2 +3,2 @@ ctx\n-old\n+new\n"
+        b = "diff --git a/x b/x\nindex 333..444 100644\n@@ -9,2 +9,2 @@ ctx\n-old\n+new\n"
+        self.assertEqual(plan_summary.normalize_patch(a), plan_summary.normalize_patch(b))
+        self.assertNotEqual(plan_summary.normalize_patch(a),
+                            plan_summary.normalize_patch(b.replace("+new", "+newer")))
+
     def test_counts_and_context_are_required(self):
         self.assertIsNone(plan_summary.validate(SUMMARY))
         self.assertIsNotNone(plan_summary.validate(""))
