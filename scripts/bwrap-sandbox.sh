@@ -8,11 +8,15 @@
 # The filesystem is read-only, $HOME is an empty tmpfs (an allowlist: nothing
 # under it is visible unless exposed), /tmp and $XDG_RUNTIME_DIR are private
 # and empty (no session bus, agent or credential-daemon sockets), and the
-# container and VM sockets are hidden. The worktree and the main checkout's .git
-# are writable (and, for a ticket worktree, that ticket's .factory/transcripts/<n>);
-# .git/config and .git/hooks are not, because Factory's own git
-# commands run outside the sandbox and would otherwise run hooks or
-# config-defined commands the worker planted. bwrap sets no_new_privs, so
+# container and VM sockets are hidden. The worktree is writable, and so is, for a
+# linked worktree of the checkout, the object store and that worktree's own
+# administrative directory (.git/worktrees/<name>, found from the checkout's side),
+# plus a ticket worktree's .factory/transcripts/<n>. The rest of .git stays
+# read-only: config, hooks, refs (the shared baseline and every other ticket's
+# branch), packed-refs, replace refs, info/grafts, shallow and the other
+# worktrees' metadata. Factory's own git commands run outside the sandbox, and
+# detach the worktree's HEAD for the worker, so its commits only move that
+# worktree's own HEAD. bwrap sets no_new_privs, so
 # setuid helpers such as sudo cannot raise privilege. The network is shared:
 # this is a credential and host boundary, not a network one.
 set -euo pipefail
@@ -54,13 +58,24 @@ done
 for f in "$home/.gitconfig" "$home/.config/git"; do args+=(--ro-bind-try "$f" "$f"); done
 for p in "${ro[@]}"; do args+=(--ro-bind "$p" "$p"); done
 
-# The checkout: readable, its .factory state hidden, the worktree and the git
-# store writable, git's executable configuration not.
-args+=(--ro-bind "$root" "$root" --tmpfs "$root/.factory" --bind "$cwd" "$cwd"
-       --bind "$root/.git" "$root/.git")
-# A run from the checkout itself (cwd = root) must not re-expose .factory through the cwd bind.
-[[ $cwd == "$root" ]] && args+=(--tmpfs "$root/.factory")
-for p in config hooks; do args+=(--ro-bind-try "$root/.git/$p" "$root/.git/$p"); done
+# The checkout: readable, its .factory state hidden, the worktree writable.
+args+=(--ro-bind "$root" "$root" --tmpfs "$root/.factory" --bind "$cwd" "$cwd")
+# A run from the checkout itself (cwd = root) must not re-expose .factory or a
+# writable .git through the cwd bind.
+[[ $cwd == "$root" ]] && args+=(--tmpfs "$root/.factory" --ro-bind "$root/.git" "$root/.git")
+# A linked worktree's own admin dir: the one whose gitdir names $cwd/.git, read from
+# the checkout's side (the worktree's own .git pointer file is worker-written).
+admin=
+for gitdir in "$root"/.git/worktrees/*/gitdir; do
+  [[ -f $gitdir ]] || continue
+  named=$(<"$gitdir")
+  [[ ${named##*/} == .git && $(realpath -m "${named%/*}") == "$cwd" ]] || continue
+  [[ -z $admin ]] || die "two worktree admin dirs name $cwd"
+  admin=${gitdir%/gitdir}
+done
+if [[ -n $admin && -d $root/.git/objects && ! -L $root/.git/objects && ! -L $admin ]]; then
+  args+=(--bind "$root/.git/objects" "$root/.git/objects" --bind "$admin" "$admin")
+fi
 # A ticket worktree's OMP session dir (dispatch keeps transcripts per ticket under the
 # hidden .factory): only this ticket's, so a worker never reads another ticket's sessions.
 ticket=${cwd#"$root/.factory/wt-"}
