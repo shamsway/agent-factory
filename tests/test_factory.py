@@ -3777,19 +3777,26 @@ class DispatchTest(unittest.TestCase):
 
         from factory import dispatch
 
-        cases = {  # worker argv -> session file expected under .factory/transcripts/7
-            "omp": (["nice", "omp", "-p", "@{prompt}"], True),
-            "ephemeral": (["omp", "-p", "--no-session", "@{prompt}"], False),
-            "other": (["droid", "exec", "{prompt}"], False),
+        # A host wrap that binds the worker's omp home names a path ending in `omp`
+        # before the worker's own argv; the session dir goes after the real omp.
+        wrap = ["/opt/sandbox.sh", "--bind-at", "/state/factory-worker/omp", "/sandbox/.omp", "--"]
+        cases = {  # worker argv, wrap -> session file expected under .factory/transcripts/7
+            "omp": (["nice", "omp", "-p", "@{prompt}"], [], True),
+            "ephemeral": (["omp", "-p", "--no-session", "@{prompt}"], [], False),
+            "other": (["droid", "exec", "{prompt}"], [], False),
+            "wrapped": (["omp", "-p", "@{prompt}"], wrap, True),
+            "wrapped-other": (["droid", "exec", "{prompt}"], wrap, False),
         }
-        for label, (argv, kept) in cases.items():
+        for label, (argv, worker_wrap, kept) in cases.items():
             with self.subTest(worker=label), tempfile.TemporaryDirectory() as d:
                 repo = make_repo(Path(d))
-                dispatch.configure(config.Config(root=repo, repo="acme/widgets", workers={"default": argv}))
+                dispatch.configure(config.Config(root=repo, repo="acme/widgets", workers={"default": argv},
+                                                 worker_wrap=worker_wrap))
                 dispatch.LOGS.mkdir(parents=True)
 
-                def worker(cmd, _wt, logfile, *_args):
+                def worker(cmd, _wt, logfile, *_args, wrap=worker_wrap):
                     logfile.write_text("Working...\n")
+                    self.assertEqual(cmd[:len(wrap)], wrap)
                     if "--session-dir" in cmd:
                         where = Path(cmd[cmd.index("--session-dir") + 1])
                         self.assertEqual(cmd[cmd.index("--session-dir") - 1], "omp")
