@@ -16,7 +16,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from factory import config, lifecycle
+from factory import config, gitguard, lifecycle
 from factory.config import CONFIG_NAME, Config
 
 cfg: Config
@@ -36,8 +36,12 @@ def configure(c: Config) -> None:
     CHECK_TIMEOUT = cfg.check_timeout
 
 
-def timed(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
+def timed(cmd: list[str], timeout: int | None = None, configured: bool = False) -> subprocess.CompletedProcess:
     """Run a command with the per-check timeout (or `timeout` if given).
+
+    Built-in checks are Factory's own git reads: they keep the Git paths the
+    dispatcher pinned (gitguard) and never honor replace refs or grafts. A
+    `configured` check is the repository's own command and sees neither.
 
     A wedged check must FAIL, not sit on the GPU lock (ticket #5's gate hung
     for 2h). The check runs in its own session so a timeout kills the whole
@@ -49,6 +53,7 @@ def timed(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedPro
     # a repo's own tests would otherwise append their fixture rows to the live ledger.
     env = execution.env() if execution else dict(os.environ)
     env.pop(lifecycle.CONTEXT_ENV, None)
+    env = gitguard.strip(env) if configured else {**env, **gitguard.HARDENED}
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
         env=env,
@@ -82,7 +87,7 @@ def timed(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedPro
 
 def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
     """Run a configured check (inside the host `check_wrap`, if any); return (passed, combined output)."""
-    proc = timed(cfg.check_cmd(cmd, Path.cwd()), timeout)
+    proc = timed(cfg.check_cmd(cmd, Path.cwd()), timeout, configured=True)
     execution = lifecycle.current()
     if execution and proc.returncode != 0 and execution.outcome == "completed":
         execution.outcome = "product_feedback"
@@ -93,7 +98,7 @@ def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
 def check_conflict_markers() -> tuple[bool, str]:
     proc = timed(
         # Exactly-7-char markers only; long ===== separator lines are legit.
-        ["git", "grep", "-nE", r"^(<{7}|={7}|>{7})( |$)"],
+        ["git", "grep", "--text", "-nE", r"^(<{7}|={7}|>{7})( |$)"],
     )
     # git grep exits 1 when nothing matches — that is the pass case.
     if proc.returncode == 1:
@@ -112,6 +117,11 @@ def check_leaks(base: str) -> tuple[bool, str]:
         [
             "git",
             "diff",
+            # Content as text: a worker's `.gitattributes` (`-diff`, `binary`) or a
+            # textconv/external driver must not hide added lines from the scan.
+            "--text",
+            "--no-ext-diff",
+            "--no-textconv",
             "--unified=0",
             "--no-prefix",
             f"{base}..HEAD",
@@ -220,7 +230,8 @@ def check_protected_paths(
     if not hits and not not_additive:
         return True, "", ""
     reason = "protected_paths" if hits else "add_only_paths"
-    diff = timed(["git", "diff", "--no-renames", "--binary", f"{base}...HEAD", "--", *hits, *not_additive])
+    diff = timed(["git", "diff", "--no-renames", "--no-ext-diff", "--no-textconv", "--binary",
+                  f"{base}...HEAD", "--", *hits, *not_additive])
     return False, reason, diff.stdout + diff.stderr
 
 

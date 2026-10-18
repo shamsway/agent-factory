@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from importlib import import_module
 
@@ -60,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"factory: unknown command `{argv[0]}`\n\n{usage()}", file=sys.stderr)
         return 2
     module, func, _ = entry
+    # Replace refs and grafts make git read other content than a hash names; no Factory
+    # command (or the git it runs) honors them (gitguard.py).
+    from factory import gitguard
+
+    os.environ.update(gitguard.HARDENED)
     return import_module(f"factory.{module}").__dict__[func](argv[1:])
 
 

@@ -27,6 +27,7 @@ from factory import (
     deployment_view,
     dispatch,
     feedback,
+    gitguard,
     lifecycle,
     runtime_events,
     runtime_local,
@@ -159,7 +160,9 @@ def iso(ts: float) -> str:
 
 
 def sh(cmd: list[str], cwd: Path | None = None) -> str:
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
+    # Ticket worktrees are worker-written: git reads them through gitguard's pinned paths.
+    env = gitguard.env(globals().get("ROOT"), cwd) if cmd and cmd[0] == "git" else None
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False, env=env)
     return proc.stdout if proc.returncode == 0 else ""
 
 

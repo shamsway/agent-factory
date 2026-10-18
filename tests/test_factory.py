@@ -3367,7 +3367,8 @@ class DispatchTest(unittest.TestCase):
             self.assertIn(f"does not contain upstream tip {tip}", report)
             # No bypass for the worker: the human label still gates protected paths; the gate
             # exempts only content equal to the tip or the staged candidate and leak-scans from the tip.
-            self.assertEqual(gates, [{"protected_override": False, "upstream": [tip, base]}])
+            # ...and compares against main as captured before the worker ran.
+            self.assertEqual(gates, [{"base": base, "protected_override": False, "upstream": [tip, base]}])
             attempt = [e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "attempt"][-1]
             self.assertEqual((attempt["gate"], attempt["head"], attempt["actual_head"]), ("FAIL", base, base))
 

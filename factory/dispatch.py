@@ -28,7 +28,7 @@ import tomllib
 from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 
-from factory import __version__, brief, config, launch, lifecycle
+from factory import __version__, brief, config, gitguard, launch, lifecycle
 from factory.config import (
     LABEL_ADD_ONLY_OVERRIDE,
     LABEL_AGENT,
@@ -80,6 +80,8 @@ STANDING_INSTRUCTIONS = """
   edited for the ticket; never `git add -A`, and never commit
   `.factory-prompt.md` or gate reports.
 - NEVER use `git stash` — the stash is shared with the user's other worktrees.
+- The worktree is on a detached HEAD by design: commit normally, and never create,
+  switch or reset branches. The dispatcher moves `agent/{n}` to your commits.
 - Commit only; do not push. The dispatcher pushes `agent/{n}`, opens the PR, and
   the merge stage lands it after review and CI. NEVER merge into or fast-forward
   `{main}`, and never close the ticket yourself.
@@ -117,7 +119,10 @@ def run(
     cmd: list[str], cwd: Path | None = None, check: bool = True,
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """`env` replaces the inherited environment (lifecycle context is still added)."""
+    """`env` replaces the inherited environment (lifecycle context is still added).
+    git and gh read the cwd's Git state: they get gitguard's pinned environment."""
+    if cmd and Path(cmd[0]).name in ("git", "gh"):
+        env = gitguard.env(globals().get("ROOT"), cwd, env)
     execution = lifecycle.current()
     if execution is None:
         return subprocess.run(cmd, cwd=cwd, check=check, stdout=stdout, stderr=stderr, text=True, env=env)
@@ -716,8 +721,10 @@ def _activity(wt: Path, logfile: Path, handoff: Path) -> tuple:
         return None
 
     def git(*args: str) -> str:
+        # Runs while the worker does: never through the worktree's own `.git` pointer.
         return subprocess.run(["git", "--no-optional-locks", "-C", str(wt), *args],
-                              capture_output=True, text=True, check=False).stdout
+                              capture_output=True, text=True, check=False,
+                              env=gitguard.env(globals().get("ROOT"), wt)).stdout
 
     return (stat(logfile), git("rev-parse", "HEAD"),
             git("status", "--porcelain", "--untracked-files=all"), stat(handoff))
@@ -768,6 +775,32 @@ def run_worker(cmd: list[str], wt: Path, logfile: Path, handoff: Path,
     """
     log(f"worker: {' '.join(cmd)} -> {logfile}")
     started = time.monotonic()
+    branch = _detach(wt)
+    try:
+        return _run_worker(cmd, wt, logfile, handoff, deadline, started)
+    finally:
+        _reattach(wt, branch)
+
+
+def _detach(wt: Path) -> str | None:
+    """Detach the worktree's HEAD for the worker: its commits then move only this
+    worktree's own HEAD, so a sandbox can keep every shared ref read-only. Returns
+    the branch to move back to the worker's head afterwards."""
+    branch = run(["git", "symbolic-ref", "--quiet", "HEAD"], cwd=wt, check=False).stdout.strip()
+    if branch:
+        run(["git", "checkout", "--quiet", "--detach"], cwd=wt, check=False)
+    return branch or None
+
+
+def _reattach(wt: Path, branch: str | None) -> None:
+    """Move `branch` to the worker's head and check it out again, without touching the
+    index or files (uncommitted work stays for commit_leftovers)."""
+    if branch and run(["git", "update-ref", branch, "HEAD"], cwd=wt, check=False).returncode == 0:
+        run(["git", "symbolic-ref", "HEAD", branch], cwd=wt, check=False)
+
+
+def _run_worker(cmd: list[str], wt: Path, logfile: Path, handoff: Path,
+                deadline: float, started: float) -> tuple[int, str | None]:
     with lifecycle.scope(EVENTS, "worker") as execution, logfile.open("a") as out:
         start = _activity(wt, logfile, handoff)  # before launch: a fast handoff must count as done
         # Own session, so a timeout stops the whole tree (tests, servers), not just the agent.
@@ -833,17 +866,29 @@ def commit_leftovers(wt: Path, n: int, title: str) -> None:
         run(["git", "commit", *flags, "-m", f"agent/{n}: {title}"], cwd=wt)
 
 
+def trusted_rev(ref: str) -> str:
+    """`ref` as a commit hash, resolved by the dispatcher (replace refs and grafts off);
+    `ref` itself when it does not resolve, so the gate still fails closed on it."""
+    proc = run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"],
+               cwd=ROOT, check=False)
+    return proc.stdout.strip() or ref
+
+
 def run_gate(
     wt: Path, n: int | str, skip: str = "", protected_override: bool = False,
     add_only_override: bool = False, tier: str = "attempt", upstream: list[str] = (),
+    base: str | None = None,
 ) -> tuple[bool, str]:
+    """`base`: the comparison commit, captured before the worker ran (default: origin/<main> now).
+    The gate gets hashes, never refs a worker could have moved."""
     report_rel = f".factory/gate-report-{n}.md"
     (wt / ".factory").mkdir(exist_ok=True)
     # GPU serialization is the gate's job: the gate flocks the exclusive lock
     # itself. Locking here too deadlocks the gate subprocess (seen in run #7).
     # Isolated launch of this engine: the worktree is worker-written, so a planted
     # `factory` module must not run in place of the gate, unwrapped (launch.py).
-    cmd = launch.factory_argv("gate", "--base", f"origin/{cfg.main}", "--report", report_rel)
+    base = base or trusted_rev(f"origin/{cfg.main}")
+    cmd = launch.factory_argv("gate", "--base", base, "--report", report_rel)
     if skip:
         cmd += ["--skip", skip]
     # The gate process records its own stage and check boundaries.
@@ -852,10 +897,11 @@ def run_gate(
     if add_only_override:
         cmd.append("--add-only-override")
     for ref in upstream:
-        cmd += ["--upstream", ref]
+        cmd += ["--upstream", trusted_rev(ref)]
     if tier != "attempt":
         cmd += ["--tier", tier]
-    proc = run(cmd, cwd=wt, check=False)
+    # The gate's own git reads inherit the pinned Git paths; it strips them for checks.
+    proc = run(cmd, cwd=wt, check=False, env=gitguard.env(ROOT, wt))
     report = wt / report_rel
     text = report.read_text() if report.exists() else proc.stdout + proc.stderr
     return proc.returncode == 0, text
@@ -2292,6 +2338,8 @@ def worker_round(
     wall = time.time()
     worker = cfg.worker_key({selected_worker} if selected_worker else labels)
     argv, session_dir = _with_transcript(cfg.worker({worker}, promptfile, wt), n)
+    # The gate compares against main as it was before the worker could touch any ref.
+    base = trusted_rev(f"origin/{cfg.main}")
     code, fired = run_worker(
         argv, wt, logfile, wt / ".factory" / f"handoff-{n}.md", deadline,
     )
@@ -2325,7 +2373,7 @@ def worker_round(
         return False, "budget exceeded before gate", logfile, head
     sync = sync_event(n)
     tip = sync["upstream"] if sync else None
-    ok, report = run_gate(wt, n, **gate_flags(sync, labels))
+    ok, report = run_gate(wt, n, base=base, **gate_flags(sync, labels))
     actual_head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
     after_status = run(status_cmd, cwd=wt).stdout.strip()
     if actual_head != head:

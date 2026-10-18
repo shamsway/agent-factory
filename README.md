@@ -846,6 +846,15 @@ so a worker-written `factory.py` or `factory/` package, a `sitecustomize` or
 `usercustomize` module, or a `PYTHONPATH`/`PYTHONSTARTUP` override never runs in
 place of the engine with the dispatcher's environment.
 
+Factory's own git commands never trust the worktree's Git metadata
+(`factory/gitguard.py`). In a ticket worktree they get `GIT_DIR`,
+`GIT_COMMON_DIR` and `GIT_WORK_TREE` found from the checkout's side, so a
+rewritten `.git` pointer or `commondir` file cannot point them at a planted
+repository whose config runs commands; every `factory` command ignores replace
+refs and grafts. The gate compares against a commit hash the dispatcher resolved
+before the worker ran, not a ref a worker could move, and the leak scan reads
+added lines as text, so `.gitattributes` (`-diff`, `binary`) cannot hide them.
+
 ```toml
 [defaults.check_wrap]
 command = ["/usr/local/bin/my-wrapper", "--worktree", "{cwd}"]
@@ -853,10 +862,16 @@ command = ["/usr/local/bin/my-wrapper", "--worktree", "{cwd}"]
 
 `scripts/bwrap-sandbox.sh` is a bubblewrap wrapper usable for both. It mounts
 the filesystem read-only and makes `$HOME` an empty tmpfs; it then exposes the
-worktree and the checkout's `.git` (writable, except `.git/config` and
-`.git/hooks`), the PATH entries under `$HOME`, git identity, and whatever the
-host passes with `--ro`, `--rw` or `--bind-at`. The checkout's `.factory` stays
-hidden. The one exception is a ticket worktree's own `.factory/transcripts/<n>`,
+worktree (writable), the PATH entries under `$HOME`, git identity, and whatever
+the host passes with `--ro`, `--rw` or `--bind-at`. Of the checkout's `.git`,
+only the object store and the worktree's own administrative directory
+(`.git/worktrees/<name>`, the one whose `gitdir` names the worktree) are
+writable; config, hooks, every ref (the shared `origin/<main>` baseline and
+other tickets' branches), replace refs, `info/grafts`, `shallow` and other
+worktrees' metadata stay read-only. The dispatcher detaches the worktree's HEAD
+for the worker, so its commits move only that HEAD, and moves `agent/<n>` to them
+afterwards. A run from the checkout itself (`--cwd` equal to `--root`) sees all of
+`.git` read-only. The checkout's `.factory` stays hidden. The one exception is a ticket worktree's own `.factory/transcripts/<n>`,
 which is writable so the OMP session the dispatcher asks for survives the
 sandbox; other tickets' transcripts stay out of view. It hides the runtime-dir and
 container/VM sockets and drops agent sockets, `GH_TOKEN`, and any `--drop-env`

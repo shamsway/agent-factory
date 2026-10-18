@@ -7,7 +7,9 @@
 #   scripts/test-linux.sh tests.test_apply  # unittest module/test names
 #
 # Needs podman (or set CONTAINER=docker). PYTHON_IMAGE / PLATFORM override
-# the image and platform.
+# the image and platform. The throwaway container is privileged so the real
+# bubblewrap tests (tests/test_sandbox.py) can mount namespaces; ISOLATION=0
+# runs it unprivileged and those tests skip.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 engine="${CONTAINER:-podman}"
@@ -19,11 +21,15 @@ if [ "$#" -gt 0 ]; then
 else
   run="python -m unittest discover -s tests"
 fi
+privileged=() isolation_env=()
+if [ "${ISOLATION:-1}" != 0 ]; then
+  privileged=(--privileged) isolation_env=(-e FACTORY_REQUIRE_SANDBOX=1)
+fi
 git ls-files -z --cached --others --exclude-standard \
   | tar --null -T - -cf - \
-  | "$engine" run --rm -i --init --platform "$platform" "$image" bash -c "
+  | "$engine" run --rm -i --init "${privileged[@]}" "${isolation_env[@]}" --platform "$platform" "$image" bash -c "
       set -e
-      apt-get update -qq >/dev/null && apt-get install -y -qq git gh >/dev/null
+      apt-get update -qq >/dev/null && apt-get install -y -qq git gh bubblewrap >/dev/null
       # Fixtures use #!/usr/bin/python shebangs, as on the CI runner.
       ln -sf /usr/local/bin/python3 /usr/bin/python
       ln -sf /usr/local/bin/python3 /usr/bin/python3

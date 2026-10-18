@@ -14,7 +14,9 @@ from factory.investigation_evidence import Projection
 
 def real_boundary(test):
     required = os.environ.get("FACTORY_REQUIRE_ISOLATION") == "1"
-    if sys.platform != "linux" or not Path("/usr/bin/bwrap").exists():
+    # The boundary also needs a systemd user scope; a bare container with bwrap has none.
+    tools = ("bwrap", "prlimit", "systemd-run", "systemctl")
+    if sys.platform != "linux" or not all(Path("/usr/bin", tool).exists() for tool in tools):
         if required:
             test.fail("required Linux bubblewrap boundary unavailable")
         test.skipTest("requires Linux bubblewrap")
