@@ -57,6 +57,34 @@ def validate(body: str, head: str | None = None) -> str | None:
     return None
 
 
+def normalize_patch(diff: str) -> str:
+    """A diff without blob ids or hunk line numbers, for comparing one patch
+    across a rebase: identical content changes compare equal even when main
+    moved the surrounding lines."""
+    out = []
+    for line in diff.splitlines():
+        if line.startswith("index "):
+            continue
+        out.append(re.sub(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", "@@", line))
+    return "\n".join(out)
+
+
+def restamp(body: str, old_head: str, new_head: str, note: str) -> str | None:
+    """The body with the summary's `Revision: <old_head>` line moved to
+    `new_head` (plus `note`), or None when the section does not name old_head."""
+    match = re.search(
+        r"(?im)^## Terraform plan summary\s*$\n[\s\S]*?(?=^##\s|\Z)", body or ""
+    )
+    if not match:
+        return None
+    line = re.compile(r"(?im)^Revision:\s*" + re.escape(old_head) + r"\s*$")
+    if not line.search(match[0]):
+        return None
+    text = re.sub(r"(?m)^\n?Revision restamped by Factory .*\n?", "", match[0])
+    updated = line.sub(lambda _: f"Revision: {new_head}\n\n{note}", text, count=1)
+    return body[: match.start()] + updated + body[match.end():]
+
+
 def section(body: str) -> str:
     match = re.search(
         r"(?im)^## Terraform plan summary\s*$\n[\s\S]*?(?=^##\s|\Z)", body or ""

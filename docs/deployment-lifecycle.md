@@ -563,6 +563,16 @@ checks the summary against the diff; the syntax gate does not prove a plan
 actually ran. Software-only workflows are unaffected. Update the description
 when revisions change the plan; never paste secrets or the raw plan.
 
+When the merge stage refreshes an approved Terraform PR onto a moved main, the
+head SHA changes and the summary's `Revision:` goes stale. The dispatcher
+restamps it to the refreshed head, with a note naming the previous head, only
+when the summary named the previous head, the PR's own patch is unchanged
+(ignoring blob ids and hunk line numbers), and main's new commits touch none of
+the PR's Terraform directories. Otherwise it escalates before review with
+`Terraform plan summary Revision is stale after …: <why>; re-plan at <head>`,
+so the operator knows the change itself passed the gate and only the evidence
+needs a re-plan.
+
 PR-description publication and review allow up to ten seconds for GitHub to
 report the pushed head before rejecting a mismatch. Only the matching gated
 revision is accepted; polling never approves a different revision.

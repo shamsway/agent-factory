@@ -1767,6 +1767,70 @@ def runner_unavailable(n: int, pr: int, starved: list[dict], dry_run: bool) -> b
     return True
 
 
+def refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: str) -> str | None:
+    try:
+        return _refresh_plan_summary(wt, n, pr, old_head, new_head)
+    except Exception as exc:  # noqa: BLE001 - an unverifiable summary must not reach review
+        log(f"#{n}: plan summary check after refresh failed: {exc}")
+        return "the plan summary could not be checked"
+
+
+def _refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: str) -> str | None:
+    """Move a Terraform PR's plan-summary Revision to the refreshed head (SHA-279).
+
+    Rebasing onto a moved main changes the head SHA, so the summary's
+    `Revision:` goes stale and the fresh review could only return REVISE. The
+    summary is restamped only when it still describes the new head: it named
+    the old head, the PR's own patch is unchanged, and main's new commits touch
+    none of the PR's Terraform directories. Returns None when restamped or not
+    applicable, else the reason the summary needs a human re-plan.
+    """
+    if not cfg.apply_enabled:
+        return None
+    from factory import plan_summary
+    main_ref = f"origin/{cfg.main}"
+    paths = run(["git", "diff", "--name-only", f"{main_ref}..{new_head}"], cwd=wt).stdout
+    if not plan_summary.terraform_paths(paths):
+        return None
+    current = wait_for_pr_head(f"agent/{n}", new_head)
+    body = current.get("body") or ""
+    if plan_summary.validate(body, old_head):
+        return None  # already stale or incomplete before the refresh: the review reports it
+    old_base = run(["git", "merge-base", old_head, main_ref], cwd=wt).stdout.strip()
+    before = run(["git", "diff", old_base, old_head], cwd=wt).stdout
+    after = run(["git", "diff", main_ref, new_head], cwd=wt).stdout
+    if plan_summary.normalize_patch(before) != plan_summary.normalize_patch(after):
+        return f"the PR patch changed while refreshing it onto {cfg.main}"
+    tf_dirs = sorted({
+        str(Path(p).parent) for p in paths.splitlines()
+        if plan_summary.terraform_paths(p)
+    })
+    moved = run(["git", "diff", "--name-only", old_base, main_ref], cwd=wt).stdout.splitlines()
+    overlap = sorted({d for d in tf_dirs for p in moved if Path(p).is_relative_to(d)})
+    if overlap:
+        return f"{cfg.main} changed {', '.join(overlap)} since the summary was planned"
+    main_tip = run(["git", "rev-parse", main_ref], cwd=wt).stdout.strip()
+    note = (
+        f"Revision restamped by Factory from {old_head} after refreshing onto "
+        f"{cfg.main} {main_tip[:12]}: the PR patch is unchanged and {cfg.main}'s new "
+        f"commits touch none of {', '.join(tf_dirs)}, so the plans above still apply."
+    )
+    updated = plan_summary.restamp(body, old_head, new_head, note)
+    if updated is None:
+        return "the plan summary Revision could not be restamped"
+    body_file = FACTORY / f"pr-plan-body-{n}.md"
+    body_file.write_text(updated)
+    run(["gh", "pr", "edit", str(pr), "--repo", REPO, "--body-file", str(body_file)], cwd=wt)
+    summary = wt / ".factory" / f"terraform-plan-summary-{n}.md"
+    if summary.is_file() and not summary.is_symlink():
+        restamped = plan_summary.restamp(summary.read_text(), old_head, new_head, note)
+        if restamped is not None:
+            summary.write_text(restamped)
+    record("plan-summary-restamped", ticket=n, pr=pr, old_head=old_head, head=new_head,
+           main=main_tip, dirs=tf_dirs)
+    return None
+
+
 def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
     """Refresh, gate, push, and independently review the resulting immutable head."""
     target = gh_json(["pr", "view", str(pr), "--repo", REPO, "--json", "baseRefName"])
@@ -1834,6 +1898,11 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         "refreshed", ticket=n, pr=pr, head=head, gate="PASS",
         gate_head=head, actual_head=head, clean=True,
     )
+    stale = refresh_plan_summary(wt, n, pr, remote_head, head)
+    if stale:
+        withdraw(f"Terraform plan summary Revision is stale after {verb} onto moved main: "
+                 f"{stale}; re-plan at {head} and update the summary")
+        return False
     verdict, findings = review(wt, n, report, head)
     pr_comment(n, findings)
     if verdict != "APPROVE":
