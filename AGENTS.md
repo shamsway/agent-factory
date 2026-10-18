@@ -21,6 +21,15 @@ diagnosis live in [skills/factory/SKILL.md](skills/factory/SKILL.md). Read those
 rather than copying them here. The native Atlas (`factory/workspace-tools.js`,
 dashboard `/?view=atlas`) draws the pipeline; Codebase links extracted relationships.
 
+**Publication privacy:** this repository is public. Source, tests, docs, commit
+messages, branch names, tags and PR text never carry operator hostnames, private
+repository names, private tracker issue keys, private IPs or home-directory paths;
+use generic fixtures (`acme/widgets`, `example.invalid`) and keep deployment
+receipts in private operator notes. Before pushing, run
+`scripts/privacy-check.py --range origin/main...HEAD --branch "$(git branch --show-current)"`
+and `--text` on the PR body; operator terms go in the private denylist it reads
+(never committed). CI runs the generic rules on every non-sync PR.
+
 **Evidence of done:** the dispatcher runs the gate itself after every worker attempt
 and before review; that run is the evidence, not a worker's claim to have run
 anything (`experiments/verification-claims/REPORT.md`).

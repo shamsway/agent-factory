@@ -36,7 +36,7 @@ In `.factory.toml`:
 ```toml
 [apply]
 enabled = true
-dir = "terraform/homelab-collectors"
+dir = "terraform/collectors"
 baseline = 100              # Merged PRs <= 100 are ignored
 supersession = "sequential" # "sequential" halts on failure; strict git commit order
 ```
@@ -51,14 +51,14 @@ supersession = "sequential"
 
 [[apply.targets]]
 name = "collectors"
-dir = "terraform/homelab-collectors"
-backend_key = "shared_homelab"
+dir = "terraform/collectors"
+backend_key = "shared_state"
 adapter = "terraform"
 
 [[apply.targets]]
 name = "monitoring"
 dir = "terraform/monitoring"
-backend_key = "shared_homelab"
+backend_key = "shared_state"
 adapter = "terraform"
 ```
 
@@ -335,7 +335,7 @@ signals the whole control group) can still interrupt Terraform mid-apply.
 2. Inspect the state backend: which resources are recorded, and whether a state
    lock is still held.
    ```sh
-   cd terraform/homelab-collectors
+   cd terraform/collectors
    terraform state list
    ```
    If Terraform was cut short, a lock is typically left behind. On backends such
@@ -389,7 +389,7 @@ Ticket `#11` failed during apply. Subsequent commits touching the target are blo
 **Symptom:**
 A direct commit was pushed to `main` bypassing PR review:
 ```
-[apply] unauthorized direct merge detected for target `collectors`: commit abc12345 touches terraform/homelab-collectors without an approved PR
+[apply] unauthorized direct merge detected for target `collectors`: commit abc12345 touches terraform/collectors without an approved PR
 ```
 
 **Recovery Procedure:**
