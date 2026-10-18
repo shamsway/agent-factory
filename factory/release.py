@@ -7,13 +7,12 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from factory import config, lifecycle
+from factory import config, launch, lifecycle
 
 SEMVER = re.compile(r"v(\d+)\.(\d+)\.(\d+)\Z")
 JSON_BAR = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
@@ -157,7 +156,7 @@ def ci_passes(cfg: config.Config, sha: str) -> bool:
 
 def gate_passes(worktree: Path) -> bool:
     return subprocess.run(
-        [sys.executable, "-m", "factory", "gate", "--tier", "release"],
+        launch.factory_argv("gate", "--tier", "release"),
         cwd=worktree,
         text=True,
         capture_output=True,

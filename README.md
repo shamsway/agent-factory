@@ -829,7 +829,7 @@ worktree) and the linked worktree's common Git directory (under `{root}/.git`)
 at the same absolute paths.
 
 `[check_wrap]` is the same host-only hook for the gate: its `command` argv is
-prepended to every configured `[[gate.check]]` run (both tiers), with the same
+prepended to every configured `[[gate.check]]` run (every tier), with the same
 `{cwd}` (the worktree being gated), `{root}`, `{repo}` and `{home}`
 placeholders; the check's own argv is passed unexpanded after it. The built-in
 `conflict-markers`, `protected-paths` and `leak-scan` checks are Factory's own
@@ -838,6 +838,13 @@ git reads and are not wrapped. Checks execute worker-written code (tests,
 confines its worker should confine checks with the same wrapper; otherwise the
 gate is the way out of the worker's sandbox. Doctor reports whether the wrap
 executable is on the unit's PATH.
+
+The gate process itself is unwrapped and starts in the worktree. The dispatcher
+(and `factory release`'s release-tier gate) launches it isolated, `python -I`
+with the running engine's package first on `sys.path` (`factory/launch.py`),
+so a worker-written `factory.py` or `factory/` package, a `sitecustomize` or
+`usercustomize` module, or a `PYTHONPATH`/`PYTHONSTARTUP` override never runs in
+place of the engine with the dispatcher's environment.
 
 ```toml
 [defaults.check_wrap]

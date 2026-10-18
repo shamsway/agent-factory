@@ -28,7 +28,7 @@ import tomllib
 from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 
-from factory import __version__, brief, config, lifecycle
+from factory import __version__, brief, config, launch, lifecycle
 from factory.config import (
     LABEL_ADD_ONLY_OVERRIDE,
     LABEL_AGENT,
@@ -841,16 +841,9 @@ def run_gate(
     (wt / ".factory").mkdir(exist_ok=True)
     # GPU serialization is the gate's job: the gate flocks the exclusive lock
     # itself. Locking here too deadlocks the gate subprocess (seen in run #7).
-    cmd = [
-        sys.executable,
-        "-m",
-        "factory",
-        "gate",
-        "--base",
-        f"origin/{cfg.main}",
-        "--report",
-        report_rel,
-    ]
+    # Isolated launch of this engine: the worktree is worker-written, so a planted
+    # `factory` module must not run in place of the gate, unwrapped (launch.py).
+    cmd = launch.factory_argv("gate", "--base", f"origin/{cfg.main}", "--report", report_rel)
     if skip:
         cmd += ["--skip", skip]
     # The gate process records its own stage and check boundaries.

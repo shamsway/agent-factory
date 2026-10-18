@@ -35,7 +35,7 @@ map or a path in it does not exist; update the map in the same change.
 
 | Feature | Entry files | Tests | Gate checks |
 |---|---|---|---|
-| CLI and package | `factory/cli.py`, `factory/__main__.py`, `factory/__init__.py` | `tests/test_runtime.py`, `tests/test_chat.py`, `tests/test_factory.py` | `test` |
+| CLI and package | `factory/cli.py`, `factory/__main__.py`, `factory/__init__.py`, `factory/launch.py` | `tests/test_runtime.py`, `tests/test_chat.py`, `tests/test_factory.py`, `tests/test_trusted_launch.py` | `test` |
 | Configuration | `factory/config.py`, `factory/templates/factory.toml` | `tests/test_factory.py`, `tests/test_settings.py`, `tests/test_dashboard_port.py`, `tests/test_add_only_override.py` | `test` |
 | Onboarding (`init`, `doctor`, `install`) | `factory/onboard.py`, `factory/templates/ci.yml` | `tests/test_factory.py`, `tests/test_dashboard_port.py`, `tests/test_plan.py` | `test` |
 | Triage | `factory/triage.py` | `tests/test_factory.py`, `tests/test_llm_usage.py`, `tests/test_idle_lifecycle.py`, `tests/test_triage.py` | `test` |
