@@ -348,6 +348,17 @@ def _dashboard_port_check(cfg: config.Config, host: str, port: int) -> tuple[boo
     return True, f"owned by {unit} (pid {main_pid})"
 
 
+def leftover_plans(root: Path) -> list[Path]:
+    """`.factory/tfplan` files the tf-plan-safety check used to leave behind (SHA-281):
+    a saved plan holds every value the plan read, secrets included."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", ".terraform", "node_modules")]
+        if Path(dirpath).name == ".factory" and "tfplan" in filenames:
+            found.append(Path(dirpath, "tfplan").relative_to(root))
+    return sorted(found)
+
+
 def checkout_state(cfg: config.Config) -> tuple[bool, str]:
     """Whether the main checkout is on the main branch with no tracked edits.
 
@@ -416,6 +427,10 @@ def doctor(argv: list[str]) -> int:
     report(True if tracked else None, f"{CONFIG_NAME} committed", "" if tracked else "commit it so clones see it")
     ok, detail = checkout_state(cfg)
     report(True if ok else None, "main checkout", detail)
+    plans = leftover_plans(cfg.root)
+    report(None if plans else True, "terraform plan files",
+           f"{len(plans)} saved plan(s) may hold secrets; delete them: {', '.join(map(str, plans[:5]))}"
+           + (" ..." if len(plans) > 5 else "") if plans else "none left in the checkout or worktrees")
 
     unknown = config.unknown_keys(cfg.raw_repo)
     report(

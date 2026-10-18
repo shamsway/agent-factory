@@ -119,6 +119,58 @@ class TfPlanCheckTest(unittest.TestCase):
             self.assertTrue((tf_root / ".factory").is_dir())
             self.assertFalse((invocation_cwd / ".factory").exists())
             run_plan.assert_called_once_with(Path(str(tf_root)), Path(".factory/tfplan"))
+            self.assertFalse((tf_root / ".factory" / "tfplan").exists())
+
+    def _run_main(self, tf_root: Path, argv: list[str], *, plan_rc: int = 0, show_error: bool = False):
+        """Run main() with a fake terraform that writes a real plan file; return (rc or exception, plan path, mode)."""
+        from unittest import mock
+
+        from factory import tf_plan_check
+
+        seen: dict = {}
+
+        def fake_plan(cwd, planfile, env=None):
+            path = planfile if planfile.is_absolute() else cwd / planfile
+            path.write_text("secret-bearing plan\n")
+            seen["path"], seen["mode"] = path, path.parent.stat().st_mode & 0o777
+            return subprocess.CompletedProcess(args=[], returncode=plan_rc, stdout="", stderr="")
+
+        show = mock.patch.object(tf_plan_check, "show_json", return_value=self.CLEAN_PLAN)
+        if show_error:
+            show = mock.patch.object(tf_plan_check, "show_json",
+                                     side_effect=subprocess.CalledProcessError(1, ["terraform", "show"]))
+        with mock.patch.object(tf_plan_check, "run_plan", side_effect=fake_plan), show:
+            try:
+                result = tf_plan_check.main(["--dir", str(tf_root), *argv])
+            except subprocess.CalledProcessError as exc:
+                result = exc
+        return result, seen["path"], seen["mode"]
+
+    def test_default_plan_is_private_and_removed_whatever_the_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tf_root = Path(d).resolve() / "terraform" / "collectors"
+            tf_root.mkdir(parents=True)
+            for label, kwargs, expect in (("pass", {}, 0), ("plan fails", {"plan_rc": 1}, 1),
+                                          ("show fails", {"show_error": True}, subprocess.CalledProcessError)):
+                with self.subTest(label):
+                    result, path, mode = self._run_main(tf_root, [], **kwargs)
+                    if isinstance(expect, int):
+                        self.assertEqual(result, expect)
+                    else:
+                        self.assertIsInstance(result, expect)
+                    self.assertEqual(mode, 0o700)
+                    self.assertNotIn(tf_root, path.parents)
+                    self.assertFalse(path.exists())
+                    self.assertFalse(path.parent.exists())
+            self.assertEqual(list(tf_root.rglob("*")), [])
+
+    def test_explicit_plan_out_is_removed_when_show_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            tf_root = Path(d).resolve()
+            result, path, _ = self._run_main(tf_root, ["--plan-out", ".factory/tfplan"], show_error=True)
+            self.assertIsInstance(result, subprocess.CalledProcessError)
+            self.assertEqual(path, tf_root / ".factory" / "tfplan")
+            self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":
