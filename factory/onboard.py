@@ -533,6 +533,9 @@ def doctor(argv: list[str]) -> int:
         have = set()
     missing = sorted(set(LABELS) - have)
     report(None if missing else True, "factory labels", f"missing {', '.join(missing)} (factory init)" if missing else "all present")
+    from . import worktrees
+    status, detail = worktrees.doctor_row(cfg)
+    report(status, "stale ticket worktrees", detail)
 
     flows = workflows(cfg.root)
     placeholder = any('run: "true"' in p.read_text() for p in flows)

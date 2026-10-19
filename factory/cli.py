@@ -17,6 +17,7 @@ COMMANDS = {
     "triage": ("triage", "main", "label needs-triage issues with the local model"),
     "dispatch": ("dispatch", "main", "one pass: sync, merge stage, claim and work tickets"),
     "prune-private": ("retention", "main", "prune resolved private plans under the apply lock (supports --dry-run)"),
+    "prune-worktrees": ("worktrees", "main", "remove finished tickets' clean, pushed worktrees (supports --dry-run)"),
     "apply": ("apply", "main", "terraform apply for merged, apply-eligible tickets"),
     "incidents": ("incidents", "main", "inspect and reconcile durable deployment incident delivery"),
     "investigation-accept": ("investigation_model", "accept_main", "exercise synthetic investigation evidence (provider export requires explicit flags)"),

@@ -284,7 +284,7 @@ landed on its own, and partial progress needs its own reviewed PR.
 | Command | What one invocation does |
 |---|---|
 | `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or `wontfix-proposal` (proposal comment and label; a human closes). An issue unchanged since its last triage comment is skipped. `--dry-run`, `--issue N`, `--replay a,b,c`. |
-| `factory dispatch` | One stateless pass: fetch and detach the main checkout at `origin/<main>` before `.factory.toml` is read (a root with tracked or untracked changes outside `.factory/` exits 1 with a `root_dirty` dispatcher exit row naming the paths and does nothing, even when its config does not load) → upstream sync (stage a sync ticket) → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. Ordinary `ready-for-investigation` tickets take a shorter path instead (deployment roots are fenced to humans): one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan from the checkout as it is. |
+| `factory dispatch` | One stateless pass: fetch and detach the main checkout at `origin/<main>` before `.factory.toml` is read (a root with tracked or untracked changes outside `.factory/` exits 1 with a `root_dirty` dispatcher exit row naming the paths and does nothing, even when its config does not load) → upstream sync (stage a sync ticket) → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces → remove up to 5 finished tickets' leftover worktrees ([finished worktree retention](#finished-worktree-retention)). Ordinary `ready-for-investigation` tickets take a shorter path instead (deployment roots are fenced to humans): one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan from the checkout as it is. |
 | `factory inspect` | Read-only runtime/unit/process identity, credential-boundary comparisons, deployment state and existing lock probes as JSON. `--live` validates scoped tokens; `--candidates` queries bounded candidate metadata without Git fetch; `--worker-cwd` checks a worker's gate interpreter context. See [operational verification](docs/metadata-verification.md) for coverage and limitations. |
 | `factory verify-secrets` | Compare loaded unit credentials, fail on required missing units or failed supported live checks. `--scope install` (default), `apply`, `investigation`, `publisher`, or `all`; `--live`; `--json`; `--reuse-install-model-key NAME` for explicit investigation reuse. Reports names, statuses and sanitized scope details (for example a live-checked token's scopes). The `apply` scope includes rows from the deploy adapters' `credential_checks`. |
 | `factory incidents` | Durable failed-run index, explicit delivery/retry and repair-run attachment. |
@@ -300,6 +300,7 @@ landed on its own, and partial progress needs its own reviewed PR.
 | `factory stats` | Ticket table: attempts, review rounds, hours to merge, escalation count, resolver attribution, minutes in `ready-for-human`, re-queues, and triage/review prompt and completion token sums (reported prefix-cache rates listed separately). Reads GitHub plus existing `events.jsonl`. `--by-worker` reads only events and shows every configured worker label: first-attempt gate pass rate, all attempts (including review bounces), and known cost. Attribution uses claim labels with current worker precedence; unclaimed attempts are excluded, missing rates/cost are `n/a`. The dashboard Ops view shows the same worker metrics. `--escapes` lists candidate escaped defects, one row per closed `bug` issue: its fix commits (first-parent `agent/<bug>:` commits on `origin/<main>`, else the merge commit of a merged PR whose closing references include the bug), and the candidate tickets whose `agent/<m>:` commits `git blame` names for the lines the fix modified or deleted, with blamed line counts. Rows without candidates read `unlinked` (no fix commit), `no_blamed_lines` (the fix only adds lines) or `no_candidates` (blamed lines are not from agent commits). `Regressed-by: #N` lines in the bug body replace blame (`source` is `declared`, else `blame`). The footer reads `Candidate escapes: X of Y merged agent tickets (Z%)`. Blame is SZZ-style and noisy: refactors give false candidates and add-only fixes give none. Read-only. `--json`. |
 | `factory learn` | Reads the last N finished tickets' event trail, reviewer findings, and escalation reasons, plus for each ticket an excerpt of its lowest-scored session (`factory score` rows: lowest `efficiency`, ties to the lowest `compliance`, then a gate FAIL): every call repeated back to back, the worker's final message, then every tool call whose result mentioned `error`/`Traceback`/`FAIL` (the call and the result's first 10 lines), at most 3,000 characters per ticket, so the cap only shortens the flagged-call list; a ticket with no `score` row falls back to its failing-attempt log tails. Adds the 10 most recently closed bugs with candidate escapes (`factory stats --escapes`); asks the local model for ≤10 repo-specific lessons; writes `.factory-lessons.md` (you commit it). Every worker prompt carries it. With a manager, the lessons land as an `agent/lessons-<date>-t<N>` chore PR (N: the newest included ticket), and the manager may add a CURATE diff, opened as `agent/curate-<date>-t<N>`, that turns a lesson into a gate check or regression test: `AGENTS.md`, `CONTRIBUTING.md`, `.omp/skills/`, add-only `.factory.toml` (appended `[[gate.check]]` tables and `[gate].protected_paths` entries) and files under the base ref's protected and add-only paths; never `.github/`, never a deleted or renamed protected or add-only file. Both PRs are human-merge only. With a manager, the dispatcher also runs `--last 10` itself after every 10 finished tickets, scoring those tickets' unscored attempts first (see *Learning loop* under Operating it). `--dry-run`, `--last N`. `--promotion claim.json` judges and records a keep/revert claim under the [eval promotion contract](docs/eval-promotion-contract.md). |
 | `factory score` | Scores every finished ticket's worker attempts from their persisted OMP transcripts (`attempt.transcript`) and journals one `score` row per attempt: `tool_calls`, `edits` (edit/write calls), `retries` (identical consecutive calls), `gate_first_pass` (attempt 1 with gate PASS), `efficiency = 1 / (1 + retries + max(0, tool_calls - 40) / 40)`, and `compliance`, a 0–1 LLM-as-judge score from the local triage model given the ticket's Scope and Exit gate sections against the worker's final message and handoff (`null`, never a guess, when the model is unreachable or its answer's first line is anything but a number; `judge_model` names the model that answered). Already-scored attempts are skipped; a transcript missing on disk journals `{"skipped": "missing"}`. At most 50 attempts per run, 2 MB read per transcript. `--last N` limits to the newest N finished tickets; `--dry-run` prints without journaling. |
+| `factory prune-worktrees` | Removes finished tickets' leftover `.factory/wt-<n>` worktrees under the merge lock, one ticket lock at a time, retaining an accepted handoff first; see [finished worktree retention](#finished-worktree-retention). `--dry-run` changes nothing (no fetch, no lock, no journal row) and lists every ticket worktree with its size and the decision: `would remove`, `keep (stale)` (finished, but dirty, unpushed, unregistered or holding evidence) or `keep` (in flight), each with its reason. `--json`; `--limit N` caps the finished candidates read from GitHub (default 200). Exit 1 when GitHub is unreadable or a removal fails. |
 | `factory release [--dry-run]` | Converges a patch release across up to three passes: opens a `release/vX.Y.Z` PR after the ticket, quality-bar, `main` CI, and release-tier gate checks pass; squash-merges it after its CI succeeds; then annotates the merged commit and advances `stable`. This respects the required `gate` check on protected `main`; `--dry-run` reports the current state and next action without writing. |
 | `factory dashboard` | Native outcome-control workspace: Overview, Outcomes, live Flow, Attention, Success, Deployments, Codebase, Atlas, System/Ops and Settings, with a persistent contextual FM dock. This fork defaults to `127.0.0.1` (upstream: `0.0.0.0`); APIs require the workspace access key. `--json` prints a passive, bounded-window Ops snapshot without journal reconciliation writes. |
 | `factory dashboard --runtime-json` | One bounded schema 1 runtime observation using only local read-only evidence; no GitHub, model probe, journal append, lock acquisition, or state creation. Partial source failures remain structured JSON. See [runtime contract](#bounded-runtime-json-schema-1). |
@@ -1144,6 +1145,8 @@ branches, or merge state.
 - **Tear down a ticket**: verify any accepted handoff is retained before manually
   removing `.factory/wt-<n>` with `git worktree remove --force`, deleting `agent/<n>`,
   and re-labelling the issue. Manual removal bypasses the dispatcher's retention guard.
+  A finished ticket's worktree needs none of this: `factory prune-worktrees --dry-run`
+  shows what the dispatcher will remove and what it keeps, and why.
 - **Deployments & recovery**: for repositories using `factory apply`, see
   [docs/deployment-lifecycle.md](docs/deployment-lifecycle.md) for multi-target
   configuration, backend serialization, crash recovery, and operator reconciliation.
@@ -1190,8 +1193,9 @@ or permission changes.
 Missing, oversized, withheld, expired, unreadable and integrity-failed sources
 remain explicit. Quota or archival failure does not evict unexpired results:
 automatic cleanup leaves the affected worktree intact and reports the reason.
-Post-merge cleanup is not automatically retried: resolve the reported retention
-condition before manual cleanup rather than deleting the sole surviving copy.
+The [finished worktree retention](#finished-worktree-retention) sweep retries
+retention on later passes and removes the worktree only once it is cleanup-safe:
+resolve the reported retention condition rather than deleting the sole surviving copy.
 A recorded missing-source result can permit cleanup because there is no handoff
 content to lose. This protects against worktree cleanup, not runner loss or deletion
 of the main checkout; it is not a backup service.
@@ -1209,6 +1213,57 @@ local plan-bound journal and the retained result -- never a worker log, prompt,
 or transcript. This is descriptive only: it never rewrites the pinned scope or
 the ticket, and a changed or unavailable comparison never silently authorizes
 continued execution.
+
+## Finished worktree retention
+
+The merge stage removes a ticket's worktree when it lands the PR. Every other
+ending used to leave `.factory/wt-<n>` on disk for good: a PR a human merged or
+closed, an escalated ticket closed by hand, a merge whose handoff retention was
+incomplete. At the end of every non-dry-run pass the dispatcher reads GitHub for
+at most 5 finished candidates (`factory/worktrees.py`; least recently reported
+first) and removes a worktree only when all of these hold:
+
+- **Finished.** No held ticket lock and no open PR on `agent/<n>`. The issue is
+  closed, or open but unassigned, in no active lane (`needs-*`, `ready-for-*`,
+  `factory-approved`, `wontfix-proposal`) and with a merged or closed PR. An
+  open issue with no PR at all is not finished. A closed issue's leftover
+  assignee does not count.
+- **Clean.** There are no uncommitted or untracked changes outside the ignored
+  scratch (`.factory/`, `.factory-prompt.md`). A dirty worktree is always kept,
+  even when its head is pushed.
+- **Nothing exists only here.** The head is contained in the merged or closed
+  PR's head, `origin/agent/<n>` or `origin/<main>`, or on the local `agent/<n>`
+  branch, which is then kept. A detached head with commits on no ref is kept.
+- **Evidence first.** Transcripts (`.factory/transcripts/<n>/`), worker logs and
+  the journal already live outside the worktree. Before removal, an accepted
+  handoff is retained in the [accepted-handoff store](#accepted-handoff-retention)
+  (a `result-retention` row), and the worktree stays until retention reports it
+  cleanup-safe. An unaccepted handoff that `factory score` still has to read keeps
+  the worktree until those attempts are scored. The gate report is not retained,
+  as after a merge; its verdict is in the journal.
+
+Each removal takes the ticket lock and re-checks the head and cleanliness first,
+then runs `git worktree remove --force` (only the ignored scratch remains to
+force) and `git worktree prune`. The local `agent/<n>` branch is deleted
+(compare-and-swap on its tip) only when its tip is pushed, as after a merge;
+otherwise it is kept. Removals are journaled as `worktree-removed` (ticket, path,
+head, branch, PRs, issue state, bytes, retained head), and stale worktrees kept
+for safety as `worktree-kept` (ticket, path, code, head), at most once a day per
+reason. These rows never include file contents. In-flight tickets are skipped
+without a per-ticket GitHub read and are never journaled. A failed sweep never
+fails the pass.
+
+`factory doctor` reports `stale ticket worktrees`: how many are removable and how
+many are finished but kept (with each ticket's code: `dirty`, `unpushed`,
+`evidence`, `retention_incomplete`, `unregistered`). The row is a WARN when
+either count is non-zero, never a FAIL. Before the first automatic pass on a host
+with a backlog, run the same rules read-only:
+
+```bash
+factory prune-worktrees --dry-run          # text: ticket, path, size, decision, reason
+factory prune-worktrees --dry-run --json   # the same decisions as JSON
+factory prune-worktrees                    # remove now, without waiting for passes
+```
 
 ## Execution event contract
 

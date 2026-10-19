@@ -2999,4 +2999,7 @@ def main(argv: list[str]) -> int:
         ticket_pass(args.budget_min, args.dry_run)
         learn_pass(args.dry_run)
         release_step(open_pr=True)
+        from factory import worktrees
+
+        worktrees.dispatcher_pass(args.dry_run)  # bounded; finished tickets' leftover worktrees
         return 0
