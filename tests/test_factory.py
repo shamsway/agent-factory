@@ -4857,7 +4857,7 @@ class DispatchTest(unittest.TestCase):
             self.assertNotIn("<<<<<<<", pushed)
 
     def _terraform_refresh(self, main_path: str) -> tuple[list, mock.MagicMock, mock.MagicMock, Path, str]:
-        """SHA-279 fixture: agent/7 changes terraform/app/main.tf with a plan
+        """Refresh fixture: agent/7 changes terraform/app/main.tf with a plan
         summary naming its head; main then moves by committing `main_path`."""
         from factory import dispatch
 
@@ -4911,7 +4911,7 @@ class DispatchTest(unittest.TestCase):
         return gh_calls, review, esc, origin, old_head
 
     def test_refresh_restamps_terraform_summary_when_main_moved_elsewhere(self) -> None:
-        # SHA-279: an unchanged patch rebased past unrelated commits keeps its plans.
+        # An unchanged patch rebased past unrelated commits keeps its plans.
         from factory import dispatch, plan_summary
 
         gh_calls, review, esc, origin, old_head = self._terraform_refresh("docs/other.md")

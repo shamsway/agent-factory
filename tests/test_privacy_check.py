@@ -74,6 +74,14 @@ class PrivacyCheckTest(unittest.TestCase):
         self.assertEqual(tree.returncode, 1)
         self.assertIn("old.txt:1: denylist rule 2", tree.stdout)
 
+    def test_non_utf8_content_is_scanned_not_fatal(self) -> None:
+        (self.repo / "latin1.txt").write_bytes(f"caf\xe9 near {TERM}\n".encode("latin-1"))
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "latin-1 bytes")
+        proc = self.check("--range", "HEAD~1...HEAD", "--tree")
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("latin1.txt:1: denylist rule 2", proc.stdout)
+
     def test_missing_explicit_denylist_is_an_error(self) -> None:
         proc = subprocess.run([sys.executable, str(SCRIPT), "--denylist", str(self.tmp / "absent"), "--tree"],
                               cwd=self.repo, capture_output=True, text=True, check=False)

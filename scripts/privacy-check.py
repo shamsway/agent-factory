@@ -66,7 +66,10 @@ def scan(source: str, lines, rules) -> list[str]:
 
 
 def git(*args: str) -> str:
-    proc = subprocess.run(["git", *args], capture_output=True, text=True, check=False)
+    # Diffs and messages can carry non-UTF-8 bytes (binary-ish files, legacy encodings);
+    # decode leniently so one such commit never aborts the scan of the whole range.
+    proc = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", check=False)
     if proc.returncode:
         raise SystemExit(f"privacy-check: git {' '.join(args[:2])} failed: {proc.stderr.strip()[:200]}")
     return proc.stdout
@@ -111,10 +114,7 @@ def main(argv: list[str]) -> int:
     if args.tree:
         for path in git("ls-files", "-z").split("\0"):
             if path and Path(path).is_file() and not Path(path).is_symlink():
-                try:
-                    found += scan(path, Path(path).read_text().splitlines(), rules)
-                except UnicodeDecodeError:
-                    continue
+                found += scan(path, Path(path).read_text(errors="replace").splitlines(), rules)
     for line in found:
         print(line)
     print(f"privacy-check: {len(found)} finding(s)" if found else "privacy-check: clean")
