@@ -417,7 +417,7 @@ default = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
 chore   = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 
 [review]
-command = ["codex", "exec", "{prompt}"]
+command = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"]
 
 [[gate.check]]
 name = "tests"

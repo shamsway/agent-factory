@@ -40,7 +40,7 @@ npx skills add mikeroysoft/factory
 - a **worker** agent CLI that accepts a prompt file and works in a directory
   (default `omp -p`; `droid`, `codex exec`, `claude -p`, … work the same way)
 - optionally, a **manager** agent CLI that accepts a prompt file and works in a directory
-- a **reviewer** CLI that answers an inline prompt on stdout (default `omp -p --model anthropic/claude-fable-5-1`; `codex exec` works the same way)
+- a **reviewer** CLI that answers an inline prompt on stdout (default `omp -p --model anthropic/claude-fable-5-1`; `codex exec --skip-git-repo-check --sandbox read-only` works the same way; reviewers start outside any checkout)
 - optionally, an OpenAI-compatible local model for triage (Ollama, vLLM,
   llama.cpp, LM Studio)
 

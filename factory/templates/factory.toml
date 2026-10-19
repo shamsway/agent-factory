@@ -66,7 +66,7 @@
 # {prompt} = inline review prompt text. Output must end with `VERDICT: APPROVE` or `VERDICT: REVISE`.
 # Keep the reviewer on a different model family than [manager] so the two verdicts are independent.
 # command = ["omp", "-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
-# command = ["codex", "exec", "{prompt}"]
+# command = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "{prompt}"]  # codex refuses a non-git cwd without the flag
 
 [manager]
 # Dashboard briefings and contextual Ask FM use a bounded, no-tools OMP process.
