@@ -26,6 +26,7 @@ import tempfile
 import time
 import tomllib
 from contextlib import contextmanager, nullcontext, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 from factory import __version__, brief, config, gitguard, launch, lifecycle
@@ -995,7 +996,7 @@ ESCALATION_CODES = frozenset({
     "ci_failed", "ci_runner", "refresh_head", "refresh_conflict", "refresh_empty",
     "gh_failed", "review_intake", "manager_failed", "manager_exhausted",
     "manager_human", "pr_feedback", "pr_stale", "lease_refused", "dispatcher_error", "no_change",
-    "refresh_plan_stale", "investigation_empty",
+    "refresh_plan_stale", "investigation_empty", "pr_head_unsynced",
 })
 
 
@@ -1044,19 +1045,30 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "", *, cod
     comment_receipt(n, "escalation", posted.stdout if posted.returncode == 0 else "", round=round_number)
 
 
+class PrHeadNotSynced(RuntimeError):
+    """GitHub's PR API still reported `seen` (None: never read) when the wait for `head` ended."""
+
+    def __init__(self, head: str, seen: str | None) -> None:
+        super().__init__("GitHub PR head did not reach the gated revision within the wait window")
+        self.head, self.seen = head, seen
+
+
 def wait_for_pr_head(ref: str, head: str, *, timeout: float = 10.0) -> dict:
     """Wait for GitHub's post-push view, without accepting a different head."""
     deadline = time.monotonic() + timeout
+    seen = None
     while True:
         try:
             current = gh_json(["pr", "view", ref, "--repo", REPO, "--json", "body,headRefOid"])
-            if isinstance(current, dict) and current.get("headRefOid") == head:
-                return current
+            if isinstance(current, dict):
+                seen = current.get("headRefOid")
+                if seen == head:
+                    return current
         except Exception:  # noqa: BLE001, S110 - transient gh failures retry until the deadline
             pass
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RuntimeError("GitHub PR head did not reach the gated revision within the wait window")
+            raise PrHeadNotSynced(head, seen)
         time.sleep(min(0.5, remaining))
 
 
@@ -1889,15 +1901,23 @@ def runner_unavailable(n: int, pr: int, starved: list[dict], dry_run: bool) -> b
     return True
 
 
-def refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: str) -> str | None:
+def refresh_plan_summary(
+    wt: Path, n: int, pr: int, old_head: str, new_head: str, main_ref: str | None = None,
+) -> str | None:
+    """`_refresh_plan_summary`, failing closed. A PR API still reporting `old_head` after
+    the push is raised as `PrHeadNotSynced`, so the caller can wait for GitHub instead."""
     try:
-        return _refresh_plan_summary(wt, n, pr, old_head, new_head)
-    except Exception as exc:  # noqa: BLE001 - an unverifiable summary must not reach review
+        return _refresh_plan_summary(wt, n, pr, old_head, new_head, main_ref)
+    except Exception as exc:  # an unverifiable summary must not reach review
+        if isinstance(exc, PrHeadNotSynced) and exc.seen == old_head:
+            raise
         log(f"#{n}: plan summary check after refresh failed: {exc}")
         return "the plan summary could not be checked"
 
 
-def _refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: str) -> str | None:
+def _refresh_plan_summary(
+    wt: Path, n: int, pr: int, old_head: str, new_head: str, main_ref: str | None = None,
+) -> str | None:
     """Move a Terraform PR's plan-summary Revision to the refreshed head.
 
     Rebasing onto a moved main changes the head SHA, so the summary's
@@ -1905,12 +1925,13 @@ def _refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: st
     summary is restamped only when it still describes the new head: it named
     the old head, the PR's own patch is unchanged, and main's new commits touch
     none of the PR's Terraform directories. Returns None when restamped or not
-    applicable, else the reason the summary needs a human re-plan.
+    applicable, else the reason the summary needs a human re-plan. `main_ref`:
+    the main commit the head was refreshed onto (default: origin/<main> now).
     """
     if not cfg.apply_enabled:
         return None
     from factory import plan_summary
-    main_ref = f"origin/{cfg.main}"
+    main_ref = main_ref or f"origin/{cfg.main}"
     paths = run(["git", "diff", "--name-only", f"{main_ref}..{new_head}"], cwd=wt).stdout
     if not plan_summary.terraform_paths(paths):
         return None
@@ -2020,7 +2041,44 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         "refreshed", ticket=n, pr=pr, head=head, gate="PASS",
         gate_head=head, actual_head=head, clean=True,
     )
-    stale = refresh_plan_summary(wt, n, pr, remote_head, head)
+    main_tip = run(["git", "rev-parse", f"origin/{cfg.main}"], cwd=wt).stdout.strip()
+    return review_refreshed(wt, n, pr, verb, remote_head, head, report, main_tip)
+
+
+# How long GitHub's PR API may keep reporting the pre-push head after a refresh push before
+# a human is asked. Observed in production: the PR API lagged a pushed head for over ten
+# minutes while GitHub reported no incident.
+PR_HEAD_SYNC_LIMIT = 30 * 60
+
+
+def review_refreshed(
+    wt: Path, n: int, pr: int, verb: str, old_head: str, head: str, report: str, main_tip: str,
+    restamp_main: str | None = None,
+) -> bool:
+    """Restamp, review and approve a refreshed `head` whose gate passed and whose push landed.
+
+    A PR API still reporting `old_head` while the remote branch holds `head` is a retryable
+    `pr_head_not_synced` wait: the PR stays unapproved, nothing escalates, and
+    `resume_head_syncs` reruns only this step on a later pass. `restamp_main` is the main
+    commit the restamp compares against (default: origin/<main> now).
+    """
+    def withdraw(reason: str, code: str) -> None:
+        escalate(n, f"PR #{pr}: {reason}; `{FACTORY_APPROVED}` label removed", None, code=code)
+
+    try:
+        stale = refresh_plan_summary(wt, n, pr, old_head, head, restamp_main)
+    except PrHeadNotSynced:
+        remote = (run(["git", "ls-remote", "origin", f"refs/heads/agent/{n}"], cwd=wt).stdout.split() or [""])[0]
+        if remote != head:
+            withdraw(f"remote head {remote or '(none)'} is not the refreshed head {head}", "refresh_head")
+            return False
+        record("pr-head-wait", ticket=n, pr=pr, reason="pr_head_not_synced", head=head,
+               old_head=old_head, main=main_tip, verb=verb)
+        if lifecycle.current() is not None:
+            lifecycle.current().wait("pr_head_not_synced", mode="retry_next_pass", pr=pr, head=head)
+        log(f"#{n}: PR #{pr} still reports {old_head[:12]} after pushing {head[:12]}; "
+            "waiting for GitHub before the restamp and review")
+        return False
     if stale:
         withdraw(f"Terraform plan summary Revision is stale after {verb} onto moved main: "
                  f"{stale}; re-plan at {head} and update the summary", "refresh_plan_stale")
@@ -2035,6 +2093,73 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         return False
     log(f"#{n}: PR #{pr} {verb}d onto current main, re-gated, and re-approved at {head[:12]}")
     return True
+
+
+def pending_head_syncs(events: list[dict]) -> dict[int, list[dict]]:
+    """Per ticket, the `pr-head-wait` rows no later refresh, attempt, review, approval,
+    escalation or merge has answered: refreshes still waiting for GitHub's PR head."""
+    pending: dict[int, list[dict]] = {}
+    for event in events:
+        n = event.get("ticket")
+        if event.get("event") == "pr-head-wait":
+            pending.setdefault(n, []).append(event)
+        elif event.get("event") in {"refreshed", "attempt", "review", "approved", "escalate", "merged"}:
+            pending.pop(n, None)
+    return pending
+
+
+def resume_head_syncs(prs: list[dict], dry_run: bool) -> None:
+    """Retry refreshes whose pushed head GitHub's PR API had not reported yet.
+
+    The gate evidence is already bound to the pushed head, so only the restamp and review
+    run, and only while the worktree, the remote branch and the PR all hold that head. Any
+    other head withdraws as a refresh does; a PR still on the pre-push head after
+    `PR_HEAD_SYNC_LIMIT` escalates as `pr_head_unsynced`.
+    """
+    open_prs = {pr["number"]: pr for pr in prs}
+    for n, waits in sorted(pending_head_syncs(lifecycle.read_events(EVENTS)).items()):
+        first, wait = waits[0], waits[-1]
+        pr_num, head, old_head = wait["pr"], wait["head"], wait["old_head"]
+        listed = open_prs.get(pr_num)
+        if not listed or listed.get("headRefName") != f"agent/{n}":
+            continue  # closed or merged by a human: nothing to resume
+        if dry_run:
+            log(f"PR #{pr_num}: would retry the restamp and review at {head[:12]} once GitHub reports it")
+            continue
+        with lifecycle.scope(
+            EVENTS, "merge-eligibility", ticket=n, lock=FACTORY / "locks" / "merge.lock"
+        ) as execution:
+            def withdraw(reason: str, code: str, n: int = n, pr_num: int = pr_num) -> None:
+                escalate(n, f"PR #{pr_num}: {reason}; `{FACTORY_APPROVED}` label removed", None, code=code)
+
+            wt = ensure_worktree(n)
+            run(["git", "fetch", "origin"], cwd=wt)
+            local = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
+            remote = run(["git", "rev-parse", f"origin/agent/{n}"], cwd=wt, check=False).stdout.strip()
+            seen = listed.get("headRefOid")
+            if local != head or remote != head or seen not in (head, old_head):
+                withdraw(f"head changed while waiting for GitHub to report refreshed head {head} "
+                         f"(worktree {local or '(none)'}, remote {remote or '(none)'}, PR {seen})", "refresh_head")
+                continue
+            if seen == old_head:
+                waited = (datetime.now(UTC) - datetime.fromisoformat(first["at"])).total_seconds()
+                if waited >= PR_HEAD_SYNC_LIMIT:
+                    withdraw(f"GitHub PR head is not synced: the PR still reports {old_head} "
+                             f"{int(waited // 60)} min after agent/{n} was pushed at {head}, where the "
+                             f"gate passed; check the PR on GitHub, then release the ticket", "pr_head_unsynced")
+                    continue
+                record("pr-head-wait", ticket=n, pr=pr_num, reason="pr_head_not_synced", head=head,
+                       old_head=old_head, main=wait["main"], verb=wait["verb"])
+                execution.wait("pr_head_not_synced", mode="retry_next_pass", pr=pr_num, head=head)
+                log(f"PR #{pr_num}: GitHub still reports {old_head[:12]}, not pushed {head[:12]}; waiting")
+                continue
+            gate_report = wt / ".factory" / f"gate-report-{n}.md"
+            if not gate_report.is_file():
+                withdraw(f"gate report for refreshed head {head} is missing", "approval_missing")
+                continue
+            if review_refreshed(wt, n, pr_num, wait["verb"], old_head, head, gate_report.read_text(),
+                                wait["main"], restamp_main=wait["main"]):
+                execution.outcome = "refreshed"
 
 
 def retain_handoff(n: int, head: str) -> bool:
@@ -2114,6 +2239,7 @@ def merge_pass_locked(dry_run: bool) -> None:
             "number,headRefName,headRefOid,baseRefName,isDraft,labels,reviewDecision",
         ]
     )
+    resume_head_syncs(prs, dry_run)
     candidates = []
     for pr in prs:
         m = re.fullmatch(r"agent/(\d+)", pr["headRefName"])

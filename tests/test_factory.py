@@ -4912,17 +4912,19 @@ class DispatchTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             return real_run(cmd, *args, **kwargs)
 
+        self.reported_head = None  # what GitHub's PR API reports; None: the pushed head
+
         def fake_gh_json(args):
             if "body,headRefOid" in args:
-                return {"body": body, "headRefOid": git(origin, "rev-parse", "agent/7")}
+                return {"body": body, "headRefOid": self.reported_head or git(origin, "rev-parse", "agent/7")}
             return {"baseRefName": "main"} if args[0] == "pr" else {"labels": []}
 
         stack = self.enterContext(contextlib.ExitStack())
         stack.enter_context(mock.patch.object(dispatch, "gh_json", side_effect=fake_gh_json))
         stack.enter_context(mock.patch.object(dispatch, "run", side_effect=run_spy))
-        stack.enter_context(mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")))
+        self.gate = stack.enter_context(mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")))
         stack.enter_context(mock.patch.object(dispatch, "pr_comment"))
-        stack.enter_context(mock.patch.object(dispatch, "approve_pr", return_value=True))
+        self.approve = stack.enter_context(mock.patch.object(dispatch, "approve_pr", return_value=True))
         review = stack.enter_context(mock.patch.object(dispatch, "review", return_value=("APPROVE", "fine")))
         esc = stack.enter_context(mock.patch.object(dispatch, "escalate"))
         return gh_calls, review, esc, origin, old_head
@@ -4957,6 +4959,121 @@ class DispatchTest(unittest.TestCase):
         reason = esc.call_args.args[1]
         self.assertIn("plan summary Revision is stale", reason)
         self.assertIn("main changed terraform/app", reason)
+
+    def _lagging_refresh(self) -> tuple[list, mock.MagicMock, mock.MagicMock, Path, str, str]:
+        """Refresh agent/7 while GitHub's PR API keeps reporting the pre-push head: the
+        post-push wait times out at once instead of after ten seconds."""
+        from factory import dispatch
+
+        gh_calls, review, esc, origin, old_head = self._terraform_refresh("docs/other.md")
+        self.reported_head = old_head
+        real_wait = dispatch.wait_for_pr_head
+        self.enterContext(mock.patch.object(
+            dispatch, "wait_for_pr_head", side_effect=lambda ref, head, **kw: real_wait(ref, head, timeout=0)))
+        self.assertFalse(dispatch.refresh_pr_branch(7, 100, False))
+        new_head = git(origin, "rev-parse", "agent/7")
+        self.assertNotEqual(new_head, old_head)
+        # The real gate writes its report into the worktree; the mocked one does not.
+        (dispatch.FACTORY / "wt-7" / ".factory").mkdir(exist_ok=True)
+        (dispatch.FACTORY / "wt-7" / ".factory" / "gate-report-7.md").write_text("ok")
+        return gh_calls, review, esc, origin, old_head, new_head
+
+    def _resume(self, reported: str) -> None:
+        from factory import dispatch
+
+        dispatch.resume_head_syncs([{"number": 100, "headRefName": "agent/7", "headRefOid": reported}], False)
+
+    def test_refresh_waits_instead_of_escalating_when_pr_head_lags_the_push(self) -> None:
+        from factory import dispatch
+
+        gh_calls, review, esc, _origin, old_head, new_head = self._lagging_refresh()
+
+        esc.assert_not_called()
+        review.assert_not_called()
+        self.approve.assert_not_called()
+        self.assertFalse([c for c in gh_calls if "--body-file" in c or "--add-label" in c])
+        waits = [e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "pr-head-wait"]
+        self.assertEqual(len(waits), 1)
+        self.assertEqual(
+            (waits[0]["reason"], waits[0]["ticket"], waits[0]["pr"], waits[0]["head"], waits[0]["old_head"]),
+            ("pr_head_not_synced", 7, 100, new_head, old_head),
+        )
+        self.assertIn(7, dispatch.pending_head_syncs(lifecycle.read_events(dispatch.EVENTS)))
+
+    def test_resumed_refresh_restamps_and_reviews_once_pr_reports_the_pushed_head(self) -> None:
+        from factory import dispatch, plan_summary
+
+        gh_calls, review, esc, _origin, old_head, new_head = self._lagging_refresh()
+        self.reported_head = None  # GitHub caught up
+        self._resume(new_head)
+
+        esc.assert_not_called()
+        self.gate.assert_called_once()  # gated once, before the push; not re-gated
+        review.assert_called_once_with(dispatch.FACTORY / "wt-7", 7, "ok", new_head)
+        self.approve.assert_called_once_with(7, new_head)
+        edits = [c for c in gh_calls if c[:3] == ["gh", "pr", "edit"] and "--body-file" in c]
+        self.assertEqual(len(edits), 1)
+        restamped = Path(edits[0][edits[0].index("--body-file") + 1]).read_text()
+        self.assertIsNone(plan_summary.validate(restamped, new_head))
+        self.assertIn(f"Revision restamped by Factory from {old_head}", restamped)
+
+    def test_resumed_refresh_withdraws_when_pr_reports_a_different_head(self) -> None:
+        gh_calls, review, esc, _origin, _old, _new = self._lagging_refresh()
+        self.reported_head = "f" * 40
+        self._resume("f" * 40)
+
+        review.assert_not_called()
+        self.approve.assert_not_called()
+        self.assertFalse([c for c in gh_calls if "--body-file" in c])
+        esc.assert_called_once()
+        self.assertEqual(esc.call_args.kwargs["code"], "refresh_head")
+
+    def test_resumed_refresh_withdraws_when_remote_branch_moved(self) -> None:
+        _calls, review, esc, origin, _old, new_head = self._lagging_refresh()
+        git(origin, "checkout", "-q", "agent/7")
+        (origin / "other.txt").write_text("someone else\n")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-qm", "pushed by someone else")
+        git(origin, "checkout", "-q", "main")
+        self.reported_head = None
+        self._resume(git(origin, "rev-parse", "agent/7"))
+
+        review.assert_not_called()
+        self.approve.assert_not_called()
+        esc.assert_called_once()
+        self.assertEqual(esc.call_args.kwargs["code"], "refresh_head")
+        self.assertIn(new_head, esc.call_args.args[1])
+
+    def test_pr_head_still_stale_after_the_limit_escalates_as_unsynced(self) -> None:
+        from factory import dispatch
+
+        _calls, review, esc, _origin, old_head, new_head = self._lagging_refresh()
+        self._resume(old_head)  # within the limit: another wait
+        esc.assert_not_called()
+        waits = [e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == "pr-head-wait"]
+        self.assertEqual(len(waits), 2)
+
+        with mock.patch.object(dispatch, "PR_HEAD_SYNC_LIMIT", 0):
+            self._resume(old_head)
+        review.assert_not_called()
+        self.approve.assert_not_called()
+        esc.assert_called_once()
+        self.assertEqual(esc.call_args.kwargs["code"], "pr_head_unsynced")
+        reason = esc.call_args.args[1]
+        self.assertIn("GitHub PR head is not synced", reason)
+        self.assertIn(old_head, reason)
+        self.assertIn(new_head, reason)
+        self.assertNotIn("could not be checked", reason)
+
+    def test_merge_pass_resumes_waiting_refreshes(self) -> None:
+        from factory import dispatch
+
+        repo = make_repo(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        dispatch.configure(config.Config(root=repo, repo="acme/widgets", main="main"))
+        with mock.patch.object(dispatch, "gh_json", return_value=[]), \
+                mock.patch.object(dispatch, "resume_head_syncs") as resume:
+            dispatch.merge_pass_locked(False)
+        resume.assert_called_once_with([], False)
 
     def sync_pass_with(self, root: Path, open_issues: list[dict]) -> tuple[list[list[str]], object]:
         """Run sync_pass with `gh` stubbed: issue creation returns #42; returns (gh argv list, run_gate mock)."""

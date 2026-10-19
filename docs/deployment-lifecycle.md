@@ -577,6 +577,22 @@ PR-description publication and review allow up to ten seconds for GitHub to
 report the pushed head before rejecting a mismatch. Only the matching gated
 revision is accepted; polling never approves a different revision.
 
+GitHub's PR API can lag a push for much longer: observed in production, it
+reported the previous head for over ten minutes after the branch moved. When
+the refresh's own push landed (the remote `agent/<n>` holds the gated head)
+but the PR still reports the pre-push head, the restamp is a retryable wait,
+not an escalation: the PR stays without `factory-approved` and the journal
+records a `pr-head-wait` row and a `pr_head_not_synced` lifecycle wait. Each
+later merge pass checks again. Once the worktree, the remote branch and the PR
+all report the pushed head, it reruns only the restamp and the fresh review;
+the gate evidence is already bound to that head, so neither the worker nor the
+gate runs again, and approval still requires gate, review and head to match.
+Any other head on the worktree, branch or PR escalates as `refresh_head`. A PR
+still on the pre-push head 30 minutes (`PR_HEAD_SYNC_LIMIT`) after the first
+wait escalates as `pr_head_unsynced` with `GitHub PR head is not synced`. The
+dispatcher does not re-push to nudge GitHub: pushing the same SHA is a no-op
+that sends GitHub no push event, and anything else would change the head.
+
 ### Incident routing receipts during rollout preverification
 
 `factory inspect.complete` requires successful incident-routing and handoff
