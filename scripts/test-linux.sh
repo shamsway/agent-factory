@@ -6,10 +6,17 @@
 #   scripts/test-linux.sh                 # whole suite
 #   scripts/test-linux.sh tests.test_apply  # unittest module/test names
 #
-# Needs podman (or set CONTAINER=docker). PYTHON_IMAGE / PLATFORM override
-# the image and platform. The throwaway container is privileged so the real
-# bubblewrap tests (tests/test_sandbox.py) can mount namespaces; ISOLATION=0
-# runs it unprivileged and those tests skip.
+# Needs podman (or set CONTAINER=docker with ISOLATION=0). PYTHON_IMAGE /
+# PLATFORM override the image and platform.
+#
+# Like CI's "Prepare required Linux isolation boundary" step, the throwaway
+# container is privileged and boots systemd (podman --systemd=always) so root
+# has a user manager and session bus: the real bubblewrap and systemd-scope
+# tests (tests/test_sandbox.py, tests/test_investigation_isolation.py, the
+# b1-build SandboxTest) run, and FACTORY_REQUIRE_ISOLATION=1 makes a missing
+# boundary fail instead of skip. The host must allow unprivileged user
+# namespaces (CI relaxes kernel.apparmor_restrict_unprivileged_userns).
+# ISOLATION=0 runs an unprivileged container without systemd; those tests skip.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 engine="${CONTAINER:-podman}"
@@ -21,18 +28,43 @@ if [ "$#" -gt 0 ]; then
 else
   run="python -m unittest discover -s tests"
 fi
-privileged=() isolation_env=()
+packages="git gh bubblewrap python3" options=() init="sleep infinity" isolation_env=()
 if [ "${ISOLATION:-1}" != 0 ]; then
-  privileged=(--privileged) isolation_env=(-e FACTORY_REQUIRE_SANDBOX=1)
+  if [ "$engine" != podman ]; then
+    echo "test-linux: the isolation run boots systemd via podman; use ISOLATION=0 with $engine" >&2
+    exit 2
+  fi
+  packages+=" systemd systemd-sysv dbus-user-session"
+  options=(--privileged --systemd=always) init=/sbin/init
+  isolation_env=(-e FACTORY_REQUIRE_ISOLATION=1 -e XDG_RUNTIME_DIR=/run/user/0
+                 -e DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/0/bus)
 fi
+cid=$("$engine" run -d "${options[@]}" --platform "$platform" "$image" bash -c "
+  apt-get update -qq >/dev/null && apt-get install -y -qq $packages >/dev/null && touch /ready && exec $init")
+trap '"$engine" rm -f -t 0 "$cid" >/dev/null' EXIT
+wait_for() {  # retry a command in the container until it succeeds
+  until "$engine" exec "$cid" "$@" >/dev/null 2>&1; do
+    if [ "$("$engine" inspect -f '{{.State.Running}}' "$cid")" != true ]; then
+      "$engine" logs "$cid" >&2; echo "test-linux: container setup failed" >&2; exit 1
+    fi
+    sleep 2
+  done
+}
+wait_for test -e /ready
+if [ "${ISOLATION:-1}" != 0 ]; then
+  # The user manager and session bus CI gets from enable-linger, here for root.
+  wait_for loginctl enable-linger root
+  "$engine" exec "$cid" systemctl start user@0.service
+fi
+# COPYFILE_DISABLE: macOS tar would otherwise add AppleDouble ._* files.
 git ls-files -z --cached --others --exclude-standard \
-  | tar --null -T - -cf - \
-  | "$engine" run --rm -i --init "${privileged[@]}" "${isolation_env[@]}" --platform "$platform" "$image" bash -c "
+  | COPYFILE_DISABLE=1 tar --null -T - -cf - \
+  | "$engine" exec -i "${isolation_env[@]}" "$cid" bash -c "
       set -e
-      apt-get update -qq >/dev/null && apt-get install -y -qq git gh bubblewrap >/dev/null
-      # Fixtures use #!/usr/bin/python shebangs, as on the CI runner.
+      # Fixtures use #!/usr/bin/python shebangs, as on the CI runner. The
+      # isolation boundaries run the distro /usr/bin/python3, which they can
+      # mount from /usr; /usr/local is outside the sandbox.
       ln -sf /usr/local/bin/python3 /usr/bin/python
-      ln -sf /usr/local/bin/python3 /usr/bin/python3
       git config --global user.email ci@example.invalid
       git config --global user.name ci
       mkdir /src && cd /src && tar -xf -
