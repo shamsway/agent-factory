@@ -2432,6 +2432,10 @@ class OperatorApprovalTest(unittest.TestCase):
         self.cfg = config.load(self.repo)
         dispatch.configure(self.cfg)
         apply.configure(self.cfg)
+        # apply.main() reloads config from the cwd; keep it on the fixture repo's journal.
+        load = mock.patch.object(config, "load", return_value=self.cfg)
+        load.start()
+        self.addCleanup(load.stop)
         self.cfg.factory.mkdir(parents=True, exist_ok=True)
         (self.repo / "terraform").mkdir()
         (self.repo / "terraform" / "a.tf").write_text("# A\n")
