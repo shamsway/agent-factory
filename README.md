@@ -283,7 +283,7 @@ landed on its own, and partial progress needs its own reviewed PR.
 
 | Command | What one invocation does |
 |---|---|
-| `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or a `wontfix` proposal comment. `--dry-run`, `--issue N`, `--replay a,b,c`. |
+| `factory triage` | Labels every `needs-triage` issue via the local model: `ready-for-agent` (with an agent brief), `needs-info` (with the question), `ready-for-human`, or `wontfix-proposal` (proposal comment and label; a human closes). An issue unchanged since its last triage comment is skipped. `--dry-run`, `--issue N`, `--replay a,b,c`. |
 | `factory dispatch` | One stateless pass: fetch and detach the main checkout at `origin/<main>` before `.factory.toml` is read (a root with tracked or untracked changes outside `.factory/` exits 1 with a `root_dirty` dispatcher exit row naming the paths and does nothing, even when its config does not load) → upstream sync (stage a sync ticket) → merge stage (at most one PR) → review-only PR intake → manager → claim up to `max_active` tickets → worker → gate → PR → review → up to `review_rounds` bounces. Ordinary `ready-for-investigation` tickets take a shorter path instead (deployment roots are fenced to humans): one worker pass, findings posted as a comment, routed to `ready-for-human`. `--ticket N` forces one issue; `--dry-run` prints the plan from the checkout as it is. |
 | `factory inspect` | Read-only runtime/unit/process identity, credential-boundary comparisons, deployment state and existing lock probes as JSON. `--live` validates scoped tokens; `--candidates` queries bounded candidate metadata without Git fetch; `--worker-cwd` checks a worker's gate interpreter context. See [operational verification](docs/metadata-verification.md) for coverage and limitations. |
 | `factory verify-secrets` | Compare loaded unit credentials, fail on required missing units or failed supported live checks. `--scope install` (default), `apply`, `investigation`, `publisher`, or `all`; `--live`; `--json`; `--reuse-install-model-key NAME` for explicit investigation reuse. Reports names, statuses and sanitized scope details (for example a live-checked token's scopes). The `apply` scope includes rows from the deploy adapters' `credential_checks`. |
@@ -313,8 +313,8 @@ landed on its own, and partial progress needs its own reviewed PR.
 ## Where watch files
 
 `factory watch` files into the target repository with `bug,needs-triage` by default.
-Triage then treats each filing like any other issue. That suits a repository that is
-Factory's own source. A host running Factory against some other repository can change
+Triage then sends each filing straight to an agent investigation (see Ticket flow), which
+suits a repository that is Factory's own source. A host running Factory against some other repository can change
 it in host config or `.factory.toml`:
 
 ```toml
@@ -328,6 +328,14 @@ A filing is journaled with its repository, so changing `repo` files a fresh issu
 instead of tracking one in the old repository. Issue bodies carry journal rows, log tails
 and unit status from this host. Don't point `repo` at a public repository unless that
 evidence is fit to publish.
+
+`factory watch` also closes an open, unassigned tracked issue, in the repository it was
+filed in, that is still at `needs-triage` or `ready-for-agent` (never one handed to a
+human), as completed when its newest evidence (or its filing time) is at least 24 hours
+old and the failure is not happening now. Each pass closes at most five; `--dry-run`
+reports closures without applying them. A filing without `needs-triage` or
+`ready-for-agent` (for example `labels = ["bug"]`) is treated as handed to a human and
+never closed automatically.
 
 ## Automatic releases
 
@@ -393,9 +401,9 @@ Keep `{cwd}` in worker and manager commands, and configure the manager CLI in
 read-only/no-tools mode: the prompt prohibits file edits, but an arbitrary
 configured executable is trusted, not sandboxed by factory. The manager reads
 the packet, `.factory-lessons.md`, and optional `.factory/manager/notes.md`.
-Its last `DECISION:` header
-selects `RETRY`, `REWRITE`, `SPLIT`, `ROUTE`, `AUTHORIZE`, `FIX`, `CLOSE`, or `HUMAN`,
-followed by the decision body. RETRY/HUMAN use plain text; REWRITE uses the
+Its last `DECISION:` header selects `RETRY`, `REWRITE`, `SPLIT`, `ROUTE`,
+`AUTHORIZE`, `FIX`, `CLOSE`, `RESOLVE`, or `HUMAN`, followed by the decision
+body. RETRY/HUMAN/RESOLVE use plain text; REWRITE uses the
 complete replacement issue body. SPLIT uses a JSON array of
 `{title, body, blocked_by}` children, with `blocked_by` containing 1-based
 indexes of earlier children. ROUTE uses `{add, remove, guidance}`, with label
@@ -416,6 +424,13 @@ gate PASS bound to the resulting commit, and independently re-reviews that
 same commit. Only a zero-exit, well-formed fresh APPROVE whose remote PR head
 still matches restores `factory-approved`; failure stays with the human. FIX
 does not merge or requeue the issue.
+RESOLVE is escalation-only evidence that the requested outcome is already on
+the configured main branch (by commit or PR), or that the ticket duplicates
+another issue. It comments before closing the issue as completed and removes
+`ready-for-human`; an open `agent/<n>` PR into main with no changed files is
+also commented and closed. RESOLVE fails closed for human handling when that PR
+has changed files or another base, or when an `agent/<n>` branch without a PR is
+ahead of main.
 The template includes opt-in `ci-fix` and `conflict` profiles for a
 human to apply in host config; the manager cannot add profiles or edit config.
 Code validates the output, records a `manage` event before GitHub mutations, and
@@ -477,9 +492,9 @@ never trusted. Without the current escalation's recorded comment on the timeline
 the manager fails closed: even a failed escalation post leads to a routed handoff,
 not an exemption for later human label or assignee changes. A handoff receipt cannot
 substitute for the missing escalation receipt on a later pass.
-Manager `CLOSE` comments are posted explicitly before closing their respective PR
-or issue, with each receipt scoped to the timeline that owns the comment. A partial
-close failure does not replay the consumed manager decision.
+Manager `CLOSE` and `RESOLVE` comments are posted explicitly before closing
+their respective PR or issue, with each receipt scoped to the timeline that owns
+the comment. A partial close failure does not replay the consumed manager decision.
 A reply is context for humans, not a retry, approval or merge command;
 use the documented labels for that.
 
@@ -591,14 +606,18 @@ label timelines. Correction reads stop at 50 reviews, 50 threads of 50 comments,
 
 ## How a ticket moves
 
-1. **Triage.** A deterministic lint rejects bodies under 80 characters or
-   without acceptance criteria (`needs-info` with a specific question) —
-   unless the issue carries `kind/ops`, which exempts it from the
-   acceptance-criteria check (an incident report has no done-condition
-   yet). The model then decides between the five labels; `wontfix` is only
-   ever proposed. Deployment incident roots are fenced to `ready-for-human`.
-   Ordinary `ready-for-investigation` tickets skip straight to a
-   shorter path: one worker pass gathers evidence and posts a findings
+1. **Triage.** Runtime bugs filed by `factory watch` (the issue number is in a
+   journaled `watch` row for this repository, with a first-line `Fingerprint:`,
+   the `factory runtime failure:` title, and `bug` label) bypass the model and go
+   directly to `ready-for-agent` with a reproduce-or-handoff investigation
+   brief. Other issues first pass a deterministic lint that rejects bodies
+   under 80 characters or without acceptance criteria (`needs-info` with a
+   specific question) — unless the issue carries `kind/ops`, which exempts it
+   from the acceptance-criteria check (an incident report has no
+   done-condition yet). The model then decides between the five labels;
+   `wontfix` is only ever proposed. Deployment incident roots are fenced to
+   `ready-for-human`. Ordinary `ready-for-investigation` tickets skip straight
+   to a shorter path: one worker pass gathers evidence and posts a findings
    report as a comment — no gate, no PR, no review — then the ticket routes
    to `ready-for-human` for a person to decide what happens next.
 2. **Claim.** The dispatcher re-reads the issue (search-backed listings lag),
