@@ -68,7 +68,8 @@ DEFAULT_LEAK_PATTERN = (r"\.(?:corp|internal|intranet|lan)\b|\bconfidential\b|\b
                         r"|\bsk-ant-[A-Za-z0-9_-]{20,}|\bops_eyJ[A-Za-z0-9_-]{20,}")
 DEFAULT_WORKER = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
 DEFAULT_CHORE_WORKER = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
-DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
+DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--no-tools", "--no-extensions",
+                    "--no-skills", "--no-rules", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
 DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
 DEFAULT_LLM_MODEL = "qwen3:30b"
 DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "python": None, "env": {}}

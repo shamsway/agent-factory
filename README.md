@@ -378,7 +378,15 @@ uncommitted edit; keep the root clean and land config through PRs.
 
 Worker and manager commands receive `{prompt}` as a prompt-file path and `{cwd}`
 as the worktree (or repository root); reviewers receive `{prompt}` as inline
-text. OMP loads a prompt file only when it is prefixed with `@`, so use
+text. Both review lanes launch in an empty temporary directory outside the
+checkout. Ticket packets contain the exact gated diff, base-revision `AGENTS.md`
+and `CONTRIBUTING.md`, issue comments and gate report. Reviewers must use only
+this packet; oversized packets fail closed. The default OMP reviewer disables
+built-in tools, extensions, skills and rules. Custom reviewer commands and
+user-level configuration remain operator-trusted: a neutral cwd prevents
+checkout-local discovery, but is not an OS sandbox. Configure custom reviewers
+without tools or ambient plugins, and do not override their cwd back into a
+checkout. OMP loads a prompt file only when it is prefixed with `@`, so use
 `@{prompt}`: bare `omp {prompt}` passes the path as prompt text. Factory rejects
 that bare argument for manager commands, not worker commands.
 Keep `{cwd}` in worker and manager commands, and configure the manager CLI in

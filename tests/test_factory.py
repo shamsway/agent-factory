@@ -2875,7 +2875,7 @@ class DispatchTest(unittest.TestCase):
                 root=repo, repo="acme/widgets",
                 reviewer=[sys.executable, "-c",
                           (f"import sys; print({output!r}); "
-                           "open('received.txt', 'w').write(sys.argv[1])"), "{prompt}"],
+                           f"open({str(repo / 'received.txt')!r}, 'w').write(sys.argv[1])"), "{prompt}"],
             ))
             pr = {"number": 17, "state": "OPEN", "isDraft": False,
                   "headRefOid": "recorded-head", "baseRefOid": "recorded-base",
@@ -3441,8 +3441,25 @@ class DispatchTest(unittest.TestCase):
             self.assertIn("Acceptance: widget exists.", captured["prompt"])
             self.assertIn("do not try to fetch it yourself", captured["prompt"])
             gh_mock.assert_called_once_with(
-                ["issue", "view", "45", "--repo", dispatch.REPO, "--json", "title,body"]
+                ["issue", "view", "45", "--repo", dispatch.REPO, "--json", "title,body,comments"]
             )
+
+    def test_oversized_review_packet_rejects_without_launching_agent(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        with tempfile.TemporaryDirectory() as d:
+            repo = make_repo(Path(d))
+            dispatch.configure(config.load(repo))
+            head = git(repo, "rev-parse", "HEAD")
+            with mock.patch.object(dispatch, "gh_json", return_value={"title": "t", "body": "b"}), \
+                 mock.patch.object(dispatch, "_review_packet", return_value="x" * (120 * 1024)), \
+                 mock.patch.object(dispatch, "_run_reviewer") as launch:
+                verdict, findings = dispatch.review(repo, 7, "PASS", head)
+            self.assertEqual(verdict, "REVISE")
+            self.assertIn("exceeds inline prompt limit", findings)
+            launch.assert_not_called()
 
     def test_review_rejects_verdict_when_reviewer_process_fails(self) -> None:
         """a reviewer process failure (auth, crash, network -- not a
