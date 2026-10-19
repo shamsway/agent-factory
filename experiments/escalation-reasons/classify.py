@@ -58,7 +58,7 @@ BY_CODE = {
     "protected_paths": "requirement",
     "ci_failed": "eval", "pr_checks_failed": "eval",
     "refresh_conflict": "environment", "refresh_head": "environment", "refresh_empty": "environment",
-    "refresh_plan_stale": "environment",
+    "refresh_plan_stale": "environment", "pr_head_unsynced": "environment",
     "approval_missing": "environment", "approval_drift": "environment", "manager_failed": "environment",
     "gh_failed": "environment", "ci_runner": "environment", "budget": "environment",
     "worker_stuck": "environment", "upstream_sync": "environment",

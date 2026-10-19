@@ -106,6 +106,8 @@ flowchart TB
   CI -->|"pass, behind main, approval removed: dispatch.refresh_pr_branch"| REF
   REF -->|"dispatch.approve_pr"| FA
   REF -->|"conflict, gate FAIL, REVISE, or head moved: dispatch.refresh_pr_branch"| ESC
+  REF -->|"pushed, PR API still on the pre-push head: dispatch.review_refreshed waits, dispatch.resume_head_syncs retries the restamp and review"| REF
+  REF -->|"head changed while waiting, or PR head still stale past PR_HEAD_SYNC_LIMIT: dispatch.resume_head_syncs"| ESC
   CI -->|"pass, missing SHA-bound approval evidence: dispatch.merge_pass_locked"| ESC
   CI -->|"pass, up to date, no human CHANGES_REQUESTED: dispatch.merge_pass_locked"| MERGE
   MERGE -->|"dispatch.cleanup_after_merge"| MERGED
@@ -181,8 +183,8 @@ One row per function that edits labels (`--add-label`, `--remove-label`, or
 ## Escalate reasons
 
 Every reason string passed to `dispatch.escalate`, the
-`withdraw` helper in `dispatch.refresh_pr_branch`, or recorded as an `escalate`
-event. `{}` is a runtime value.
+`withdraw` helpers in `dispatch.refresh_pr_branch`, `dispatch.review_refreshed` and
+`dispatch.resume_head_syncs`, or recorded as an `escalate` event. `{}` is a runtime value.
 
 | Code | Reason | Edge |
 |------|--------|------|
@@ -211,9 +213,15 @@ event. `{}` is a runtime value.
 | `dispatch.refresh_pr_branch` | ``nothing ahead of {} after {}; refusing to push`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``gate failed after {} onto moved main`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``remote head changed while refreshed evidence was being produced`` | refresh → escalate |
-| `dispatch.refresh_pr_branch` | ``Terraform plan summary Revision is stale after {} onto moved main: {}; re-plan at {} and update the summary`` | refresh → escalate |
-| `dispatch.refresh_pr_branch` | ``fresh review requested changes after {} onto moved main`` | refresh → escalate |
-| `dispatch.refresh_pr_branch` | ``approval evidence, head, or human review state changed before refreshed approval`` | refresh → escalate |
+| `dispatch.review_refreshed` | ``PR #{}: {}; `{}` label removed`` | refresh → escalate (wraps the reasons below) |
+| `dispatch.review_refreshed` | ``remote head {} is not the refreshed head {}`` | refresh, PR API on the pre-push head → escalate |
+| `dispatch.review_refreshed` | ``Terraform plan summary Revision is stale after {} onto moved main: {}; re-plan at {} and update the summary`` | refresh → escalate |
+| `dispatch.review_refreshed` | ``fresh review requested changes after {} onto moved main`` | refresh → escalate |
+| `dispatch.review_refreshed` | ``approval evidence, head, or human review state changed before refreshed approval`` | refresh → escalate |
+| `dispatch.resume_head_syncs` | ``PR #{}: {}; `{}` label removed`` | refresh wait → escalate (wraps the reasons below) |
+| `dispatch.resume_head_syncs` | ``head changed while waiting for GitHub to report refreshed head {} (worktree {}, remote {}, PR {})`` | refresh wait → escalate |
+| `dispatch.resume_head_syncs` | ``GitHub PR head is not synced: the PR still reports {} {} min after agent/{} was pushed at {}, where the gate passed; check the PR on GitHub, then release the ticket`` | refresh wait past `PR_HEAD_SYNC_LIMIT` → escalate (`pr_head_unsynced`) |
+| `dispatch.resume_head_syncs` | ``gate report for refreshed head {} is missing`` | refresh wait → escalate |
 | `dispatch.review_intake_pass` | ``PR #{}: unresolved after {} automated review attempt(s)`` | external PR → ready-for-human |
 | `manage.frontier_pass` | ``PR #{}: CI failed ({})`` | manager PR frontier → escalate |
 | `manage.frontier_pass` | ``PR #{}: {} unresolved feedback item(s) on head {}`` | manager PR frontier → escalate |
