@@ -1876,7 +1876,7 @@ def refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: str
 
 
 def _refresh_plan_summary(wt: Path, n: int, pr: int, old_head: str, new_head: str) -> str | None:
-    """Move a Terraform PR's plan-summary Revision to the refreshed head (SHA-279).
+    """Move a Terraform PR's plan-summary Revision to the refreshed head.
 
     Rebasing onto a moved main changes the head SHA, so the summary's
     `Revision:` goes stale and the fresh review could only return REVISE. The

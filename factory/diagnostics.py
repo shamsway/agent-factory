@@ -465,7 +465,7 @@ def collect(run, p: Policy, env: dict, *, collectors=None, transport=None, clock
         "logs_enabled": p.logs, "nomad_identity": "diagnostic_token" if env.get("FACTORY_DIAGNOSTIC_NOMAD_TOKEN") else "anonymous",
         "limitations": ["Recorded health version is an observation, not an atomic commit-to-Nomad proof.",
                          "Evaluations correlate by job and time, not job version; logs may be untimestamped or expired.",
-                         "Unknown secret formats remain a sanitizer limitation (SHA-238)."]}, ctx.secrets)
+                         "Unknown secret formats remain a known sanitizer limitation."]}, ctx.secrets)
 
 
 def main(argv: list[str]) -> int:
