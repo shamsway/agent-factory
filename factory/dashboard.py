@@ -1334,7 +1334,9 @@ def main(argv: list[str]) -> int:
     try:
         workspace = Workspace(cfg, codebase_monitor=codebase_monitor)
     except (OSError, ValueError, RuntimeError) as exc:
-        print(f"factory dashboard: could not initialize workspace ({type(exc).__name__})",
+        from factory.workspace import KeyStorageError
+        reason = str(exc) if isinstance(exc, KeyStorageError) else type(exc).__name__
+        print(f"factory dashboard: could not initialize workspace ({reason})",
               file=sys.stderr)
         return 1
     try:
