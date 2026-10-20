@@ -95,11 +95,36 @@ def log(msg: str) -> None:
     print(f"[dispatch] {msg}", flush=True)
 
 
+STDERR_TAIL = 2000
+_TOKEN = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?i:bearer|token)\s+[A-Za-z0-9._~+/=-]{20,}")
+
+
+def stderr_tail(err: object) -> str:
+    """Last ~2,000 characters of a failed command's stderr with token-shaped strings redacted.
+
+    Redact before truncating: a token cut at the boundary would no longer match."""
+    if isinstance(err, bytes):
+        err = err.decode(errors="replace")
+    return _TOKEN.sub("[REDACTED]", err or "")[-STDERR_TAIL:]
+
+
 def run(
     cmd: list[str], cwd: Path | None = None, check: bool = True,
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """`env` replaces the inherited environment (lifecycle context is still added)."""
+    """`env` replaces the inherited environment (lifecycle context is still added).
+
+    A failed checked command logs its redacted stderr tail, then raises as before."""
+    try:
+        return _run(cmd, cwd, check, stdout, stderr, env)
+    except subprocess.CalledProcessError as exc:
+        tail = stderr_tail(exc.stderr)
+        if tail:
+            log(f"command failed (exit {exc.returncode}): {' '.join(map(str, cmd[:4]))}\n{tail}")
+        raise
+
+
+def _run(cmd, cwd, check, stdout, stderr, env) -> subprocess.CompletedProcess:
     execution = lifecycle.current()
     if execution is None:
         return subprocess.run(cmd, cwd=cwd, check=check, stdout=stdout, stderr=stderr, text=True, env=env)
@@ -2292,7 +2317,15 @@ def process_ticket(
                 record("plan-bound", ticket=n, schema_version=1, baseline=baseline,
                        issue={key: fresh.get(key) for key in ("title", "body", "comments")})
 
-            run(["gh", "issue", "edit", str(n), "--repo", REPO, "--add-assignee", "@me"])
+            try:
+                run(["gh", "issue", "edit", str(n), "--repo", REPO, "--add-assignee", "@me"])
+            except subprocess.CalledProcessError as exc:
+                # Nothing was claimed: skip this pass; the ticket stays claimable.
+                log(f"#{n}: skipped (claim failed, exit {exc.returncode}); retry next pass")
+                record("claim-failed", ticket=n, returncode=exc.returncode,
+                       stderr_tail=stderr_tail(exc.stderr))
+                execution.wait("claim_failed", mode="retry_next_pass")
+                return
             claimed = True
             from factory import schedule
 
