@@ -1093,11 +1093,14 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
             if error:
                 record("review", ticket=n, verdict="REVISE", parsed=True, accepted=False,
                        head=expected_head, reason="terraform_plan_summary")
-                return "REVISE", "Required fix: " + error
+                _, why = pr_plan_summary(wt, n, gate_report)
+                return "REVISE", "Required fix: " + error + (f"\n\nWhy: {why}" if why else "")
 
     terraform_rule = (
         f"PR description evidence:\n{pr_text}\n"
         "Verify the Terraform plan summary reflects this diff, identifies target/actions, "
+        "(a block headed 'Plan evidence from the gate's own plan check' is Factory's, from the gated plan; "
+        "a worker's UNVERIFIED counts are not a defect when that block is present), "
         "validation context and no-op rationale when applicable. Missing or stale evidence blocks approval.\n"
     ) if pr_text else ""
     prompt = (
@@ -1204,24 +1207,42 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
     return verdict, findings
 
 
-def worker_plan_summary(wt: Path, ticket: int | None) -> str:
+def pr_plan_summary(wt: Path, ticket: int | None, report: str = "") -> tuple[str, str | None]:
+    """(summary, reason): the PR's plan summary at HEAD, or "" and why there is none.
+
+    The worker's `.factory/terraform-plan-summary-<n>.md` supplies the narrative; the
+    counts and actions come from the gate `report` for this head when it carries plan
+    evidence, so a worker that may not plan a root still gets a valid summary."""
     if not cfg.apply_enabled or ticket is None:
-        return ""
+        return "", None
     from factory import artifacts, plan_summary
     path = wt / ".factory" / f"terraform-plan-summary-{ticket}.md"
-    if not path.is_file() or path.is_symlink():
-        return ""
     head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
-    text = path.read_text()
-    if plan_summary.validate(text, head):
-        return ""
-    return artifacts.sanitize(plan_summary.section(text),
-                              artifacts.secret_values(cfg.apply_env, cfg.install.get("env", {})))
+    worker = path.read_text() if path.is_file() and not path.is_symlink() else ""
+    text = plan_summary.compose(worker, plan_summary.evidence_block(report), head)
+    if not text:
+        return "", f"no plan summary: write .factory/terraform-plan-summary-{ticket}.md"
+    reason = plan_summary.validate(text, head)
+    if reason:
+        return "", f".factory/terraform-plan-summary-{ticket}.md was not used: {reason}"
+    return artifacts.sanitize(text, artifacts.secret_values(cfg.apply_env, cfg.install.get("env", {}))), None
 
 
-def update_pr_plan_summary(wt: Path, ticket: int) -> None:
+def worker_plan_summary(wt: Path, ticket: int | None, report: str = "") -> str:
+    return pr_plan_summary(wt, ticket, report)[0]
+
+
+def publishable_plan_summary(wt: Path, ticket: int, report: str) -> str:
+    """`pr_plan_summary`, journaling why nothing was published so it is never a silent drop."""
+    summary, reason = pr_plan_summary(wt, ticket, report)
+    if reason:
+        record("plan-summary", ticket=ticket, published=False, reason=reason)
+    return summary
+
+
+def update_pr_plan_summary(wt: Path, ticket: int, report: str = "") -> None:
     from factory import plan_summary
-    summary = worker_plan_summary(wt, ticket)
+    summary = publishable_plan_summary(wt, ticket, report)
     if not summary:
         return
     head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
@@ -1295,7 +1316,7 @@ def push_agent(wt: Path, n: int, lease: str, check: bool = True) -> str | None:
 
 def push_and_pr(
     wt: Path, branch: str, title: str, body: str, label: str = "", ticket: int | None = None,
-    lease: str | None = None,
+    lease: str | None = None, report: str = "",
 ) -> bool:
     """Push `branch` and open its PR. False if the branch adds nothing over
     main (nothing to review; a worker that landed its work elsewhere). With `ticket` and
@@ -1319,13 +1340,13 @@ def push_and_pr(
         push_agent(wt, ticket, lease)
     if existing:
         if ticket is not None:
-            update_pr_plan_summary(wt, ticket)
+            update_pr_plan_summary(wt, ticket, report)
         log(f"{branch}: PR already exists (#{existing[0]['number']})")
         if ticket is not None:
             record("pr-opened", ticket=ticket, pr=existing[0]["number"])
         return True
     body_file = FACTORY / f"pr-body-{branch.removeprefix('agent/')}.md"
-    summary = worker_plan_summary(wt, ticket)
+    summary = publishable_plan_summary(wt, ticket, report) if ticket is not None else ""
     if summary:
         from factory import plan_summary
         body = plan_summary.replace_section(body, summary)
@@ -2856,7 +2877,7 @@ def process_ticket(
                          logfile, code="no_change")
                 return
             body = f"Closes #{n}\n\n## Gate report\n\n{report}\n"
-            if not push_and_pr(wt, f"agent/{n}", f"agent/{n}: {title}", body, ticket=n, lease=lease):
+            if not push_and_pr(wt, f"agent/{n}", f"agent/{n}: {title}", body, ticket=n, lease=lease, report=report):
                 escalate(
                     n, f"agent/{n}: PR not published (no commits over main and no handoff, or existing "
                     f"PR targets a base other than {cfg.main}); inspect dispatcher log", logfile,
@@ -2905,7 +2926,7 @@ def process_ticket(
                     )
                     return
                 lease = push_agent(wt, n, lease)
-                update_pr_plan_summary(wt, n)
+                update_pr_plan_summary(wt, n, report)
                 verdict, findings, pr_failed = pr_gate_and_review(wt, n, report, gate_head, pr_runs)
                 pr_comment(n, findings)
             if verdict != "APPROVE" and pr_failed:

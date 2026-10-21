@@ -36,6 +36,13 @@ Failure output is bounded and sanitized: terraform's error summaries and
 source locations, never its detail bodies (provider responses can carry
 secrets) or plan contents.
 
+Plan evidence: after a successful `terraform show -json`, the check prints
+`factory-evidence:` lines with the plan's add/change/destroy counts and each
+changed resource's address and action, never attribute values. The gate keeps
+those lines in its report and the dispatcher stamps them into the PR's
+Terraform plan summary, so a worker that cannot plan a root still gets
+counts that come from the gate's own plan.
+
 Allow a specific destroy/replace by adding a line to the ticket body (the
 dispatcher writes the full ticket into `.factory-prompt.md` in the
 worktree before the worker runs; that file is still on disk, just
@@ -89,6 +96,54 @@ def unexpected_changes(
         for addr, actions in destructive_changes(plan_json)
         if addr not in allowed
     ]
+
+
+EVIDENCE = "factory-evidence:"
+EVIDENCE_CHANGES = 40
+EVIDENCE_WIDTH = 200
+
+
+def _action(actions: list[str]) -> str | None:
+    """Terraform's word for one resource change, or None for no-op and read."""
+    if sorted(actions) == ["create", "delete"]:
+        return "replace"
+    if actions in (["no-op"], ["read"], []):
+        return None
+    return "/".join(actions)
+
+
+def plan_counts(plan_json: dict) -> tuple[int, int, int]:
+    """(add, change, destroy) as `terraform plan` counts them: a replace is one of each."""
+    add = change = destroy = 0
+    for rc in plan_json.get("resource_changes", []):
+        actions = rc.get("change", {}).get("actions", [])
+        add += "create" in actions
+        change += "update" in actions
+        destroy += "delete" in actions
+    return add, change, destroy
+
+
+def _printable(text: str) -> str:
+    return "".join(ch for ch in str(text) if ch.isprintable() and ch != "`")[:EVIDENCE_WIDTH]
+
+
+def evidence_lines(directory: str, plan_json: dict) -> list[str]:
+    """Counts and (address, action) pairs only; a plan's values never appear here."""
+    where = _printable(directory)
+    if not where or any(ch.isspace() for ch in where):
+        return []
+    add, change, destroy = plan_counts(plan_json)
+    lines = [f"{EVIDENCE} terraform-plan dir={where} add={add} change={change} destroy={destroy}"]
+    changed = [
+        (_printable(rc.get("address", "?")), action)
+        for rc in plan_json.get("resource_changes", [])
+        if (action := _action(rc.get("change", {}).get("actions", [])))
+    ]
+    lines += [f"{EVIDENCE} terraform-change dir={where} action={action} address={address}"
+              for address, action in changed[:EVIDENCE_CHANGES]]
+    if len(changed) > EVIDENCE_CHANGES:
+        lines.append(f"{EVIDENCE} terraform-change dir={where} more={len(changed) - EVIDENCE_CHANGES}")
+    return lines
 
 
 def run_plan(cwd: Path, planfile: Path, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -186,7 +241,7 @@ def main(argv: list[str]) -> int:
         else:
             private = Path(tempfile.mkdtemp(prefix=f"factory-tfplan-{os.getpid()}-"))
             planfile = private / "tfplan"
-        return check(cwd, planfile, Path(args.ticket_file))
+        return check(cwd, planfile, Path(args.ticket_file), args.dir)
     except Terminated as exc:
         print(f"tf-plan-safety: terminated by signal {exc.args[0]}; plan removed")
         return 128 + exc.args[0]
@@ -214,7 +269,7 @@ def explicit_target(path: Path) -> None:
         print(f"tf-plan-safety: removed a plan an interrupted earlier run left at {path}")
 
 
-def check(cwd: Path, planfile: Path, ticket_path: Path) -> int:
+def check(cwd: Path, planfile: Path, ticket_path: Path, directory: str | None = None) -> int:
     umask = os.umask(0o077)  # the plan terraform writes is 0600, wherever it goes
     try:
         proc = run_plan(cwd, planfile)
@@ -230,6 +285,8 @@ def check(cwd: Path, planfile: Path, ticket_path: Path) -> int:
     except json.JSONDecodeError:
         print("tf-plan-safety: terraform show -json output was not JSON (content withheld)")
         return 1
+    for line in evidence_lines(str(cwd) if directory is None else directory, plan):
+        print(line)
     ticket_text = ticket_path.read_text() if ticket_path.exists() else ""
     changes = destructive_changes(plan)
     if not changes:
