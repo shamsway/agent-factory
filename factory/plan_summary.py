@@ -16,6 +16,9 @@ reflect the current PR head. Update the PR description after revisions.
 Before the first PR exists, write the section to
 `.factory/terraform-plan-summary-{n}.md` (gitignored) after committing, including
 `Revision: <full HEAD SHA>`. The dispatcher copies it into the PR description.
+If the repository's guidance says not to plan a root yourself, say so and leave
+the counts to Factory: it appends the counts, addresses and actions from its own
+gate plan check at the same revision.
 Update this file after revisions; the dispatcher refreshes only this PR section.
 The reviewer will reject a missing or incomplete summary before approval.
 """
@@ -28,6 +31,12 @@ def terraform_paths(paths: str) -> bool:
     )
 
 
+COUNTS = r"Plan:\s*\d+ to add,\s*\d+ to change,\s*\d+ to destroy"
+# A no-op is a result line of its own ("No changes", "- Plan: No changes."), never the
+# phrase inside prose such as "no changes to the image".
+NO_CHANGES = r"^[ \t]*(?:[-*][ \t]*)?(?:Plan:[ \t]*)?No changes\b"
+
+
 def validate(body: str, head: str | None = None) -> str | None:
     section = re.search(
         r"(?im)^## Terraform plan summary\s*$\n([\s\S]*?)(?=^##\s|\Z)", body or ""
@@ -37,24 +46,68 @@ def validate(body: str, head: str | None = None) -> str | None:
     text = section[1]
     if head and not re.search(r"(?im)^Revision:\s*" + re.escape(head) + r"\s*$", text):
         return "Terraform plan summary Revision must match the full gated HEAD SHA"
-    if not re.search(
-        r"(?i)Plan:\s*\d+ to add,\s*\d+ to change,\s*\d+ to destroy|\bNo changes\b",
-        text,
-    ):
+    if not re.search(rf"(?im){COUNTS}|{NO_CHANGES}", text):
         return "Terraform plan summary requires add/change/destroy counts or No changes with rationale"
     # Format is enforced here; truth and scope of the evidence are reviewed.
-    if (
-        len(
-            re.sub(
-                r"(?i)Plan:\s*\d+ to add,\s*\d+ to change,\s*\d+ to destroy|No changes",
-                "",
-                text,
-            ).strip()
-        )
-        < 20
-    ):
+    if len(re.sub(rf"(?im){COUNTS}|{NO_CHANGES}", "", text).strip()) < 20:
         return "Terraform plan summary requires target, actions/rationale and validation context"
     return None
+
+
+EVIDENCE_RE = re.compile(
+    r"(?m)^factory-evidence: terraform-(?P<kind>plan|change) dir=(?P<dir>\S+) (?P<rest>.*)$"
+)
+PLAN_RE = re.compile(r"add=(\d+) change=(\d+) destroy=(\d+)$")
+CHANGE_RE = re.compile(r"action=(\S+) address=(.+)$|more=(\d+)$")
+
+
+EVIDENCE_HEADER = ("Plan evidence from the gate's own plan check at this revision, stamped by "
+                   "Factory (counts, actions and addresses only):")
+
+
+def evidence_block(report: str) -> str:
+    """Markdown lines for the gate's own plan evidence in `report`, or "" when it has none.
+
+    Only counts, actions and addresses: the plan check never prints values."""
+    roots: dict[str, dict] = {}
+    for match in EVIDENCE_RE.finditer(report or ""):
+        root = roots.setdefault(match["dir"], {"plan": None, "changes": [], "more": 0})
+        if match["kind"] == "plan" and (counts := PLAN_RE.fullmatch(match["rest"])):
+            root["plan"] = tuple(int(n) for n in counts.groups())
+        elif match["kind"] == "change" and (change := CHANGE_RE.fullmatch(match["rest"])):
+            if change[3]:
+                root["more"] = int(change[3])
+            else:
+                root["changes"].append((change[1], change[2]))
+    lines = []
+    for where, root in roots.items():
+        if root["plan"] is None:
+            continue
+        add, change, destroy = root["plan"]
+        lines.append(f"- `{where}`: Plan: {add} to add, {change} to change, {destroy} to destroy")
+        lines += [f"  - {action} `{address}`" for action, address in root["changes"]]
+        if root["more"]:
+            lines.append(f"  - ... and {root['more']} more")
+    if not lines:
+        return ""
+    return EVIDENCE_HEADER + "\n" + "\n".join(lines)
+
+
+def compose(worker: str, evidence: str, head: str) -> str:
+    """The PR's plan summary: the worker's section (if any) plus the gate's evidence.
+
+    With evidence and no worker section, Factory writes a minimal section of its own;
+    with neither, there is nothing to publish."""
+    worker = section(worker)
+    if EVIDENCE_HEADER in worker:  # only Factory writes this block; a copy in worker text is dropped
+        worker = worker[: worker.index(EVIDENCE_HEADER)].rstrip()
+    if not evidence:
+        return worker
+    if not worker:
+        worker = ("## Terraform plan summary\n\n"
+                  f"Revision: {head}\n\n"
+                  "The worker wrote no plan summary; the evidence below is the gate's.")
+    return worker.rstrip() + "\n\n" + evidence
 
 
 def normalize_patch(diff: str) -> str:

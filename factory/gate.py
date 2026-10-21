@@ -27,6 +27,13 @@ GPU_LOCK: Path
 LEAK_RE: re.Pattern[str] | None = None
 GPU_CHECKS: set[str] = set()
 TAIL_LINES = 80
+# Plan checks print `factory-evidence:` lines (counts, addresses, actions; never values).
+# The report keeps them from configured plan checks only, so another check's output
+# cannot pose as plan evidence.
+PLAN_CHECK_MODULE = "factory.tf_plan_check"
+EVIDENCE_PREFIX = "factory-evidence: "
+EVIDENCE_LINES = 60
+EVIDENCE_WIDTH = 300
 CHECK_TIMEOUT = 1200  # seconds; overridable via --check-timeout
 
 
@@ -375,6 +382,7 @@ def execute(args: argparse.Namespace, execution) -> int:
     rank = config.CHECK_TIERS.index(args.tier)
     listed = [check for check in cfg.checks if config.CHECK_TIERS.index(check.when) >= rank]
     configured = [(check.name, (lambda c=check: run(c.run, c.timeout))) for check in listed]
+    plan_checks = {check.name for check in listed if PLAN_CHECK_MODULE in check.run}
     checks = [
         ("conflict-markers", check_conflict_markers),
         *configured,
@@ -433,6 +441,11 @@ def execute(args: argparse.Namespace, execution) -> int:
         if status == "FAIL" or (args.tier == "pr" and status == "PASS" and output.strip()):
             tail = "\n".join(output.splitlines()[-TAIL_LINES:])
             lines += ["", f"## {name} {'failure' if status == 'FAIL' else 'output'}", "```", tail, "```"]
+        elif status == "PASS" and name in plan_checks:
+            evidence = [line[:EVIDENCE_WIDTH] for line in output.splitlines()
+                        if line.startswith(EVIDENCE_PREFIX) and line.isprintable()][:EVIDENCE_LINES]
+            if evidence:
+                lines += ["", f"## {name} evidence", *evidence]
     report = Path(args.report)
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text("\n".join(lines) + "\n")

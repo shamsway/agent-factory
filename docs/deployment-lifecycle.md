@@ -595,6 +595,21 @@ checks the summary against the diff; the syntax gate does not prove a plan
 actually ran. Software-only workflows are unaffected. Update the description
 when revisions change the plan; never paste secrets or the raw plan.
 
+Plan evidence from the gate: `factory.tf_plan_check` prints
+`factory-evidence:` lines with each root's add/change/destroy counts and the
+address and action of every changed resource (at most 40 per root), never
+attribute values. The gate keeps those lines, from configured
+`factory.tf_plan_check` checks only, in a `## <check> evidence` report section.
+The dispatcher appends them to the PR summary under a Factory-stamped header,
+so a worker that may not plan a root (one whose plan reads credentials) still
+publishes a valid summary with counts from the gated plan. The worker's text
+stays as the narrative; a copy of the stamped header in worker text is
+dropped. Evidence never repairs a stale `Revision:`. A summary that still
+fails validation is not published; the dispatcher journals a `plan-summary`
+row with the reason, and the review's required fix includes it. `No changes`
+satisfies the counts rule only as a result line of its own, not as a phrase
+in prose.
+
 When the merge stage refreshes an approved Terraform PR onto a moved main, the
 head SHA changes and the summary's `Revision:` goes stale. The dispatcher
 restamps it to the refreshed head, with a note naming the previous head, only
