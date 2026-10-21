@@ -87,17 +87,9 @@ def merged_tickets(limit: int = 100) -> list[dict]:
 def fetch_pr_review_evidence(pr_number: int, repo: str = "") -> dict | None:
     """Fetch complete review decision, head commit, and review details for a PR."""
     try:
-        r = repo or cfg.repo
-        args = ["pr", "view", str(pr_number)]
-        if r:
-            args.extend(["--repo", r])
-        args.extend(["--json", "reviewDecision,headRefOid,latestReviews"])
-        res = dispatch.gh_json(args)
-        if isinstance(res, dict):
-            return res
-    except Exception:  # noqa: BLE001, S110 - missing review evidence is treated as unavailable
-        pass
-    return None
+        return dispatch.pr_review_evidence(pr_number, repo or cfg.repo)
+    except Exception:  # noqa: BLE001 - missing review evidence is treated as unavailable
+        return None
 
 
 def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict]:

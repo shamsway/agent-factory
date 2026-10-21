@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 from factory import config
-from tests.test_factory import make_repo
+from tests.test_factory import build_fork, git, make_repo, merge_stage_mocks
 
 
 def detached_from(fake_run):
@@ -139,7 +139,9 @@ class ApplyTest(unittest.TestCase):
                     "reviewDecision": "REVIEW_REQUIRED",
                 }
             ]
+            evidence = {"reviewDecision": "REVIEW_REQUIRED", "headRefOid": "c0ffee", "latestReviews": {"nodes": []}}
             with mock.patch.object(dispatch, "gh_json", return_value=prs), \
+                 mock.patch.object(dispatch, "pr_review_evidence", return_value=evidence), \
                  mock.patch.object(dispatch, "pr_checks") as checks, \
                  mock.patch.object(dispatch, "log") as log_mock:
                 dispatch.merge_pass_locked(dry_run=True)
@@ -172,7 +174,11 @@ class ApplyTest(unittest.TestCase):
                     "reviewDecision": "APPROVED",
                 }
             ]
+            evidence = {"reviewDecision": "APPROVED", "headRefOid": "c0ffee",
+                        "latestReviews": {"nodes": [{"state": "APPROVED", "authorAssociation": "OWNER",
+                                                     "author": {"login": "maintainer"}, "commit": {"oid": "c0ffee"}}]}}
             with mock.patch.object(dispatch, "gh_json", return_value=prs), \
+                 mock.patch.object(dispatch, "pr_review_evidence", return_value=evidence), \
                  mock.patch.object(dispatch, "initiative_kind", return_value=False), \
                  mock.patch.object(dispatch, "pr_checks") as checks:
                 dispatch.merge_pass_locked(dry_run=True)
@@ -472,6 +478,115 @@ class ApplyTest(unittest.TestCase):
             pr_calls = [c for c in calls if c[:3] == ["gh", "pr", "comment"]]
             self.assertEqual(len(pr_calls), 1)
             self.assertIn("fresh plan destroys/replaces aws_s3_bucket.logs (delete)", pr_calls[0][pr_calls[0].index("--body") + 1])
+
+
+class MergeGateHeadApprovalTest(unittest.TestCase):
+    """On apply-enabled repos the merge stage lands only a head that apply would
+    accept: a trusted human approval of that exact commit (SHA-bound LLM evidence
+    and GitHub's reviewDecision alone are not enough, since a push keeps it)."""
+
+    def setUp(self) -> None:
+        from unittest import mock
+
+        from factory import dispatch
+
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.root, self.origin, _upstream = build_fork(tmp)
+        git(self.origin, "checkout", "-q", "-b", "agent/99")
+        (self.origin / "feature.txt").write_text("feature")
+        git(self.origin, "add", "-A")
+        git(self.origin, "commit", "-q", "-m", "feature")
+        git(self.origin, "checkout", "-q", "main")
+        self.head = git(self.origin, "rev-parse", "agent/99")
+        self.main = git(self.origin, "rev-parse", "main")
+        cfg = config.Config(root=self.root, repo="acme/widgets", upstream="upstream", main="main")
+        cfg.apply_enabled = True
+        with mock.patch.object(config, "remote_slug", return_value="acme/upstream-widgets"):
+            dispatch.configure(cfg)
+
+    @staticmethod
+    def review(commit: str, login: str = "maintainer", association: str = "OWNER", state: str = "APPROVED") -> dict:
+        return {"state": state, "authorAssociation": association, "author": {"login": login}, "commit": {"oid": commit}}
+
+    def merge(self, reviews):
+        """Run one real merge pass; `reviews(n)` gives latestReviews for the n-th review read."""
+        from unittest import mock
+
+        from factory import dispatch
+
+        fake_gh_json, fake_run = merge_stage_mocks(self.origin, 200, "agent/99", "add feature", dispatch.run)
+        reads = []
+
+        def gh_json(args):
+            if args[:2] == ["api", "graphql"]:
+                self.assertIn("number=200", args)
+                reads.append(args)
+                pr = {"reviewDecision": "APPROVED", "headRefOid": self.head,
+                      "latestReviews": {"nodes": reviews(len(reads))}}
+                return {"data": {"repository": {"pullRequest": pr}}}
+            return fake_gh_json(args)
+
+        with mock.patch.object(dispatch, "gh_json", side_effect=gh_json), \
+             mock.patch.object(dispatch, "pr_checks", return_value=[{"name": "ci", "bucket": "pass"}]), \
+             mock.patch.object(dispatch, "run", side_effect=fake_run), \
+             mock.patch.object(dispatch, "escalate") as escalate, \
+             mock.patch.object(dispatch, "log") as log:
+            dispatch.merge_pass_locked(False)
+        merged = git(self.origin, "rev-parse", "main") != self.main
+        return merged, " ".join(str(c) for c in log.call_args_list), escalate
+
+    def test_review_evidence_comes_from_graphql_with_commits(self) -> None:
+        from unittest import mock
+
+        from factory import apply, dispatch
+
+        node = self.review(self.head)
+        reply = {"data": {"repository": {"pullRequest": {"reviewDecision": "APPROVED", "headRefOid": self.head,
+                                                         "latestReviews": {"nodes": [node]}}}}}
+        with mock.patch.object(dispatch, "gh_json", return_value=reply) as gh:
+            self.assertEqual(dispatch.human_head_approval(200, self.head), (True, ""))
+            self.assertEqual(apply.fetch_pr_review_evidence(200, "acme/widgets")["latestReviews"]["nodes"], [node])
+            ok, why = dispatch.human_head_approval(200, self.main)
+        self.assertFalse(ok)
+        self.assertIn("head moved", why)
+        args = gh.call_args.args[0]
+        self.assertEqual(args[:2], ["api", "graphql"])
+        self.assertIn("commit { oid }", args[3])
+        self.assertIn("owner=acme", args)
+        self.assertIn("name=widgets", args)
+        with mock.patch.object(dispatch, "gh_json", return_value={"data": {"repository": None}}):
+            self.assertEqual(dispatch.human_head_approval(200, self.head), (False, "review evidence unavailable"))
+
+    def test_approval_of_the_current_head_merges(self) -> None:
+        merged, _log, escalate = self.merge(lambda _n: [self.review(self.head)])
+        self.assertTrue(merged)
+        escalate.assert_not_called()
+
+    def test_stale_approval_waits_without_escalating(self) -> None:
+        merged, log, escalate = self.merge(lambda _n: [self.review(self.main)])
+        self.assertFalse(merged)
+        escalate.assert_not_called()
+        self.assertIn("needs a human-approved review; waiting", log)
+        self.assertIn("stale review", log)
+
+    def test_untrusted_or_bot_approvals_do_not_count(self) -> None:
+        for review in (self.review(self.head, association="CONTRIBUTOR"),
+                       self.review(self.head, association="NONE"),
+                       self.review(self.head, login="factory-reviewer[bot]"),
+                       self.review(self.head, login=""),
+                       self.review(self.head, state="COMMENTED")):
+            with self.subTest(review=review):
+                merged, log, escalate = self.merge(lambda _n, r=review: [r])
+                self.assertFalse(merged)
+                escalate.assert_not_called()
+                self.assertIn("needs a human-approved review; waiting", log)
+
+    def test_approval_withdrawn_before_the_merge_is_not_merged(self) -> None:
+        # Approved at listing and at the first re-read, gone at the final re-read.
+        merged, log, escalate = self.merge(lambda n: [self.review(self.head)] if n < 3 else [])
+        self.assertFalse(merged)
+        escalate.assert_not_called()
+        self.assertIn("human review changed before merge", log)
 
 
 if __name__ == "__main__":
