@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Run the test suite the way CI does (.github/workflows/ci.yml), in a Linux
 # container, against the working tree (tracked + untracked, honouring
-# .gitignore). The suite targets Linux; macOS runs are not evidence.
+# .gitignore). The suite targets Linux; macOS runs are not evidence. CI splits
+# the same discovery into parallel shards (scripts/test-shard.py); this runs
+# it whole.
 #
 #   scripts/test-linux.sh                 # whole suite
 #   scripts/test-linux.sh tests.test_apply  # unittest module/test names
