@@ -1,10 +1,18 @@
 # Written by `factory init`. The merge stage refuses to land a PR that has no
 # passing GitHub check, so this workflow must exist and must pass. Make the
-# step below run the same commands as [[gate.check]] in .factory.toml.
+# steps below run the same commands as [[gate.check]] in .factory.toml.
+#
+# The suite runs as parallel shards (scripts/test-shard.py: every discovered
+# test in exactly one shard); `gate` passes only when lint and every shard did.
+# Refresh tests/shard-weights.json with `scripts/test-shard.py --measure` when
+# the shards drift apart.
 name: ci
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches: [main]  # a PR branch already runs through pull_request
 jobs:
-  gate:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +30,14 @@ jobs:
         run: python3 scripts/privacy-check.py --range "$BASE...$HEAD" --branch "$BRANCH"
       - name: Ruff
         run: uvx ruff@0.16.10 check .
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
       - run: |
           python -m pip install --require-hashes --only-binary=:all: -r requirements/publisher-wheels.txt
       - run: python -m pip install '.[atlas,publisher]'
@@ -36,6 +52,16 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-      - run: python -m unittest discover -s tests
+      - run: python scripts/test-shard.py --shards 4 --index ${{ matrix.shard }}
         env:
           FACTORY_REQUIRE_ISOLATION: "1"
+  gate:
+    # The one check the merge stage and branch rules look for: green only when
+    # lint and every test shard succeeded (a skipped or cancelled shard fails it).
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.test.result }}" = success
