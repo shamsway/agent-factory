@@ -41,6 +41,7 @@ LABEL_CHORE = "chore"
 LABEL_OPS = "kind/ops"
 LABEL_INITIATIVE = "initiative"
 LABEL_WONTFIX = "wontfix-proposal"
+LABEL_EXPERIMENT = "experiment"
 LABELS = {
     LABEL_VIABILITY: ("D4C5F9", "Opt in to a manager build/defer recommendation before triage"),
     LABEL_REVIEW: ("D4C5F9", "Opt in to a manager PR direction recommendation before review"),
@@ -56,6 +57,7 @@ LABELS = {
     LABEL_ADD_ONLY_OVERRIDE: ("B60205", "Manager or human authorization for edits to existing files under gate.add_only_paths"),
     LABEL_WONTFIX: ("EDEDED", "Triage or manager proposes not to action this; a human decides"),
     LABEL_INITIATIVE: ("1D76DB", "Shared initiative plan read by `factory plan`; never triaged, dispatched, managed or merged"),
+    LABEL_EXPERIMENT: ("5319E7", "Experiment ticket: at most one active at a time; never ranks by its results"),
 }
 
 # Word-bounded strong signals only: bare words like "internal"/"private" are ordinary English.
@@ -105,7 +107,7 @@ KNOWN_KEYS = {
     "review": ("command",),
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
     "release": ("auto", "version_file", "min_tickets"),
-    "watch": ("enabled", "repo", "labels"),
+    "watch": ("enabled", "repo", "engine_repo", "labels"),
     "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
     "leak_scan": ("pattern", "exclude", "extra"),
     "triage": ("url", "model", "key", "timeout"),
@@ -698,6 +700,12 @@ def load(start: Path | None = None) -> Config:
     if not isinstance(watch, dict):
         raise ConfigError("[watch] must be a table")
     enabled, watch_repo = watch.get("enabled", cfg.watch_enabled), watch.get("repo", cfg.watch_repo)
+    # Upstream spells the target `engine_repo` (default: its own repo); here it is an alias
+    # of `repo` with no default, so a filing leaves this repository only when a host says so.
+    if "engine_repo" in watch:
+        if "repo" in watch and watch["repo"] != watch["engine_repo"]:
+            raise ConfigError("watch.repo and watch.engine_repo name different repositories; set one")
+        watch_repo = watch["engine_repo"]
     labels = watch.get("labels", cfg.watch_labels)
     if not isinstance(enabled, bool):
         raise ConfigError("watch.enabled must be true or false")

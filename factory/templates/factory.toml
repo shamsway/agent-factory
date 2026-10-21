@@ -140,6 +140,16 @@ exclusive = false
 # port = 8765
 # theme = ".factory-dashboard.css"   # repo-relative CSS loaded after the built-in stylesheet
 
+[watch]
+# `factory watch` files the factory's own runtime failures into this repository unless
+# `repo` names another (`engine_repo` is the same key). Installs sharing one `repo`
+# comment on the open issue another install already filed. Issue bodies carry this
+# host's journal rows and log tails: don't point `repo` at a public repository unless
+# that evidence is fit to publish.
+# enabled = true
+# repo = "owner/factory-source"
+# labels = ["bug", "needs-triage"]
+
 # Human decision owners for `factory plan route N --reason R` (read-only; nothing
 # is ever assigned). Omit the whole section to keep legacy behaviour. Owners are
 # GitHub logins or `@org/team`; syntax is checked, membership is not. Team

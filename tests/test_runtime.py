@@ -189,8 +189,7 @@ class RuntimeCliTest(unittest.TestCase):
         # journal still names the lock, which must read as free, not lock_unavailable.
         self.journal.parent.mkdir()
         (self.journal.parent / "locks").mkdir()
-        # The configured locks exist, as on a host that has run passes; a missing one that
-        # was never a file still reports lock_unavailable.
+        # The configured locks exist, as on a host that has run passes.
         (self.root / "gpu.lock").touch()
         (self.journal.parent / "locks/merge.lock").touch()
 
@@ -471,6 +470,26 @@ class RuntimeCliTest(unittest.TestCase):
                                   cwd=self.root, env=self.env, capture_output=True, text=True, timeout=5, check=False)
             self.assertEqual(proc.returncode, 2)
             self.assertEqual(proc.stdout, "")
+
+    def test_lock_file_removed_after_release_is_not_a_reader_error(self):
+        # Ticket cleanup unlinks `.factory/locks/N.lock` after landing, and merge.lock
+        # does not exist before the first merge; neither is a runtime failure.
+        self.journal.parent.mkdir()
+        (self.journal.parent / "locks").mkdir()
+        ticket_lock = self.journal.parent / "locks/9.lock"
+        ticket_lock.touch()
+        worker = lifecycle.Execution(self.journal, "worker", ticket=9, attempt=1)
+        worker.emit("enter")
+        worker.resource("acquired", ticket_lock, scope="repository")
+        worker.resource("released", ticket_lock, scope="repository")
+        worker.emit("exit")
+        ticket_lock.unlink()
+        data = self.invoke()
+        self.assertNotIn("lock_unavailable", [error["code"] for error in data["errors"]])
+        removed = next(row for row in data["resources"]
+                       if row["resource"]["lock"]["path"] == str(ticket_lock))
+        # Released, then unlinked with no process on its inode: free (the fork's removed-lock rule).
+        self.assertEqual(removed["state"], "free")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import json
 import os
 import re
@@ -314,10 +315,11 @@ def ticket_lock(n: int) -> Path:
     return locks / f"{n}.lock"
 
 
-def active_ticket_count() -> int:
+def active_tickets() -> list[int]:
+    """Ticket numbers whose pipeline lock is held right now."""
     if not FACTORY.is_dir():
-        return 0
-    return sum(1 for f in (FACTORY / "locks").glob("*.lock") if lock_held(f))
+        return []
+    return [int(f.stem) for f in (FACTORY / "locks").glob("*.lock") if f.stem.isdigit() and lock_held(f)]
 
 
 def issue_is_open(number: int) -> bool:
@@ -354,6 +356,7 @@ def open_blockers(number: int, body: str) -> list[int]:
 
 
 def frontier(label: str = LABEL_AGENT) -> list[dict]:
+    """Open `label` issues; an ineligible one carries `held` naming why, never ranked."""
     issues = gh_json(
         [
             "issue",
@@ -365,29 +368,25 @@ def frontier(label: str = LABEL_AGENT) -> list[dict]:
             "--label",
             label,
             "--json",
-            "number,title,body,labels,assignees",
+            "number,title,body,labels,assignees,createdAt",
         ]
     )
-    ready = []
     for issue in issues:
         n = issue["number"]
         if any(label.get("name") == config.LABEL_INITIATIVE for label in issue.get("labels", [])):
-            log(f"#{n}: skipped (initiative record)")
-            continue
-        if issue["assignees"]:
-            log(f"#{n}: skipped (assigned)")
-            continue
-        if any(label.get("name") == LABEL_HUMAN for label in issue.get("labels", [])):
+            issue["held"] = "initiative record"
+        elif issue["assignees"]:
+            issue["held"] = "assigned"
+        elif any(label.get("name") == LABEL_HUMAN for label in issue.get("labels", [])):
             # A lane label added while ready-for-human remains does not release the ticket;
             # the human (or a manager decision) must also remove ready-for-human.
-            log(f"#{n}: skipped (still {LABEL_HUMAN}; remove it to release the ticket to {label})")
+            issue["held"] = f"still {LABEL_HUMAN}; remove it to release the ticket to {label}"
+        elif blockers := open_blockers(n, issue.get("body", "")):
+            issue["held"] = f"blocked by {', '.join(f'#{b}' for b in blockers)}"
+        else:
             continue
-        blockers = open_blockers(n, issue.get("body", ""))
-        if blockers:
-            log(f"#{n}: skipped (blocked by {', '.join(f'#{b}' for b in blockers)})")
-            continue
-        ready.append(issue)
-    return ready
+        log(f"#{n}: skipped ({issue['held']})")
+    return issues
 
 
 def review_intake_pass(dry_run: bool) -> None:
@@ -1982,8 +1981,8 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         return False
     wt = ensure_worktree(n)
 
-    def withdraw(reason: str, code: str) -> None:
-        escalate(n, f"PR #{pr}: {reason}; `{FACTORY_APPROVED}` label removed", None, code=code)
+    def withdraw(reason: str, code: str, extra: str = "") -> None:
+        escalate(n, f"PR #{pr}: {reason}; `{FACTORY_APPROVED}` label removed", None, extra=extra, code=code)
 
     removed = run(
         ["gh", "pr", "edit", str(pr), "--repo", REPO, "--remove-label", FACTORY_APPROVED],
@@ -2004,8 +2003,33 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
         else ("rebase", ["git", "rebase", f"origin/{cfg.main}"])
     )
     if run(cmd, cwd=wt, check=False).returncode != 0:
+        unmerged = run(["git", "diff", "--name-only", "-z", "--diff-filter=U"], cwd=wt, check=False).stdout
+        conflicts = [path for path in unmerged.split("\0") if path]
         run(["git", verb, "--abort"], cwd=wt, check=False)
-        withdraw(f"{verb} onto moved main conflicts; worktree {wt}", "refresh_conflict")
+        # Routine worker work (#295): the ticket goes back to the frontier on the same worktree and
+        # branch, bounded by `review_rounds` conflict rounds. A human gets it only for a protected
+        # path without authority, rounds used up, or a ticket that is no longer open.
+        # A manager-FIX-approved PR may still have a ready-for-human issue; restore agent flow.
+        issue = gh_json(["issue", "view", str(n), "--repo", REPO, "--json", "state,labels"])
+        labels = {label["name"] for label in issue.get("labels", [])}
+        rounds = sum(e.get("event") == "conflict-requeue" and e.get("ticket") == n for e in lifecycle.read_events(EVENTS))
+        protected = [] if LABEL_PROTECTED_OVERRIDE in labels else [
+            path for path in conflicts if any(fnmatch.fnmatchcase(path, glob) for glob in cfg.protected_paths)
+        ]
+        why = (
+            f"protected paths without `{LABEL_PROTECTED_OVERRIDE}`" if protected
+            else f"after {rounds} conflict-resolution round(s)" if rounds >= cfg.review_rounds
+            else "ticket is not open" if issue.get("state") != "OPEN"
+            else ""
+        )
+        if why:
+            files = "## Conflicting files\n\n" + ("\n".join(f"- `{path}`" for path in conflicts) or "(none listed)")
+            withdraw(f"{verb} onto moved main conflicts ({why}); worktree {wt}", "refresh_conflict", extra=files)
+            return False
+        record("conflict-requeue", ticket=n, pr=pr, head=remote_head, verb=verb, files=conflicts, round=rounds + 1)
+        run(["gh", "issue", "edit", str(n), "--repo", REPO,
+             "--remove-label", LABEL_HUMAN, "--add-label", LABEL_AGENT, "--remove-assignee", "@me"], check=False)
+        log(f"#{n}: PR #{pr} {verb} onto {cfg.main} conflicts in {', '.join(conflicts)}; requeued to a worker")
         return False
     empty = run(
         ["git", "merge-base", "--is-ancestor", "HEAD", f"origin/{cfg.main}"], cwd=wt, check=False
@@ -2495,7 +2519,7 @@ def worker_round(
     )
     transcript = _transcript(session_dir, wall)
     timeout = {"timeout": fired, "reason": TIMEOUT_REASONS[fired]} if fired else {}
-    usage = worker_usage(logfile, cfg.worker_usage.get(worker))
+    usage = worker_usage(logfile, cfg.worker_usage.get(worker), transcript)
     record("llm-usage", ticket=n, stage="worker", attempt=attempt, **usage)
     commit_leftovers(wt, n, title)
     head = run(["git", "rev-parse", "HEAD"], cwd=wt).stdout.strip()
@@ -2566,11 +2590,12 @@ def _json_path(row: object, path: str) -> object:
     return row
 
 
-def worker_usage(logfile: Path, spec: dict | None) -> dict:
+def worker_usage(logfile: Path, spec: dict | None, transcript: str | None = None) -> dict:
     """Normalized usage the worker reported in its log; None = not reported, never guessed.
 
     `spec` (a `[workers]` profile's `usage`) sums its JSON paths over every JSON-object
     line whose `match` paths hold; cost falls back to `cost_pattern` when no path gives one.
+    Tokens fall back to the OMP session `transcript` totals when the log reported none.
     """
     usage: dict = dict.fromkeys(("model", *USAGE_FIELDS))
     text = logfile.read_text(errors="replace") if spec else ""
@@ -2589,6 +2614,32 @@ def worker_usage(logfile: Path, spec: dict | None) -> dict:
                 if type(value) in (int, float) and value >= 0:
                     usage[field] = (usage[field] or 0) + value
     usage["cost"] = log_cost(logfile) if usage["cost"] is None else round(usage["cost"], 4)
+    if transcript and usage["prompt_tokens"] is None and usage["completion_tokens"] is None:
+        usage.update(transcript_usage(Path(transcript)))
+    return usage
+
+
+def transcript_usage(path: Path) -> dict:
+    """Token totals over an OMP session file's assistant messages (the `_omp_output` sums); {} when none."""
+    usage: dict = {}
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = row.get("message") if isinstance(row, dict) and row.get("type") == "message" else None
+        counts = message.get("usage") if isinstance(message, dict) and message.get("role") == "assistant" else None
+        if not isinstance(counts, dict):
+            continue
+        values = (counts.get("input"), counts.get("output"), counts.get("cacheRead", 0), counts.get("cacheWrite", 0))
+        if not all(type(value) is int and value >= 0 for value in values):
+            continue
+        prompt, completion, read, write = values
+        for key, value in (("prompt_tokens", prompt + read + write), ("completion_tokens", completion),
+                           ("cached_tokens", read)):
+            usage[key] = usage.get(key, 0) + value
+        if isinstance(message.get("model"), str):
+            usage["model"] = message["model"]
     return usage
 
 
@@ -2744,15 +2795,31 @@ def process_ticket(
 
             run(["gh", "issue", "edit", str(n), "--repo", REPO, "--add-assignee", "@me"])
             claimed = True
-            record("claimed", ticket=n, title=title, labels=sorted(labels))
+            from factory import schedule
+
+            tier, why = schedule.priority(n, fresh.get("body"), REPO)
+            record("claimed", ticket=n, title=title, labels=sorted(labels), priority=tier,
+                   priority_source=why, experiment=schedule.is_experiment(fresh))
             wt = ensure_worktree(n)
             lease = agent_lease(wt, n)
             LOGS.mkdir(parents=True, exist_ok=True)
 
             # Attempts 1..MAX_ATTEMPTS: worker + gate, feeding the failed report back. A sync
-            # candidate the dispatcher's own gate passed at this exact head needs no worker.
-            extra, logfile, report = "", None, ""
-            staged = sync_staged(n, wt)
+            # candidate the dispatcher's own gate passed at this exact head needs no worker,
+            # unless a refresh conflict requeued it (no attempt since its `conflict-requeue`).
+            rows = [e for e in lifecycle.read_events(EVENTS)
+                    if e.get("ticket") == n and e.get("event") in {"attempt", "conflict-requeue"}]
+            conflict = rows[-1] if rows and rows[-1]["event"] == "conflict-requeue" else None
+            resolve = "" if conflict is None else (
+                f"## Refresh conflict, round {conflict['round']}\n\n"
+                f"PR #{conflict['pr']} was approved, but `git {conflict['verb']} origin/{cfg.main}` conflicts in:\n\n"
+                + "".join(f"- `{path}`\n" for path in conflict["files"])
+                + f"\nRun `git fetch origin && git {conflict['verb']} origin/{cfg.main}` in this worktree, resolve "
+                "the conflicts, and commit. Keep the already-approved intent of the change; do not widen scope. "
+                "The approval does not carry over: the gate and an independent review run again.\n\n"
+            )
+            extra, logfile, report = resolve, None, ""
+            staged = None if conflict else sync_staged(n, wt)
             if staged is not None:
                 report, gate_head = staged
             for attempt in range(1, MAX_ATTEMPTS + 1 if staged is None else 1):
@@ -2769,7 +2836,7 @@ def process_ticket(
                 if time.monotonic() > deadline:
                     escalate(n, f"wall-clock budget ({budget_min} min) exceeded", logfile, code="budget")
                     return
-                extra = f"## Previous gate report (attempt {attempt} failed)\n\n{report}"
+                extra = f"{resolve}## Previous gate report (attempt {attempt} failed)\n\n{report}"
             else:
                 if staged is None:
                     stuck = report.startswith("worker stuck")
@@ -2876,29 +2943,34 @@ def process_ticket(
 
 
 def ticket_pass(budget_min: int, dry_run: bool) -> None:
-    """Claim up to capacity frontier tickets and work each one."""
+    """Claim up to capacity frontier tickets in accepted-priority order and work each one."""
+    from factory import schedule
+
     with nullcontext() if dry_run else lifecycle.scope(EVENTS, "scheduling", lazy=True) as execution:
-        active = active_ticket_count()
-        capacity = MAX_ACTIVE - active
-        log(f"active tickets: {active}, capacity: {max(capacity, 0)}")
+        active = active_tickets()
+        capacity = MAX_ACTIVE - len(active)
+        log(f"active tickets: {len(active)}, capacity: {max(capacity, 0)}")
         if capacity <= 0:
             log("at capacity, nothing to do")
             if execution:
-                execution.wait("capacity_reached", mode="admission", active=active, max_active=MAX_ACTIVE)
+                execution.wait("capacity_reached", mode="admission", active=len(active), max_active=MAX_ACTIVE)
             return
-        ready, seen = [], set()
+        rows, seen = [], set()
         for issue in frontier(LABEL_AGENT) + frontier(LABEL_INVESTIGATE):
             if issue["number"] not in seen:
                 seen.add(issue["number"])
-                ready.append(issue)
-        if not ready:
+                rows.append(issue)
+        if all(issue.get("held") for issue in rows):
             log("frontier empty, nothing to do")
             return
-        if execution:
-            execution.commit()  # claimable work: keep the scheduling trail
-        for issue in ready[:capacity]:
-            log(f"claimable: #{issue['number']} {issue['title']}")
-    for issue in ready[:capacity]:
+        events = lifecycle.read_events(EVENTS)
+        decided = schedule.plan(rows, capacity, repo=REPO, streak=schedule.explicit_streak(events),
+                                experiments=schedule.active_experiments(events, set(active)))
+        for row in decided["explained"]:
+            log(f"#{row['ticket']}: {row['decision']} ({row['reason']})")
+        if not dry_run:
+            record("scheduling", capacity=capacity, active=active, explained=decided["explained"])
+    for issue in decided["selected"]:
         process_ticket(issue, budget_min, dry_run)
 
 
