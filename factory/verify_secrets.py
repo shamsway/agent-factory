@@ -13,6 +13,7 @@ Use this instead.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -135,7 +136,7 @@ LIVE_CHECKS = {
 }
 
 
-BAD_STATUSES = ("empty", "invalid", "unavailable", "missing")
+BAD_STATUSES = ("empty", "invalid", "unavailable", "missing", "expired")
 
 
 def _detail(result: str, secrets: list[str]) -> str | None:
@@ -155,9 +156,40 @@ ADAPTER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}|\*")
 # A live check may call a registry or an API; one hung plugin must not hang the report.
 ADAPTER_CHECK_TIMEOUT_SEC = 30
 DETAIL_LIMIT = 200
+# Optional machine-readable credential lifetime (UTC ISO 8601) and the operator step that renews it.
+EXPIRY_FIELDS = ("expires_at", "renewable_until")
 
 
-def _adapter_report(adapter, env: dict[str, str], live: bool, secrets: list[str]) -> list[dict]:
+def _timestamp(value: object) -> str:
+    """A timezone-aware ISO 8601 string, re-emitted as `YYYY-MM-DDTHH:MM:SSZ`; anything else raises."""
+    if not isinstance(value, str) or len(value) > 40:
+        raise ValueError("credential timestamp must be an ISO 8601 string")
+    parsed = datetime.datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("credential timestamp must carry a timezone")
+    return parsed.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_timestamp(value: str) -> datetime.datetime:
+    return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.UTC)
+
+
+def _one_line(value: object, secrets: list[str]) -> tuple[str, str]:
+    """(raw, sanitized): one printable line, before and after removing configured secret values."""
+    from factory import artifacts
+    raw = "".join(ch for ch in " ".join(str(value).split()) if ch.isprintable())[:DETAIL_LIMIT]
+    return raw, artifacts.sanitize(raw, secrets)
+
+
+def hours_left(row: dict, now: datetime.datetime | None = None) -> float | None:
+    if "expires_at" not in row:
+        return None
+    now = now or datetime.datetime.now(datetime.UTC)
+    return (parse_timestamp(row["expires_at"]) - now).total_seconds() / 3600
+
+
+def _adapter_report(adapter, env: dict[str, str], live: bool, secrets: list[str],
+                    now: datetime.datetime | None = None) -> list[dict]:
     """Validated rows from one adapter. Raises on any malformed result."""
     from factory import artifacts
     found = adapter.credential_checks(env, live)
@@ -179,6 +211,17 @@ def _adapter_report(adapter, env: dict[str, str], live: bool, secrets: list[str]
         if detail:
             text = " ".join(artifacts.sanitize(str(detail), secrets).split())  # one line, no control characters
             row["detail"] = "".join(ch for ch in text if ch.isprintable())[:DETAIL_LIMIT]
+        for name in EXPIRY_FIELDS:
+            if item.get(name) is not None:
+                row[name] = _timestamp(item[name])
+        if item.get("action"):
+            raw, clean = _one_line(item["action"], secrets)
+            if raw == clean:  # an action that needed redacting carried a secret: drop it entirely
+                row["action"] = clean
+        # Factory, not the adapter, decides that a credential past its expiry is expired.
+        left = hours_left(row, now)
+        if left is not None and left <= 0:
+            row["status"] = "expired"
         rows.append(row)
     return rows
 
@@ -273,6 +316,18 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
     return rows
 
 
+def expiry_text(row: dict, now: datetime.datetime | None = None) -> str:
+    """` -- expires <ts> (in 5h) -- renew: <action>` for a row that carries an expiry."""
+    left = hours_left(row, now)
+    if left is None:
+        return ""
+    when = f"expired {-left:.0f}h ago" if left <= 0 else f"in {left:.0f}h"
+    text = f" -- expires {row['expires_at']} ({when})"
+    if row.get("renewable_until"):
+        text += f", renewable until {row['renewable_until']}"
+    return text + (f" -- renew: {row['action']}" if row.get("action") else "")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory verify-secrets",
@@ -325,7 +380,8 @@ def main(argv: list[str]) -> int:
             print(f"  {row['unit']}: {row['key']}: {row['status']}")
         for row in credentials:
             where = f"{row['scope']} ({row['adapter']})" if row.get("adapter") else row["scope"]
-            print(f"  {where}: {row['key']}: {row['status']}" + (f" -- {row['detail']}" if row.get("detail") else ""))
+            print(f"  {where}: {row['key']}: {row['status']}" + (f" -- {row['detail']}" if row.get("detail") else "")
+                  + expiry_text(row))
         for row in isolation:
             print(f"  apply isolation: {row['key']}: {row['status']}")
         if sync_error:

@@ -117,7 +117,8 @@ KNOWN_KEYS = {
     "journal": ("max_mb", "retention"),
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply"),
-    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics"),
+    "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics",
+              "credential_warn_hours"),
     "collaboration": ("fallback", "reasons", "components"),
     "prices": None,
 }
@@ -326,6 +327,7 @@ class Config:
     targets: dict[str, DeployTarget] = field(default_factory=dict)  # deployment targets, keyed by name
     apply_baseline: str | None = None  # commit SHA or PR number prior to which deployments are ignored
     apply_supersession: str = "sequential"  # one of SUPERSESSION_MODES
+    credential_warn_hours: float = 4.0  # doctor warns when an apply credential expires this soon
     raw_repo: dict = field(default_factory=dict)  # the committed file alone, before host layering
 
     @property
@@ -777,6 +779,10 @@ def load(start: Path | None = None) -> Config:
     cfg.apply_env = {k: str(v) for k, v in apply_t.get("env", {}).items()}
     cfg.apply_baseline = str(apply_t["baseline"]) if "baseline" in apply_t else None
     cfg.apply_supersession = supersession_mode(apply_t.get("supersession", cfg.apply_supersession), "[apply].supersession")
+    warn = apply_t.get("credential_warn_hours", cfg.credential_warn_hours)
+    if isinstance(warn, bool) or not isinstance(warn, (int, float)) or warn <= 0:
+        raise ConfigError("[apply].credential_warn_hours must be a positive number of hours")
+    cfg.credential_warn_hours = float(warn)
 
     raw_targets = apply_t.get("targets")
     default_adapter = str(apply_t.get("adapter", "terraform"))

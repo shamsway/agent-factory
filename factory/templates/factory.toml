@@ -179,6 +179,7 @@ exclusive = false
 [apply]
 # enabled = false
 # dir = "."             # terraform root, relative to the repo root
+# credential_warn_hours = 4   # doctor WARNs when an adapter credential expires this soon
 # [apply.env]            # env for `factory apply` only -- never the dispatcher's
 # AWS_PROFILE = "infra-apply"
 # [apply.verify]         # post-apply health check; a failure records the run FAILED

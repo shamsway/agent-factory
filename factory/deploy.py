@@ -989,7 +989,12 @@ class DeployAdapter:
         credential value, a credential prefix (a token's leading characters, a
         robot account's secret part) or raw provider output; the same holds for
         `key`, which names the variable only. Factory sanitizes both against the
-        configured values, but it cannot recognize a fragment. A check that raises
+        configured values, but it cannot recognize a fragment. Optional `expires_at`
+        and `renewable_until` (timezone-aware ISO 8601) say when the credential lapses
+        and how long it can still be renewed, and `action` names the operator step that
+        renews it (a command, never a value). Factory re-emits the timestamps in UTC,
+        reports a row past `expires_at` as `expired` whatever its status, and drops an
+        `action` that contained a configured secret. A check that raises
         (including SystemExit or KeyboardInterrupt), returns another status or a key
         that is not a variable name, or runs past
         `verify_secrets.ADAPTER_CHECK_TIMEOUT_SEC` is reported as one `unavailable`
