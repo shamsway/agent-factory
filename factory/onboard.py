@@ -610,6 +610,10 @@ def doctor(argv: list[str]) -> int:
 
     timer = sh(["systemctl", "--user", "is-active", f"{cfg.unit}.timer"]).stdout.strip()
     report(True if timer == "active" else None, f"systemd timer {cfg.unit}.timer", timer or "not installed (factory install)")
+    if cfg.apply_unit:
+        loaded = sh(["systemctl", "--user", "show", "--property=LoadState", "--value", cfg.apply_unit]).stdout.strip()
+        report(True if loaded == "loaded" else None, f"apply unit {cfg.apply_unit}",
+               "started after each pass" if loaded == "loaded" else "not installed (factory install); approved merges wait for a manual `factory apply`")
 
     port_ok, port_detail = _dashboard_port_check(cfg, cfg.install["host"], cfg.dashboard_port)
     report(port_ok, f"dashboard port {cfg.dashboard_port}", port_detail)
@@ -852,15 +856,22 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
     env = f"Environment=PATH={os.environ['PATH']}\n"
     env += "".join(systemd_environment(k, v) for k, v in cfg.install["env"].items())
     dispatch_env = env + "".join(systemd_environment(k, v) for k, v in cfg.install.get("dispatch_env", {}).items())
-    return {
+    apply_unit = cfg.apply_unit
+    # The apply lane runs in its own unit, never the dispatcher's process: each pass starts
+    # it on the way out (after the merge stage fetched main), and the next pass waits behind
+    # a running apply (`After=` orders against its pending oneshot start) rather than
+    # fetching and re-pinning the root under it. `--no-block`: the pass never waits on it.
+    order = f"After={apply_unit}\n" if apply_unit else ""
+    trigger = f"ExecStopPost=-systemctl --user start --no-block {apply_unit}\n" if apply_unit else ""
+    wanted = {
         f"{cfg.unit}.service": (
-            f"[Unit]\nDescription=factory triage + dispatcher for {cfg.repo} (one pass)\n\n"
+            f"[Unit]\nDescription=factory triage + dispatcher for {cfg.repo} (one pass)\n{order}\n"
             # `-` prefix: an offline triage model must not stop the dispatch pass.
             f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{dispatch_env}"
             f"ExecStart=-{exe} triage\nExecStart={exe} dispatch\n"
             # Post-pass monitor, after success or failure: systemd hands it $SERVICE_RESULT,
             # so a crashed pass files itself. `-`: the monitor never fails the unit.
-            f"ExecStopPost=-{exe} watch\n"
+            f"ExecStopPost=-{exe} watch\n{trigger}"
         ),
         f"{cfg.unit}.timer": (
             f"[Unit]\nDescription=Run the factory pass for {cfg.repo} every {every}\n\n"
@@ -874,6 +885,16 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
             f"Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
         ),
     }
+    if apply_unit:
+        # The dispatcher's GitHub identity (dispatch_env) reads reviews and posts deploy
+        # comments; `[apply].env` never enters a unit: `factory apply` hands it to the
+        # adapter's own subprocesses only.
+        wanted[apply_unit] = (
+            f"[Unit]\nDescription=factory apply for {cfg.repo} (one pass, started by {cfg.unit}.service)\n\n"
+            f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{dispatch_env}"
+            f"ExecStart={exe} apply\n"
+        )
+    return wanted
 
 
 def systemctl(*args: str) -> None:
@@ -957,6 +978,15 @@ def install(argv: list[str]) -> int:
             systemctl("disable", "--now", dash_unit)
             (udir / dash_unit).unlink()
             print(f"removed {udir / dash_unit}")
+    stale_apply = udir / f"{cfg.unit}-apply.service"
+    if cfg.apply_unit is None and stale_apply.exists():
+        # Never enabled (each pass starts it), so removal touches no links; only a running
+        # apply blocks it, under --no-start or not: install never stops a deployment.
+        active = sh(["systemctl", "--user", "is-active", stale_apply.name]).stdout.strip()
+        if active not in ("inactive", "failed", ""):
+            raise ConfigError(f"{stale_apply.name} is {active}; let the apply finish, then rerun `factory install`")
+        stale_apply.unlink()
+        print(f"removed {stale_apply}")
     systemctl("daemon-reload")
     if args.no_start:
         print(f"factory install --no-start: units written to {udir}; systemd reloaded; nothing enabled or started")

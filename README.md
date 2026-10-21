@@ -81,7 +81,16 @@ Relocation payloads omit values unless explicitly requested with
 values under their destination host tables. Treat that output as sensitive.
 Doctor never applies these repairs; text output is unchanged.
 
-Generated triage, dispatch and dashboard services use the interpreter selected by
+When the repository's `[apply].enabled` is true, `factory install` also writes
+`<unit>-apply.service`, a oneshot `factory apply` pass that each triage+dispatch pass
+starts as it ends (success or failure), so an approved merge deploys in the cycle that
+merged it, with no operator step. The pass unit is ordered after it, so a timer firing
+during a long apply waits for it to finish. The apply unit is never enabled and has no
+timer: stopping the pass timer also stops applies. Host-owned `[install].apply = false`
+renders neither the unit nor the trigger, leaving `factory apply` to the operator; see
+[deployment lifecycle](docs/deployment-lifecycle.md#scheduling).
+
+Generated triage, dispatch, apply and dashboard services use the interpreter selected by
 host-owned, optional `[install].python`, or `sys.executable` (the interpreter running
 `factory install`) when unset, followed by `-P -m factory`. Set
 `python = "/path/to/venv/bin/python"` under `[defaults.install]` or
@@ -111,8 +120,8 @@ To act on GitHub under a separate machine account, set host-owned
 `[install].dispatch_env` (same shape as `[install].env`), for example
 `GH_CONFIG_DIR` pointing at a gh config logged in as that account, plus
 `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`.
-Its lines are rendered only into the triage+dispatcher unit, after `[install].env`;
-the dashboard unit keeps the human identity. The token stays in gh's store and is
+Its lines are rendered only into the triage+dispatcher unit and the apply unit,
+after `[install].env`; the dashboard unit keeps the human identity. The token stays in gh's store and is
 never written into a unit. `doctor` then reports both logins (`gh api user`) and
 fails when they are equal; unset, nothing changes. Worker and reviewer agents never
 get a GitHub credential: the dispatcher drops `GH_TOKEN`/`GITHUB_TOKEN` and points

@@ -86,6 +86,36 @@ adapter = "terraform"
 
 ---
 
+## Scheduling
+
+`factory install` schedules apply only when `[apply].enabled` is true:
+
+| Unit | Runs | Started by |
+|---|---|---|
+| `<unit>.service` | `triage`, `dispatch`, then `watch` and the apply trigger (`ExecStopPost=`) | `<unit>.timer` |
+| `<unit>-apply.service` | `factory apply` (one pass) | the pass unit, `systemctl --user start --no-block`, after every pass |
+
+- **Latency.** Dispatch merges and fetches `main` in the pass, and the trigger starts
+  apply as that pass ends, so a human-approved merge deploys in the same cycle. A
+  failed pass still triggers apply; apply decides for itself whether anything is due.
+- **No overlap.** The pass unit has `After=<unit>-apply.service`. A pass whose timer
+  fires while an apply runs waits until the apply finishes, so dispatch never
+  fetches or re-pins the root during a deploy. Apply's own `apply.lock`, target and
+  backend locks still serialize manual runs.
+- **Gates unchanged.** Scheduling adds no authority: apply deploys only candidates
+  with a revision-bound human approval, halts on unauthorized merges, interrupted
+  runs and unacknowledged failures, exactly as when run by hand.
+- **Credentials.** The apply unit carries `PATH`, `[install].env` and
+  `[install].dispatch_env` (the dispatcher's GitHub identity for review reads and
+  deploy comments). `[apply].env` is never written into any unit: `factory apply`
+  passes it only to the adapter's subprocesses. `factory inspect` and
+  `factory verify-secrets` list the apply unit, require it while apply is
+  scheduled, and report any `[apply].env` key found in its environment as leaked.
+- **Pausing and opting out.** `systemctl --user stop <unit>.timer` stops new passes
+  and so new applies; a running apply finishes. Host-owned `[install].apply = false`
+  removes the trigger and the unit on the next `factory install` (refused while an
+  apply is running), leaving applies to the operator.
+
 ## DeployRun Contract & Persistence
 
 All deployments are recorded durably to `.factory/events.jsonl` using a versioned contract (`CONTRACT_VERSION = 1`):
@@ -511,7 +541,9 @@ Backups and logs outside the private store have separate lifecycles.
 
 ## Operator recovery quick runbook
 
-1. Pause scheduling with `systemctl --user stop <unit>.timer`. Run `factory
+1. Pause scheduling with `systemctl --user stop <unit>.timer`; this also stops
+   scheduled applies, and `systemctl --user is-active <unit>-apply.service` shows
+   whether one is still finishing. Run `factory
    inspect --json --live` using the service's absolute interpreter from the
    consumer checkout. Confirm process identity, target/apply/backend locks and
    Terraform activity before reconciliation. A free Factory lock alone does not
