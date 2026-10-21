@@ -105,7 +105,8 @@ flowchart TB
   CI -->|"rerun still found no runner, approval kept: dispatch.runner_unavailable"| ESC
   CI -->|"pass, behind main, approval removed: dispatch.refresh_pr_branch"| REF
   REF -->|"dispatch.approve_pr"| FA
-  REF -->|"conflict, gate FAIL, REVISE, or head moved: dispatch.refresh_pr_branch"| ESC
+  REF -->|"conflict, open ticket, rounds left, no unauthorized protected path: claim released, ready-for-human removed, ready-for-agent added, worker rebases on agent/N: dispatch.refresh_pr_branch"| RFA
+  REF -->|"conflict on a protected path without override, after review_rounds conflict rounds, or ticket not open; gate FAIL, REVISE, or head moved: dispatch.refresh_pr_branch"| ESC
   REF -->|"pushed, PR API still on the pre-push head: dispatch.review_refreshed waits, dispatch.resume_head_syncs retries the restamp and review"| REF
   REF -->|"head changed while waiting, or PR head still stale past PR_HEAD_SYNC_LIMIT: dispatch.resume_head_syncs"| ESC
   CI -->|"pass, missing SHA-bound approval evidence: dispatch.merge_pass_locked"| ESC
@@ -125,7 +126,7 @@ flowchart TB
   MGR -->|"AUTHORIZE adds add-only authority before requeue: manage.apply"| RFA
   MGR -->|"SPLIT, children opened, parent stays: manage.apply"| NT
   MGR -->|"FIX: worker round, gate, review: manage.apply"| FA
-  MGR -->|"FIX fails gate, pr-tier gate, or review: manage.apply"| ESC
+  MGR -->|"FIX fails gate, pr-tier gate, or review; kept head not the PR head plus the worker's own commits, or their lease push refused: manage.apply"| ESC
   MGR -->|"CLOSE PR on an original ticket: manage.apply"| WONT
   MGR -->|"CLOSE PR on a SPLIT child, issue closed not planned: manage.apply"| HUMAN
   MGR -->|"RESOLVE: evidence comment, issue closed completed: manage.apply"| HUMAN
@@ -172,7 +173,7 @@ One row per function that edits labels (`--add-label`, `--remove-label`, or
 | `dispatch.finish_investigation` | `ready-for-investigation` | `ready-for-human` | Investigation findings posted; routed to a human |
 | `dispatch.merge_pass_locked` | `factory-approved` | — | CI fail, or cancel after steps ran; missing approval evidence |
 | `dispatch.push_and_pr` | — | `*` | Caller's PR label; ticket PRs pass none |
-| `dispatch.refresh_pr_branch` | `factory-approved` | — | Behind main: approval withdrawn before refresh |
+| `dispatch.refresh_pr_branch` | `factory-approved`, `ready-for-human` | `ready-for-agent` | Behind main: approval withdrawn before refresh; eligible conflict requeues restore agent flow |
 | `dispatch.review_intake_pass` | — | `ready-for-human` | New issue for an unresolved opted-in PR review |
 | `dispatch.sync_issue` | — | `ready-for-agent` | New sync ticket for new upstream commits; its `agent/N` candidate carries the merge and gate evidence |
 | `manage.apply` | `ready-for-human`, `*` | `factory-add-only-override`, `needs-triage`, `wontfix-proposal`, `*` | AUTHORIZE grants add-only authority and requeues; RETRY/REWRITE/ROUTE back to the lane the escalation recorded (`ready-for-agent`, or `ready-for-investigation`); SPLIT children; CLOSE; RESOLVE closes completed; ROUTE labels |
@@ -209,7 +210,9 @@ Every reason string passed to `dispatch.escalate`, the
 | `dispatch.refresh_pr_branch` | ``PR #{}: could not remove stale `{}` approval`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``PR #{}: {}; `{}` label removed`` | refresh → escalate (wraps the reasons below) |
 | `dispatch.refresh_pr_branch` | ``kept worktree head {} differs from remote head {}`` | refresh → escalate |
-| `dispatch.refresh_pr_branch` | ``{} onto moved main conflicts; worktree {}`` | refresh → escalate |
+| `dispatch.refresh_pr_branch` | ``{} onto moved main conflicts (protected paths without `{}`); worktree {}`` | refresh → escalate immediately, conflict file list in the packet |
+| `dispatch.refresh_pr_branch` | ``{} onto moved main conflicts (after {} conflict-resolution round(s)); worktree {}`` | refresh → escalate once `review_rounds` conflict requeues are used up, conflict file list in the packet |
+| `dispatch.refresh_pr_branch` | ``{} onto moved main conflicts (ticket is not open); worktree {}`` | refresh → escalate (ticket is no longer open) |
 | `dispatch.refresh_pr_branch` | ``nothing ahead of {} after {}; refusing to push`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``gate failed after {} onto moved main`` | refresh → escalate |
 | `dispatch.refresh_pr_branch` | ``remote head changed while refreshed evidence was being produced`` | refresh → escalate |
@@ -233,4 +236,6 @@ Every reason string passed to `dispatch.escalate`, the
 | `manage.apply` | ``review requested changes after manager FIX`` | manager FIX → escalate |
 | `manage.apply` | ``pr checks failed`` | manager FIX → escalate |
 | `manage.apply` | ``approval evidence, head, or human review state changed before manager FIX approval`` | manager FIX → escalate |
+| `manage.apply` | ``FIX worktree head {} is not the PR head {} plus the worker's own commits; worktree kept at {}`` | manager FIX → escalate (`refresh_head`) |
+| `manage.apply` | ``FIX could not push the worker's own commits: origin/agent/{} moved since {}; worktree kept at {}`` | manager FIX → escalate (`lease_refused`) |
 | `manage.escalation_pass` | ``manager_failed`` | manager decision → human |

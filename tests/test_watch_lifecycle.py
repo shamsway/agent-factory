@@ -63,6 +63,11 @@ class WatchLifecycleTest(unittest.TestCase):
                                            "issue": issue, "at": at, **fields})
         return at
 
+    @staticmethod
+    def signal(fingerprint: str, latest: str | None) -> dict:
+        return {"fingerprint": fingerprint, "latest": latest, "kind": "lifecycle", "stage": "manage",
+                "key": "KeyError: 'state'", "rows": [], "log": None, "excerpt": None, "command": "factory dispatch"}
+
     def run_watch(self, states: dict[int, str], *, signals=(), dry_run=False):
         calls = []
 
@@ -75,8 +80,10 @@ class WatchLifecycleTest(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     command, 0, json.dumps({"state": "OPEN" if state in ("CLAIMED", "HUMAN") else state,
                                             "assignees": assignees, "labels": [{"name": label}]}), "")
-            if command[:3] == ["gh", "issue", "close"]:
+            if command[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"], ["gh", "issue", "edit"]):
                 return subprocess.CompletedProcess(command, 0, "", "")
+            if command[:3] == ["gh", "issue", "list"]:  # no open engine filing shares the fingerprint
+                return subprocess.CompletedProcess(command, 0, "[]", "")
             raise AssertionError(command)
 
         with mock.patch.object(dispatch, "run", side_effect=run), \
@@ -99,14 +106,13 @@ class WatchLifecycleTest(unittest.TestCase):
     def test_recurring_and_young_filings_stay_open(self):
         self.journal("recurs", 11, timedelta(days=2))
         self.journal("young", 12, timedelta(hours=23))
-        signal = {"fingerprint": "recurs", "latest": None}
-        calls = self.run_watch({11: "OPEN", 12: "OPEN"}, signals=[signal])
+        calls = self.run_watch({11: "OPEN", 12: "OPEN"}, signals=[self.signal("recurs", None)])
         self.assertFalse(any(call[:3] == ["gh", "issue", "close"] for call in calls))
 
     def test_signal_with_only_old_evidence_still_closes(self):
         self.journal("stale", 14, timedelta(days=3))
         old = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
-        calls = self.run_watch({14: "OPEN"}, signals=[{"fingerprint": "stale", "latest": old}])
+        calls = self.run_watch({14: "OPEN"}, signals=[self.signal("stale", old)])
         self.assertTrue(any(call[:4] == ["gh", "issue", "close", "14"] for call in calls))
 
     def test_claimed_issue_is_not_closed(self):

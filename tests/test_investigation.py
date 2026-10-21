@@ -29,7 +29,7 @@ class InvestigationLaneTest(unittest.TestCase):
                 dispatch.frontier(config.LABEL_INVESTIGATE)
             gh_mock.assert_called_once_with(
                 ["issue", "list", "--repo", dispatch.REPO, "--state", "open",
-                 "--label", config.LABEL_INVESTIGATE, "--json", "number,title,body,labels,assignees"]
+                 "--label", config.LABEL_INVESTIGATE, "--json", "number,title,body,labels,assignees,createdAt"]
             )
 
     def test_escalation_drops_the_investigation_lane_label(self) -> None:
@@ -70,7 +70,8 @@ class InvestigationLaneTest(unittest.TestCase):
             with mock.patch.object(dispatch, "gh_json", return_value=[stale]), \
                  mock.patch.object(dispatch, "open_blockers", return_value=[]), \
                  mock.patch.object(dispatch, "log"):
-                self.assertEqual([], dispatch.frontier(config.LABEL_INVESTIGATE))
+                [row] = dispatch.frontier(config.LABEL_INVESTIGATE)
+            self.assertIn(f"still {config.LABEL_HUMAN}", row["held"])
 
     def test_dry_run_reports_investigation_short_path_without_admission(self) -> None:
         from unittest import mock
@@ -209,9 +210,13 @@ class InvestigationLaneTest(unittest.TestCase):
             repo = make_repo(Path(d))
             cfg = config.load(repo)
             cfg.max_active = 5  # isolate dedup from capacity truncation
-            both = {"number": 9, "title": "both labels", "labels": [], "assignees": []}
-            agent_only = {"number": 10, "title": "agent only", "labels": [], "assignees": []}
-            investigate_only = {"number": 11, "title": "investigate only", "labels": [], "assignees": []}
+            # Unknown priority (no Plan baseline): scheduling admits oldest first.
+            both = {"number": 9, "title": "both labels", "body": "", "labels": [], "assignees": [],
+                    "createdAt": "2026-01-01T00:00:00Z"}
+            agent_only = {"number": 10, "title": "agent only", "body": "", "labels": [], "assignees": [],
+                          "createdAt": "2026-01-02T00:00:00Z"}
+            investigate_only = {"number": 11, "title": "investigate only", "body": "", "labels": [], "assignees": [],
+                                "createdAt": "2026-01-03T00:00:00Z"}
 
             def fake_frontier(label=config.LABEL_AGENT):
                 if label == config.LABEL_AGENT:
@@ -224,7 +229,7 @@ class InvestigationLaneTest(unittest.TestCase):
                  mock.patch.object(dispatch, "land_pass"), \
                  mock.patch.object(dispatch, "review_intake_pass"), \
                  mock.patch("factory.manage.manage_pass"), \
-                 mock.patch.object(dispatch, "active_ticket_count", return_value=0), \
+                 mock.patch.object(dispatch, "active_tickets", return_value=[]), \
                  mock.patch.object(dispatch, "frontier", side_effect=fake_frontier), \
                  mock.patch.object(dispatch, "process_ticket", side_effect=lambda issue, *a, **kw: processed.append(issue["number"])):
                 config_mock.load.return_value = cfg
