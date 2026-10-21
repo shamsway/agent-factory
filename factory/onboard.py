@@ -436,6 +436,24 @@ def _investigation_outbox_checks(cfg, report):
                    f"{count}; inspect/reconcile retained receipts; never delete or blindly repost")
 
 
+def _credential_expiry_checks(cfg: config.Config, report) -> None:
+    """One row per adapter credential that reports an expiry: FAIL once expired, WARN
+    inside `[apply].credential_warn_hours`. Offline: adapters run with live=False."""
+    from . import verify_secrets
+    for row in verify_secrets.adapter_rows(cfg, live=False):
+        left = verify_secrets.hours_left(row)
+        if left is None:
+            continue
+        label = f"credential expiry: {row['adapter']} {row['key']}"
+        detail = verify_secrets.expiry_text(row).removeprefix(" -- ")
+        if left <= 0:
+            report(False, label, detail)
+        elif left <= cfg.credential_warn_hours:
+            report(None, label, detail)
+        else:
+            report(True, label, detail)
+
+
 def doctor(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory doctor", description="Check tools, auth, remotes, config drift, and the triage model."
@@ -645,6 +663,7 @@ def doctor(argv: list[str]) -> int:
             f"already set here, would leak into anything installed from this shell: {', '.join(leaked)}"
             if leaked else "clean",
         )
+        _credential_expiry_checks(cfg, report)
 
     _incident_routing_checks(cfg, report)
     _investigation_outbox_checks(cfg, report)

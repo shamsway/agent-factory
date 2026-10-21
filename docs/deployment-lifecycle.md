@@ -177,6 +177,9 @@ All platform mutations implement the `DeployAdapter` lifecycle:
    - `key` must be a variable name and `status` one of `configured`, `missing`, `valid`, `invalid`, `unavailable` or `not_checked`.
    - `key` names the variable and `detail` describes scope only. Neither may contain a credential value or a credential prefix (a token's leading characters, part of a robot secret). Factory sanitizes both against every configured secret, but it only recognizes whole values, so a fragment would get through.
    - Details are also folded to one printable line and capped at 200 characters.
+   - Optional `expires_at` and `renewable_until` (timezone-aware ISO 8601, re-emitted as UTC `YYYY-MM-DDTHH:MM:SSZ`) and `action` (the operator step that renews the credential, such as a login command; never a value) make a credential handoff an operator duty with a due time. A malformed timestamp makes the adapter's report `unavailable`.
+   - Factory sets `expired` on a row whose `expires_at` has passed, whatever status the adapter reported. `expired` fails `verify-secrets` and `inspect` like `missing`. An `action` that contained a configured secret value is dropped.
+   - `factory doctor` lists every row that carries an expiry: PASS with the time left, WARN within `[apply].credential_warn_hours` (default 4), FAIL once expired, each with the renewal step. Doctor runs the checks offline (`live = false`).
    - Each adapter's check runs with a 30-second limit. A check that raises (including `SystemExit` or `KeyboardInterrupt`), times out, ends without a result or returns anything malformed (an unknown status, a key that is not a variable name, a row that is not a mapping) becomes one `unavailable` row for that adapter. Its message is dropped, and so are any rows it had already returned.
 
 ### Post-run observations
