@@ -2237,7 +2237,9 @@ def land_pass(dry_run: bool) -> None:
 
     A merge requires independently produced gate and reviewer evidence bound
     to the same head, a matching durable approval plus `factory-approved`,
-    green GitHub CI for that unchanged head, a head containing the current
+    on apply-enabled repos a trusted human approval of that exact head (the
+    check apply makes on the merged revision), green GitHub CI for that
+    unchanged head, a head containing the current
     main tip, and no human requested-changes veto. One merge per pass is the
     merge queue: landing one PR makes the others stale, and the refresh path
     re-earns gate and fresh review evidence before they land.
@@ -2271,6 +2273,45 @@ def land_pass(dry_run: bool) -> None:
             execution.resource("released", lock_path, scope="repository")
 
 
+REVIEW_EVIDENCE_QUERY = """query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewDecision
+      headRefOid
+      latestReviews(first: 20) { nodes { state authorAssociation author { login } commit { oid } } }
+    }
+  }
+}"""
+
+
+def pr_review_evidence(pr_number: int, repo: str = "") -> dict | None:
+    """reviewDecision, headRefOid and latestReviews with each review's commit.
+
+    GraphQL, not `gh pr view --json latestReviews`: gh leaves every review's
+    commit.oid empty there, which no head-bound check can use.
+    """
+    owner, _, name = (repo or REPO).partition("/")
+    data = gh_json(["api", "graphql", "-f", f"query={REVIEW_EVIDENCE_QUERY}", "-f", f"owner={owner}",
+                    "-f", f"name={name}", "-F", f"number={pr_number}"])
+    pr = ((data or {}).get("data") or {}).get("repository") or {}
+    pr = pr.get("pullRequest") if isinstance(pr, dict) else None
+    return pr if isinstance(pr, dict) else None
+
+
+def human_head_approval(pr_number: int, head: str) -> tuple[bool, str]:
+    """A trusted human approval of `head`, the PR's current head: the same check
+    `factory apply` makes on the merged revision, so the merge gate never lands a
+    head that apply would then reject."""
+    from factory import deploy
+
+    evidence = pr_review_evidence(pr_number)
+    if not evidence:
+        return False, "review evidence unavailable"
+    if evidence.get("headRefOid") != head:
+        return False, f"head moved to {str(evidence.get('headRefOid'))[:7]}"
+    return deploy.verify_revision_authorization(evidence)
+
+
 def merge_pass_locked(dry_run: bool) -> None:
     prs = gh_json(
         [
@@ -2302,9 +2343,14 @@ def merge_pass_locked(dry_run: bool) -> None:
         # `factory apply`, so it must mean a real GitHub review approval, not
         # just the LLM reviewer's factory-approved label -- unlike a software
         # repo, where that label plus green CI is the whole evidence chain.
-        if cfg.apply_enabled and pr["reviewDecision"] != "APPROVED":
-            log(f"PR #{pr['number']}: apply-eligible repo needs a human-approved review; waiting")
-            continue
+        # The approval must be on this exact head, by the rule apply enforces
+        # on the merged revision: GitHub keeps reviewDecision APPROVED after a
+        # push, so a stale approval would merge a head apply then rejects.
+        if cfg.apply_enabled:
+            authorized, why = human_head_approval(pr["number"], pr.get("headRefOid") or "")
+            if not authorized:
+                log(f"PR #{pr['number']}: apply-eligible repo needs a human-approved review; waiting ({why})")
+                continue
         candidates.append((pr["number"], int(m.group(1)), pr.get("headRefOid")))
     for pr_num, n, listed_head in sorted(candidates):
         with nullcontext() if dry_run else lifecycle.scope(
@@ -2370,6 +2416,7 @@ def merge_pass_locked(dry_run: bool) -> None:
                 or fresh.get("isDraft")
                 or FACTORY_APPROVED not in labels
                 or fresh.get("reviewDecision") == "CHANGES_REQUESTED"
+                or (cfg.apply_enabled and not human_head_approval(pr_num, head or "")[0])
             ):
                 log(f"PR #{pr_num}: state changed during eligibility check; not merging")
                 continue
@@ -2481,6 +2528,7 @@ def merge_pass_locked(dry_run: bool) -> None:
                 or final.get("isDraft")
                 or FACTORY_APPROVED not in final_labels
                 or final.get("reviewDecision") == "CHANGES_REQUESTED"
+                or (cfg.apply_enabled and not human_head_approval(pr_num, head)[0])
             ):
                 log(f"PR #{pr_num}: head, label, or human review changed before merge; not merging")
                 continue
