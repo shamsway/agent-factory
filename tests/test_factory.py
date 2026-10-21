@@ -389,7 +389,8 @@ class HostConfigTest(unittest.TestCase):
             # (a per-repo/committed key would be a real secret leaking into git).
             self.assertEqual((cfg.llm_url, cfg.llm_model, cfg.llm_key, cfg.dashboard_port), ("http://h/v1/chat/completions", "f", "sk-default", 9001))
             self.assertEqual(cfg.lock, Path("/tmp/host.lock"))
-            self.assertEqual(cfg.install, {"every": "5min", "dashboard": True, "host": "127.0.0.1", "python": "/committed/python", "env": {"A": "1"}})
+            self.assertEqual(cfg.install, {"every": "5min", "dashboard": True, "host": "127.0.0.1", "python": "/committed/python",
+                                       "env": {"A": "1"}, "apply": True})
             # repo-owned keys never come from the host
             self.assertEqual(cfg.checks, [])
             self.assertEqual(cfg.leak_pattern, config.DEFAULT_LEAK_PATTERN)
