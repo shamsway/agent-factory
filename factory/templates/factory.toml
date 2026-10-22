@@ -185,6 +185,8 @@ exclusive = false
 # [apply.verify]         # post-apply health check; a failure records the run FAILED
 # nomad = true           # observe the nomad_job resources the plan changed
 # nomad_addr = "nomad.service.consul:4646"   # else NOMAD_ADDR from the apply env
+# consul = true          # changed jobs' Consul services pass on the new version's allocations
+# consul_addr = "consul.service.consul:8500" # else CONSUL_HTTP_ADDR; CONSUL_HTTP_TOKEN is sent if set
 # timeout = 300          # seconds for the whole observation window
 # periodic = "registered"   # or "launch": force one run and require it to complete
 # [[apply.verify.check]] # argv run in the apply dir; retried until it exits 0

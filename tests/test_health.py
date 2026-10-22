@@ -28,6 +28,7 @@ class FakeNomad:
     def __init__(self) -> None:
         self.routes: dict[tuple[str, str], list[tuple[int, object]]] = {}
         self.requests: list[tuple[str, str, dict, str]] = []
+        self.consul_tokens: list[str] = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -36,6 +37,7 @@ class FakeNomad:
                 query = dict(urllib.parse.parse_qsl(url.query))
                 path = urllib.parse.unquote(url.path)
                 fake.requests.append((self.command, path, query, self.headers.get("X-Nomad-Token", "")))
+                fake.consul_tokens.append(self.headers.get("X-Consul-Token", ""))
                 seq = fake.routes.get((self.command, path))
                 status, body = (seq.pop(0) if len(seq) > 1 else seq[0]) if seq else (404, "job not found")
                 data = (body if isinstance(body, str) else json.dumps(body)).encode()
@@ -224,6 +226,244 @@ class NomadPolicyTest(unittest.TestCase):
         self.assertEqual(ev["verdict"], "nothing_to_observe")
 
 
+CONSUL_TOKEN = "consul-acl-token-fedcba9876543210"
+JOBSPEC = 'job "web" {\n  group "web" {\n    count = 2\n    # image = "acme/web:0.1"\n    task "server" {\n      config { image = "acme/web:2.0" }\n    }\n  }\n}\n'
+WEB = {"ID": "web", "Type": "service", "Version": 8, "Status": "running",
+       "TaskGroups": [{"Name": "web", "Count": 2, "Tasks": [
+           {"Name": "server", "Config": {"image": "acme/web:2.0"}, "Services": [{"Name": "web", "Provider": "consul"}]}]}]}
+OLD1, OLD2 = "0000aaaa-0000-0000-0000-000000000001", "0000aaaa-0000-0000-0000-000000000002"
+NEW1, NEW2 = "bbbb0000-0000-0000-0000-000000000001", "bbbb0000-0000-0000-0000-000000000002"
+
+
+def alloc(aid: str, version: int = 8, client: str = "running", desired: str = "run", group: str = "web") -> dict:
+    return {"ID": aid, "TaskGroup": group, "JobVersion": version, "DesiredStatus": desired, "ClientStatus": client}
+
+
+def entry(aid: str, status: str = "passing", service: str = "web") -> dict:
+    """A Consul /v1/health/service row for a Nomad-registered task service."""
+    return {"Node": {"Node": "client-1"},
+            "Service": {"ID": f"_nomad-task-{aid}-server-{service}-http", "Service": service, "Tags": []},
+            "Checks": [{"CheckID": "serfHealth", "Status": "passing"},
+                       {"CheckID": f"_nomad-check-{aid[:8]}", "Status": status}]}
+
+
+def web_plan(**values) -> dict:
+    return plan_with(job("web", jobspec=JOBSPEC, **values))
+
+
+class ConsulServicePolicyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.nomad = FakeNomad()
+        self.consul = FakeNomad()
+        self.addCleanup(self.nomad.close)
+        self.addCleanup(self.consul.close)
+        self.env = {"NOMAD_ADDR": self.nomad.addr, "NOMAD_TOKEN": TOKEN,
+                    "CONSUL_HTTP_ADDR": self.consul.addr, "CONSUL_HTTP_TOKEN": CONSUL_TOKEN}
+
+    def verify(self, plan: dict, env: dict | None = None, **kw):
+        kw = {"nomad": False, "consul": True, **kw}
+        return health.verify(policy(**kw), plan=plan, cwd=Path("."), env=self.env if env is None else env)
+
+    def serve(self, *allocs: list[dict], live: dict = WEB) -> None:
+        self.nomad.on("GET", "/v1/job/web", live)
+        self.nomad.on("GET", "/v1/job/web/allocations", *allocs)
+
+    def test_passing_instances_of_the_new_version_are_healthy(self) -> None:
+        self.serve([alloc(NEW1), alloc(NEW2)])
+        self.consul.on("GET", "/v1/health/service/web", [entry(NEW1), entry(NEW2)])
+        ok, reason, ev = self.verify(web_plan())
+        self.assertTrue(ok, reason)
+        self.assertEqual(ev["verdict"], "healthy")
+        item = ev["items"][0]
+        self.assertEqual((item["kind"], item["id"], item["policy"], item["state"]),
+                         ("consul_service", "web", "consul", "healthy"))
+        self.assertEqual(item["observed"]["services"]["web"],
+                         {"expected": 2, "passing": 2, "failing": 0, "stale": 0, "other": 0})
+        self.assertEqual((item["observed"]["job_version"], item["observed"]["image_check"]), (8, "matched"))
+        self.assertIn(CONSUL_TOKEN, self.consul.consul_tokens)
+        self.assertNotIn(CONSUL_TOKEN, self.nomad.consul_tokens)  # never sent to Nomad
+        self.assertNotIn(CONSUL_TOKEN, json.dumps(ev) + reason)
+        self.assertNotIn("acme/web:0.1", json.dumps(ev))  # commented image ignored, jobspec never recorded
+
+    def test_critical_new_instance_is_not_healthy(self) -> None:
+        self.serve([alloc(NEW1), alloc(NEW2)])
+        self.consul.on("GET", "/v1/health/service/web", [entry(NEW1), entry(NEW2, "critical")])
+        ok, reason, ev = self.verify(web_plan(), timeout=2)
+        self.assertFalse(ok)
+        self.assertEqual(ev["items"][0]["state"], "timeout")
+        self.assertIn("`web` Consul services timeout", reason)
+        self.assertIn("web: 1/2 passing on version 8 (1 not passing)", reason)
+
+    def test_missing_registration_is_not_healthy(self) -> None:
+        self.serve([alloc(NEW1), alloc(NEW2)])
+        self.consul.on("GET", "/v1/health/service/web", [])
+        ok, reason, _ = self.verify(web_plan(), timeout=2)
+        self.assertFalse(ok)
+        self.assertIn("0/2 passing on version 8 (no registration from the new allocations)", reason)
+
+    def test_stale_passing_registrations_do_not_hide_a_failed_new_allocation(self) -> None:
+        self.serve([alloc(OLD1, 7), alloc(OLD2, 7), alloc(NEW1, client="failed")])
+        # Consul still lists the old allocations as passing: a plain count would say 2/2.
+        self.consul.on("GET", "/v1/health/service/web", [entry(OLD1), entry(OLD2)])
+        ok, reason, ev = self.verify(web_plan(), timeout=2)
+        self.assertFalse(ok)
+        self.assertNotEqual(ev["verdict"], "healthy")
+        self.assertIn("0/2 passing on version 8", reason)
+        self.assertIn("2 from older allocations ignored", reason)
+        self.assertEqual(ev["items"][0]["observed"]["services"]["web"]["stale"], 2)
+
+    def test_registrations_from_unknown_allocations_never_count(self) -> None:
+        self.serve([alloc(NEW1), alloc(NEW2)])
+        foreign = {"Service": {"ID": "web-manual-1", "Service": "web"}, "Checks": []}
+        self.consul.on("GET", "/v1/health/service/web", [entry(NEW1), foreign])
+        ok, _, ev = self.verify(web_plan(), timeout=2)
+        self.assertFalse(ok)
+        self.assertEqual(ev["items"][0]["observed"]["services"]["web"]["other"], 1)
+
+    def test_rolling_update_waits_for_the_new_allocations(self) -> None:
+        self.serve([alloc(OLD1, 7), alloc(OLD2, 7), alloc(NEW1)],
+                   [alloc(OLD1, 7, desired="stop", client="complete"), alloc(OLD2, 7), alloc(NEW1), alloc(NEW2)],
+                   [alloc(OLD1, 7, desired="stop", client="complete"),
+                    alloc(OLD2, 7, desired="stop", client="complete"), alloc(NEW1), alloc(NEW2)])
+        self.consul.on("GET", "/v1/health/service/web",
+                       [entry(OLD1), entry(OLD2), entry(NEW1)],
+                       [entry(OLD2), entry(NEW1), entry(NEW2, "critical")],
+                       [entry(NEW1), entry(NEW2)])
+        ok, reason, ev = self.verify(web_plan(), timeout=10)
+        self.assertTrue(ok, reason)
+        item = ev["items"][0]
+        self.assertEqual(item["polls"], 3)
+        self.assertEqual(item["observed"]["services"]["web"]["passing"], 2)
+
+    def test_wrong_image_on_the_live_job_fails_at_once(self) -> None:
+        live = json.loads(json.dumps(WEB))
+        live["TaskGroups"][0]["Tasks"][0]["Config"]["image"] = "acme/web:1.9"
+        self.serve([alloc(NEW1), alloc(NEW2)], live=live)
+        self.consul.on("GET", "/v1/health/service/web", [entry(NEW1), entry(NEW2)])
+        ok, reason, ev = self.verify(web_plan(), timeout=60)
+        self.assertFalse(ok)
+        self.assertEqual(ev["items"][0]["state"], "unhealthy")
+        self.assertIn("does not run the applied image(s) acme/web:2.0", reason)
+        self.assertLess(ev["elapsed_sec"], 5)
+
+    def test_job_version_change_during_the_window_fails(self) -> None:
+        self.nomad.on("GET", "/v1/job/web", WEB, {**WEB, "Version": 9})
+        self.nomad.on("GET", "/v1/job/web/allocations", [alloc(NEW1)])
+        self.consul.on("GET", "/v1/health/service/web", [entry(NEW1)])
+        ok, reason, _ = self.verify(web_plan(), timeout=10)
+        self.assertFalse(ok)
+        self.assertIn("job version changed from 8 to 9", reason)
+
+    def test_failed_deployment_of_the_version_fails_at_once(self) -> None:
+        self.serve([alloc(OLD1, 7), alloc(OLD2, 7)])
+        self.nomad.on("GET", "/v1/job/web/deployment", {"ID": "d1", "JobVersion": 8, "Status": "failed"})
+        self.consul.on("GET", "/v1/health/service/web", [entry(OLD1), entry(OLD2)])
+        ok, reason, ev = self.verify(web_plan(), timeout=60)
+        self.assertFalse(ok)
+        self.assertIn("deployment of version 8 failed", reason)
+        self.assertLess(ev["elapsed_sec"], 5)
+
+    def test_no_op_plan_observes_nothing(self) -> None:
+        ok, _, ev = self.verify(web_plan(actions=["no-op"]))
+        self.assertTrue(ok)
+        self.assertEqual((ev["verdict"], ev["items"]), ("nothing_to_observe", []))
+        self.assertEqual(self.nomad.requests + self.consul.requests, [])
+
+    def test_removed_job_and_job_without_services_are_explicitly_skipped(self) -> None:
+        self.nomad.on("GET", "/v1/job/worker", {"ID": "worker", "Type": "service", "Version": 1,
+                                                "TaskGroups": [{"Name": "w", "Count": 1, "Tasks": [{"Name": "t"}]}]})
+        plan = plan_with(job("old", actions=["delete"]), job("worker"))
+        ok, reason, ev = self.verify(plan)
+        self.assertTrue(ok, reason)
+        self.assertEqual(ev["verdict"], "nothing_to_observe")
+        self.assertEqual([(i["id"], i["state"], i["detail"]) for i in ev["items"]],
+                         [("old", "skipped", "removed by the plan; no services required"),
+                          ("worker", "skipped", "job declares no Consul services")])
+        self.assertEqual(self.consul.requests, [])
+        # Beside a healthy Nomad item a skipped one keeps the verdict healthy.
+        self.nomad.on("GET", "/v1/job/worker/deployment", {"ID": "d", "JobVersion": 1, "Status": "successful"})
+        ok, _, ev = self.verify(plan_with(job("worker")), nomad=True)
+        self.assertTrue(ok)
+        self.assertEqual([i["state"] for i in ev["items"]], ["healthy", "skipped"])
+        self.assertEqual(ev["verdict"], "healthy")
+
+    def test_batch_jobs_are_skipped(self) -> None:
+        self.nomad.on("GET", "/v1/job/web", PERIODIC)
+        ok, _, ev = self.verify(plan_with(job("web")))
+        self.assertTrue(ok)
+        self.assertEqual(ev["items"][0]["state"], "skipped")
+
+    def test_consul_address_from_config_wins_over_env(self) -> None:
+        other = FakeNomad()
+        self.addCleanup(other.close)
+        self.serve([alloc(NEW1), alloc(NEW2)])
+        for fake in (self.consul, other):
+            fake.on("GET", "/v1/health/service/web", [entry(NEW1), entry(NEW2)])
+        ok, reason, _ = self.verify(web_plan(), consul_addr=other.addr)
+        self.assertTrue(ok, reason)
+        self.assertTrue(other.requests)
+        self.assertEqual(self.consul.requests, [])
+        ok, reason, _ = self.verify(web_plan())  # no consul_addr: CONSUL_HTTP_ADDR
+        self.assertTrue(ok, reason)
+        self.assertTrue(self.consul.requests)
+
+    def test_missing_consul_address_fails(self) -> None:
+        self.serve([alloc(NEW1)])
+        env = {k: v for k, v in self.env.items() if k != "CONSUL_HTTP_ADDR"}
+        ok, reason, _ = self.verify(web_plan(), env=env)
+        self.assertFalse(ok)
+        self.assertIn("no Consul address", reason)
+
+    def test_unreachable_consul_fails_closed_within_the_window(self) -> None:
+        self.serve([alloc(NEW1), alloc(NEW2)])
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {**self.env, "CONSUL_HTTP_ADDR": f"127.0.0.1:{port}"}
+        ok, reason, ev = self.verify(web_plan(), env=env, timeout=2)
+        self.assertFalse(ok)
+        self.assertEqual(ev["items"][0]["state"], "timeout")
+        self.assertIn("Consul API unavailable", reason)
+        self.assertLess(ev["elapsed_sec"], 4)
+        self.assertNotIn(CONSUL_TOKEN, json.dumps(ev) + reason)
+
+
+class ConsulServiceHelpersTest(unittest.TestCase):
+    def test_jobspec_images_keeps_only_literals(self) -> None:
+        hcl = 'task "a" {\n  config { image = "acme/a:1" }\n}\n// image = "acme/old:0"\n/* image = "acme/older:0" */\ntask "b" {\n  config { image = "${var.image}" }\n}\n'
+        self.assertEqual(health.jobspec_images(hcl), ["acme/a:1"])
+        js = json.dumps({"Job": {"TaskGroups": [{"Tasks": [{"Config": {"image": "acme/api:3"}}]}]}})
+        self.assertEqual(health.jobspec_images(js), ["acme/api:3"])
+        self.assertEqual(health.jobspec_images(None), [])
+
+    def test_service_alloc_parses_nomad_service_ids(self) -> None:
+        self.assertEqual(health.service_alloc(f"_nomad-task-{NEW1}-server-web-http"), NEW1)
+        self.assertEqual(health.service_alloc(f"_nomad-task-{NEW1}-group-web-web-http"), NEW1)
+        self.assertEqual(health.service_alloc("web-1"), "")
+        self.assertEqual(health.service_alloc(None), "")
+
+    def test_declared_services_counts_per_group_and_skips_nomad_provider(self) -> None:
+        live = {"TaskGroups": [
+            {"Name": "api", "Services": [{"Name": "${JOB}-api"}, {"Name": "native", "Provider": "nomad"}],
+             "Tasks": [{"Name": "srv", "Services": [{"Name": "metrics"}, {"Name": ""}]}]},
+            {"Name": "edge", "Tasks": [{"Name": "proxy", "Services": [{"Name": "metrics"}]}]}]}
+        self.assertEqual(health.declared_services("acme", live),
+                         {"acme-api": {"api": 1}, "metrics": {"api": 1, "edge": 1}, "acme-api-srv": {"api": 1}})
+
+    def test_system_job_expects_every_running_new_allocation(self) -> None:
+        live = {"ID": "agent", "Type": "system", "Version": 3,
+                "TaskGroups": [{"Name": "web", "Count": 1, "Tasks": [{"Name": "server", "Services": [{"Name": "web"}]}]}]}
+        allocs = [alloc(NEW1, 3), alloc(NEW2, 3)]
+
+        def nomad(method, path, params=None):
+            return allocs if path.endswith("/allocations") else None if path.endswith("/deployment") else live
+
+        item = health.ConsulServices({"id": "agent", "namespace": "default", "region": "", "address": "", "removed": False})
+        state, detail = item.step(nomad, lambda *a: [entry(NEW1)])
+        self.assertEqual(state, health.PENDING)
+        self.assertIn("1/2 passing", detail)
+
+
 class CheckPolicyTest(unittest.TestCase):
     def test_check_is_retried_until_it_passes(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -271,6 +511,20 @@ timeout = 10
                          (True, "nomad.service.consul:4646", 600, 5, "launch"))
         self.assertEqual([(c.name, c.timeout) for c in pol.checks], [("results-api", 10)])
 
+    def test_consul_options_parse_and_activate_the_policy(self) -> None:
+        cfg = self.load("""
+[apply]
+enabled = true
+[apply.targets.web]
+dir = "terraform/web"
+[apply.targets.web.verify]
+consul = true
+consul_addr = "consul.example.invalid:8500"
+""")
+        pol = cfg.targets["web"].verify
+        self.assertEqual((pol.consul, pol.consul_addr, pol.nomad), (True, "consul.example.invalid:8500", False))
+        self.assertTrue(pol.active)
+
     def test_default_target_reads_apply_verify_and_unset_is_off(self) -> None:
         cfg = self.load("[apply]\nenabled = true\n[apply.verify]\nnomad = true\n")
         self.assertTrue(cfg.targets["default"].verify.active)
@@ -283,6 +537,8 @@ timeout = 10
             ("[apply.verify]\ntimeout = 0\n", "positive integer"),
             ("[apply.verify]\ntimeout = 5\ninterval = 10\n", "must not exceed"),
             ("[apply.verify]\nnomad = 'yes'\n", "true or false"),
+            ("[apply.verify]\nconsul = 1\n", "consul must be true or false"),
+            ("[apply.verify]\nconsul_addr = 8500\n", "consul_addr must be a string"),
             ("[[apply.verify.check]]\nname = 'x'\nrun = 'curl'\n", "non-empty list"),
             ("[[apply.verify.check]]\nname = 'x'\nrun = ['a']\nexclusive = true\n", "allowed keys"),
             ("[apply.targets.a]\ndir = 'a'\n[apply.verify]\nnomad = true\n", "default target only"),

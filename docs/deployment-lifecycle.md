@@ -248,6 +248,8 @@ it. Without a `verify` table nothing is observed and behavior is unchanged.
 [apply.targets.collectors.verify]
 nomad = true                          # observe the nomad_job resources the applied plan changed
 nomad_addr = "nomad.service.consul:4646"  # else NOMAD_ADDR from the apply env; NOMAD_TOKEN is sent if set
+consul = true                         # changed jobs' Consul services must pass on the new version's allocations
+consul_addr = "consul.service.consul:8500"  # else CONSUL_HTTP_ADDR; CONSUL_HTTP_TOKEN is sent if set
 timeout = 300                         # seconds for the whole window (default 300)
 interval = 5                          # seconds between polls (default 5)
 periodic = "registered"               # or "launch"
@@ -271,12 +273,89 @@ Nomad jobs are taken from the plan JSON that `check()` approved: every managed
 | other batch, parameterized | Registered and not stopped. |
 | deleted by the plan | Gone (404) or stopped. |
 
+### Consul service health (`consul = true`)
+
+A generic check that needs no per-target configuration: for every `nomad_job` the plan
+created, updated or replaced, each Consul service the live job declares must have at
+least the expected number of passing instances registered by allocations of the
+applied job version. It uses the Nomad API (job, deployment, allocations; `nomad_addr`
+or `NOMAD_ADDR`) and the Consul health API (`/v1/health/service/<name>`; `consul_addr`
+or `CONSUL_HTTP_ADDR`, `https` for a scheme-less address when `CONSUL_HTTP_SSL` is
+true). The token comes from `CONSUL_HTTP_TOKEN` in the apply env, is sent only to Consul
+as `X-Consul-Token` and is never recorded. Nothing is read from Consul KV, and Terraform
+state is never read. It can be used with or without `nomad = true`; together they give
+two items per changed job (`nomad_job` and `consul_service`).
+
+- **Services and expected counts** come from the live job definition, which is Nomad's
+  parse of the applied jobspec: group and task `service` blocks whose provider is
+  `consul` (`provider = "nomad"` services are skipped). Unnamed services get Nomad's
+  default names and `${JOB}`, `${TASKGROUP}`, `${TASK}` and `${BASE}` are resolved;
+  any other interpolation in a name fails the item. Expected instances per service are
+  the group `count` times the service's registrations per allocation, summed over
+  groups. For a system job it is every running allocation of the version (at least one).
+- **Correlation (stale-health safety).** A passing count alone can be met by the old
+  allocations while the changed deployment fails, so an instance counts only when the
+  allocation ID that Nomad embeds in the Consul service ID (`_nomad-task-<alloc>-...`)
+  belongs to a running allocation (`DesiredStatus = run`) of the job version observed on
+  the first poll after apply, in a group that declares the service. Registrations from
+  the job's other allocations are reported as `stale`. Registrations not made by Nomad
+  for this job (`other`) never count. The instance is passing only when all of its
+  checks, node checks included, are `passing`. Also:
+  - the job version must stay the same for the whole window. A new version (auto-revert
+    or another submission) fails at once, because the applied version is no longer live;
+  - every literal `image = "..."` in the planned `jobspec` (HCL text or JSON; whole-line
+    comments ignored, interpolated values skipped) must be among the live job's task
+    images, otherwise the item fails at once (`image_check`: `matched`, `mismatch` or
+    `unavailable` when the jobspec has no literal image);
+  - a `failed` or `cancelled` deployment of that version fails at once.
+- **Rolling updates.** Old and new allocations overlap during a rolling update. Old ones
+  are reported as `stale` and never counted, so the item stays pending until enough new
+  allocations pass, and times out if the rollout does not finish inside the window. A
+  canary deployment that waits for manual promotion therefore times out. Size `timeout`
+  for the whole rollout.
+- **No-ops.** A plan that changes no `nomad_job` creates no Consul items: the verdict is
+  `nothing_to_observe` unless something else is observed. A deleted job, a batch,
+  sysbatch, periodic or parameterized job, and a job that declares no Consul service each
+  record an explicit `skipped` item. Skipped items never fail, but they are not proof of
+  health either: a verdict made only of skipped items is `nothing_to_observe`.
+- **Failures** are metadata only. The detail names the service, the passing/expected
+  count, the job version and how many instances were not passing, stale or missing, for
+  example `web: 1/2 passing on version 8 (1 not passing; 2 from older allocations
+  ignored)`. `observed` records `job_version`, `image_check`, `new_allocations` and, per
+  service, `expected`, `passing`, `failing`, `stale` and `other`. Check output, service
+  tags and metadata are not recorded. An unreachable or erroring Consul (or Nomad)
+  keeps the item pending, so verification fails closed as `timeout` when the window
+  ends. A missing Consul address fails at once.
+
+Limits: the correlation relies on Nomad's service-ID format and on the job version.
+It cannot tell whether a passing check exercises the changed code path: a check that
+only tests a TCP port passes for a broken application, and a service without checks
+counts as passing. Consul namespaces, admin partitions and other datacenters are not
+selected (the agent's defaults apply). Images set through HCL2 variables or
+interpolation are not compared.
+
+### Service-function smoke checks
+
+For a check that the service actually works, use a `[[...verify.check]]` that asserts
+on the response content, not just the status code. The check is retried until it exits
+0 or the window closes:
+
+```toml
+[[apply.targets.web.verify.check]]
+name = "web-status"
+run = ["sh", "-c", "curl -fsS http://web.service.consul/status | grep -q '\"status\":\"ok\"'"]
+timeout = 10
+```
+
+### Evidence
+
 Evidence is a structured object (`verdict`, `elapsed_sec`, `timeout_sec`, and one item
-per job or check with its policy, state, detail, poll count and observed values). It is
+per job, Consul service set or check with its policy, state, detail, poll count and
+observed values). It is
 sanitized like the rest of the run and recorded on the terminal `deploy_run` row as
 `verification`, in `summary.json`, and summarized in the issue and PR comments. Verdicts:
 `healthy`, `unhealthy`, or `nothing_to_observe` (the policy is on but the plan changed no
-Nomad job and no check is configured), which passes.
+Nomad job, every Consul item was skipped and no check is configured), which passes.
 
 Limitations:
 
