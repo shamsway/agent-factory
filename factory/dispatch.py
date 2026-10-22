@@ -30,7 +30,7 @@ from contextlib import contextmanager, nullcontext, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
-from factory import __version__, brief, config, gitguard, launch, lifecycle
+from factory import __version__, brief, config, gitguard, github_identity, launch, lifecycle
 from factory.config import (
     LABEL_ADD_ONLY_OVERRIDE,
     LABEL_AGENT,
@@ -122,7 +122,10 @@ def run(
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """`env` replaces the inherited environment (lifecycle context is still added).
-    git and gh read the cwd's Git state: they get gitguard's pinned environment."""
+    git and gh read the cwd's Git state: they get gitguard's pinned environment.
+    While `factory apply` holds a verified GitHub identity, gh carries only its token."""
+    if cmd and Path(cmd[0]).name == "gh":
+        env = github_identity.gh_env(env)
     if cmd and Path(cmd[0]).name in ("git", "gh"):
         env = gitguard.env(globals().get("ROOT"), cwd, env)
     execution = lifecycle.current()

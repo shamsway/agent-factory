@@ -93,7 +93,9 @@ HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "revi
 # never lives in the committed repo file -- but `apply.enabled`/`apply.dir`
 # are policy about this repo (does merging it trigger terraform apply, and
 # where) and stay repo-owned, same split already used for `dashboard`.
-HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",), "apply": ("env",)}
+# `apply.github_logins` (the accounts apply may act as on GitHub) is host-only: a
+# committed value is refused, so a merged PR can never widen who apply posts as.
+HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",), "apply": ("env", "github_logins")}
 
 # Every key the loader reads, by table; `factory doctor` reports anything else.
 # `workers` is label-keyed, `gate.check` is a list of {name, run, exclusive, when}.
@@ -118,7 +120,7 @@ KNOWN_KEYS = {
     "dashboard": ("port", "theme"),
     "install": ("every", "dashboard", "host", "python", "env", "dispatch_env", "apply"),
     "apply": ("enabled", "dir", "env", "targets", "baseline", "supersession", "adapter", "verify", "diagnostics",
-              "credential_warn_hours"),
+              "credential_warn_hours", "github_logins"),
     "collaboration": ("fallback", "reasons", "components"),
     "prices": None,
 }
@@ -328,6 +330,7 @@ class Config:
     apply_baseline: str | None = None  # commit SHA or PR number prior to which deployments are ignored
     apply_supersession: str = "sequential"  # one of SUPERSESSION_MODES
     credential_warn_hours: float = 4.0  # doctor warns when an apply credential expires this soon
+    apply_github_logins: tuple[str, ...] = ()  # host-only: logins apply's GitHub calls may run as
     raw_repo: dict = field(default_factory=dict)  # the committed file alone, before host layering
 
     @property
@@ -603,6 +606,18 @@ def manager_settings(table: dict) -> tuple[list[str] | None, str | None]:
     return command, model
 
 
+def github_logins(raw_repo: dict, apply_t: dict) -> tuple[str, ...]:
+    """Host-owned `[apply].github_logins`: GitHub logins, never teams (see factory/github_identity.py)."""
+    if "github_logins" in raw_repo.get("apply", {}):
+        raise ConfigError(f"[apply].github_logins is host-only; set it in {host_config_path()} "
+                          '[defaults.apply] or [repo."<slug>".apply]')
+    logins = apply_t.get("github_logins", [])
+    login = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+    if not isinstance(logins, list) or any(not isinstance(n, str) or not login.fullmatch(n) for n in logins):
+        raise ConfigError("[apply].github_logins must be an array of GitHub logins")
+    return tuple(logins)
+
+
 def load(start: Path | None = None) -> Config:
     """Load `<root>/.factory.toml` over the host layer; every key optional except a resolvable repo slug."""
     root = repo_root(start)
@@ -783,6 +798,7 @@ def load(start: Path | None = None) -> Config:
     if isinstance(warn, bool) or not isinstance(warn, (int, float)) or warn <= 0:
         raise ConfigError("[apply].credential_warn_hours must be a positive number of hours")
     cfg.credential_warn_hours = float(warn)
+    cfg.apply_github_logins = github_logins(raw_repo, apply_t)
 
     raw_targets = apply_t.get("targets")
     default_adapter = str(apply_t.get("adapter", "terraform"))

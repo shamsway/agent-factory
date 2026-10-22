@@ -540,6 +540,11 @@ def doctor(argv: list[str]) -> int:
             f"dispatcher {dispatcher or '?'}, dashboard {dashboard or '?'}"
             + ("; [install].dispatch_env must select a different account" if dispatcher and same else ""),
         )
+    if cfg.apply_enabled:
+        # The same resolution `factory apply` refuses on; login names only.
+        from . import github_identity
+        identity = github_identity.resolve(cfg)
+        report(identity.verified, "apply GitHub identity", identity.reason)
     perm = sh(["gh", "repo", "view", cfg.repo, "--json", "viewerPermission", "--jq", ".viewerPermission"])
     level = perm.stdout.strip()
     report(level in ("WRITE", "MAINTAIN", "ADMIN"), f"push access to {cfg.repo}", level or perm.stderr.strip())

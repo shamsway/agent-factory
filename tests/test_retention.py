@@ -6,6 +6,13 @@ from pathlib import Path
 from unittest import mock
 
 from factory import retention
+from tests.test_github_identity import pin_for_module
+
+
+def setUpModule() -> None:
+    # These tests exercise apply/incident behavior, not the GitHub identity guard
+    # (tests/test_github_identity.py): resolve as an approved account, pinned.
+    pin_for_module()
 
 
 def run(rid, status="succeeded", target="default"):

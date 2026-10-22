@@ -32,9 +32,11 @@ budget. Three create/update attempts survive restart; exhaustion becomes
 visible with a separate failure count. Errors store only exception types,
 fixed diagnostic codes or HTTP status numbers, never provider output.
 
-The GitHub identity is the same process environment/gh login used by
-`apply.post_comment`; it does not substitute an install-role token from host
-configuration or define a second fallback credential path. Ensure that this
+The GitHub identity is apply's guarded, token-pinned dispatcher identity
+([GitHub identity](deployment-lifecycle.md#github-identity)): delivery and
+`--retry` refuse, before reading or writing any record or calling GitHub, unless
+it authenticates as a login in host-owned `[apply].github_logins`. It never uses
+`[apply].env` or defines a second fallback credential path. Ensure that this
 identity can create and update repository issues and that the investigation
 label exists before live activation. Verify credentials through Factory's
 supported inspection commands rather than printing host config or tokens.

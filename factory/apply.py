@@ -13,6 +13,13 @@ plan.
 One pass per invocation, same statelessness as `factory dispatch`. Never
 uses the dispatcher's credentials -- only `[apply].env`, which the
 dispatcher never sees (see docs/deployment-lifecycle.md).
+
+Every GitHub read and write of a pass (merged-PR discovery, review evidence,
+publication retries, comments, incidents) runs as one account: the dispatcher
+identity, resolved and checked against host-owned `[apply].github_logins`
+before anything else, then pinned by token for the rest of the pass
+(factory/github_identity.py). A missing, unapproved or unresolvable account
+refuses the pass before any of them.
 """
 
 from __future__ import annotations
@@ -26,7 +33,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from factory import artifacts, config, deploy, diagnostics, dispatch, incidents, lifecycle
+from factory import (
+    artifacts,
+    config,
+    deploy,
+    diagnostics,
+    dispatch,
+    github_identity,
+    incidents,
+    lifecycle,
+)
 from factory.config import Config
 
 cfg: Config
@@ -253,6 +269,8 @@ def post_comment(sink: str, number: int, body: str) -> tuple[bool, str]:
     number, never derived from the ticket's `agent/<n>` branch). Reports
     failure so the publication can be retried."""
     kind = "issue" if sink == "issue" else "pr"
+    if github_identity.current() is None:
+        return False, "no verified apply GitHub identity"
     proc = dispatch.run(["gh", kind, "comment", str(number), "--repo", cfg.repo, "--body", body], check=False)
     if proc.returncode != 0:
         return False, (proc.stderr or proc.stdout or f"gh {kind} comment exited {proc.returncode}").strip()
@@ -311,6 +329,7 @@ def apply_escalate(
         log(f"#{n}: incident queue skipped: {type(exc).__name__}")
     body = f"`factory apply` did not proceed: {reason}."
     try:
+        github_identity.require_pinned("apply escalation comment")
         dispatch.run(
             [
                 "gh", "issue", "comment", str(n), "--repo", cfg.repo,
@@ -407,6 +426,7 @@ def supersede(candidate: dict, newest: dict, target: str) -> None:
             f"the newest approved revision, #{newest['ticket']} ({str(newest.get('commit', ''))[:8]}), "
             "which includes this change.")
     try:
+        github_identity.require_pinned("apply supersession comment")
         dispatch.run(["gh", "issue", "comment", str(candidate["ticket"]), "--repo", cfg.repo, "--body", body],
                      check=False)
     except Exception as exc:  # noqa: BLE001 - the recorded supersession is authoritative
@@ -601,6 +621,18 @@ def authorize_revision(pr: int, reason: str | None, dry_run: bool) -> int:
     return 0
 
 
+def verify_identity() -> github_identity.Identity | None:
+    """The pass's GitHub identity, or None after logging why apply refuses (names only)."""
+    identity = github_identity.resolve(cfg)
+    if not identity.verified:
+        log(f"refused: GitHub identity {identity.status}: {identity.reason}. Nothing was read, "
+            "posted or deployed; set host-owned [apply].github_logins and the dispatcher identity "
+            "([install].dispatch_env), then check with `factory doctor`")
+        return None
+    log(f"GitHub identity: {identity.login}")
+    return identity
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory apply",
@@ -621,7 +653,10 @@ def main(argv: list[str]) -> int:
     configure(config.load())
 
     if args.authorize_revision is not None:
-        return authorize_revision(args.authorize_revision, args.reason, args.dry_run)
+        if (identity := verify_identity()) is None:
+            return 1
+        with github_identity.pinned(identity):
+            return authorize_revision(args.authorize_revision, args.reason, args.dry_run)
 
     if args.acknowledge_failure:
         target_name = args.target or "default"
@@ -735,6 +770,16 @@ def main(argv: list[str]) -> int:
             log(f"error: deploy adapter plugin: {err}")
         return 1
 
+    # Before the lock, retention, publication retries, discovery and incident delivery:
+    # a refused identity leaves GitHub and every target untouched.
+    if (identity := verify_identity()) is None:
+        return 1
+    with github_identity.pinned(identity):
+        return run_pass(args)
+
+
+def run_pass(args: argparse.Namespace) -> int:
+    """One locked apply pass; every gh call in it runs as the pinned identity."""
     a_ok, lock_fd = deploy.acquire_apply_lock(cfg.factory)
     if not a_ok:
         log("skipped (another apply run holds the lock)")
