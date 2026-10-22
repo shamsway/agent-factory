@@ -367,8 +367,10 @@ def request(p, projection):
     return content, reserved, payload
 
 
-def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
-    """Trusted broker entrypoint, not dispatch admission. Does not publish or repair."""
+def _investigate(cfg, incident_id, run_id, *, client=None, now=None, expected_projection=None):
+    """Trusted broker entrypoint, not dispatch admission. Does not publish or repair.
+    `expected_projection` (a projection sha256) refuses before any call when the
+    evidence read here differs from what the operator previewed."""
     p = policy(cfg.investigation)
     if not p["enabled"] or not p["allow_export"]:
         raise ModelRefused("model_export_disabled")
@@ -377,6 +379,8 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
     projection = evidence.read_evidence(cfg.factory, incident_id, run_id, now=now)
     if projection.repository != cfg.repo:
         raise ModelRefused("repository_mismatch")
+    if expected_projection is not None and projection.sha256 != expected_projection:
+        raise ModelRefused("projection_changed")
     content, reserved, payload = request(p, projection)
     fingerprint = policy_digest(p)
     with _store(cfg.factory, incident_id, run_id) as (fd, name):
@@ -581,9 +585,10 @@ def snapshot(cfg):
     return result
 
 
-def investigate(cfg, incident_id, run_id, *, client=None, now=None):
+def investigate(cfg, incident_id, run_id, *, client=None, now=None, expected_projection=None):
     try:
-        return _investigate(cfg, incident_id, run_id, client=client, now=now)
+        return _investigate(cfg, incident_id, run_id, client=client, now=now,
+                            expected_projection=expected_projection)
     except (ModelRefused, evidence.EvidenceRefused):
         raise
     except Exception:  # noqa: BLE001 - unexpected failures must fail closed

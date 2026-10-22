@@ -156,6 +156,24 @@ class InvestigationRunTests(unittest.TestCase):
             self.assertNotIn("result", row)
             self.assert_private(json.dumps(row))
 
+    def test_evidence_changed_after_confirmation_refused_before_call(self):
+        real = evidence.read_evidence
+        reads = []
+
+        def changing(*args, **kwargs):
+            projection = real(*args, **kwargs)
+            reads.append(projection)
+            if len(reads) == 1:
+                return projection
+            return mock.Mock(repository=projection.repository, sha256="f" * 64, data=projection.data)
+
+        sha = real(self.cfg.factory, self.incident, self.run_id, now=NOW + 2).sha256
+        with (mock.patch.object(evidence, "read_evidence", side_effect=changing),
+              self.assertRaises(run_cmd.RunRefused) as caught):
+            self.run_(live=True, confirm_spend_cap=True, projection_sha256=sha)
+        self.assertEqual(str(caught.exception), "projection_changed")
+        self.assertEqual(self.calls, [])
+
     def test_unknown_outcome_recorded_and_never_retried(self):
         def lost(policy, payload):
             self.calls.append(payload)

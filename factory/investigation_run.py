@@ -269,7 +269,8 @@ def _run(cfg, incident_id, run_id, *, live, confirm_spend_cap, projection_sha256
             calls.append(True)
             return (client or model.http_call)(policy, request_payload)
         try:
-            state = model.investigate(cfg, incident_id, run_id, client=counted, now=now)
+            state = model.investigate(cfg, incident_id, run_id, client=counted, now=now,
+                                      expected_projection=projection_sha256)
         except model.ModelRefused as error:
             # A refusal after the provider was called cannot arise in investigate(); keep it honest anyway.
             raise RunRefused(str(error) if str(error) in REFUSALS else "model_state_unavailable") from None
