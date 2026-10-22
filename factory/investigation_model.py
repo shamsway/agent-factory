@@ -347,16 +347,12 @@ def _response(wire, p, projection, reserved):
         raise ResponseRefused(reason) from None
 
 
-def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
-    """Trusted broker entrypoint, not dispatch admission. Does not publish or repair."""
-    p = policy(cfg.investigation)
-    if not p["enabled"] or not p["allow_export"]:
-        raise ModelRefused("model_export_disabled")
-    if credential_status(cfg) not in {"configured", "configured_shared"}:
-        raise ModelRefused("model_credential_invalid")
-    projection = evidence.read_evidence(cfg.factory, incident_id, run_id, now=now)
-    if projection.repository != cfg.repo:
-        raise ModelRefused("repository_mismatch")
+def request(p, projection):
+    """Build the one fixed provider payload for a projection; no I/O or provider call.
+
+    Returns (user content, reserved input tokens, payload). Refuses before export
+    when the projection exceeds the configured input or token ceilings.
+    """
     content = evidence.encoded({"projection_sha256": projection.sha256, "evidence": projection.data()}).decode()
     # Reserve a deliberately conservative byte-based input allowance plus 1024
     # tokens for protocol overhead. This is accounting, not tokenizer precision.
@@ -368,6 +364,20 @@ def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
                "stream": False, "n": 1}
     if p["send_store_false"]:
         payload["store"] = False
+    return content, reserved, payload
+
+
+def _investigate(cfg, incident_id, run_id, *, client=None, now=None):
+    """Trusted broker entrypoint, not dispatch admission. Does not publish or repair."""
+    p = policy(cfg.investigation)
+    if not p["enabled"] or not p["allow_export"]:
+        raise ModelRefused("model_export_disabled")
+    if credential_status(cfg) not in {"configured", "configured_shared"}:
+        raise ModelRefused("model_credential_invalid")
+    projection = evidence.read_evidence(cfg.factory, incident_id, run_id, now=now)
+    if projection.repository != cfg.repo:
+        raise ModelRefused("repository_mismatch")
+    content, reserved, payload = request(p, projection)
     fingerprint = policy_digest(p)
     with _store(cfg.factory, incident_id, run_id) as (fd, name):
         state = _read(fd, name)

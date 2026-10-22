@@ -4,7 +4,8 @@ The release implements a bounded evidence reader, fixed renderer, model transpor
 and receipts, source scope validation, durable outbox and dedicated publisher broker.
 [Operator export/import](investigation-option-b.md) and [broker setup](investigation-publisher-setup.md)
 provide manual publication. No production path automatically calls `investigate()`;
-only synthetic acceptance and an explicitly invoked operator helper call it.
+only synthetic acceptance and the explicitly invoked operator command
+[`factory investigation-run`](#operator-investigation-run) call it.
 The legacy worker refuses deployment roots and hands them to humans. Source
 installation does not provision accounts, enable diagnostics, activate a model
 route or authorize repair. Host acceptance evidence belongs in your private host operator notes.
@@ -381,6 +382,74 @@ used by these fixtures. Source includes durable delivery, scoped proposals and m
 broker integration. Provider/host acceptance, explicit activation and controlled
 end-to-end proof must be recorded separately in your private host operator notes. Sandbox
 exit-125 classification remains a limitation for future code-tool activation.
+
+### Operator investigation run
+
+`factory investigation-run` is the supported way to run the model broker on a
+real, unresolved deployment incident. It is operator-only and never automatic:
+no dispatcher, scheduler, dashboard action, MCP tool or manager calls it.
+
+```sh
+# 1. Preview (default): local only, no provider call, no receipt written.
+factory investigation-run --incident INCIDENT [--run RUN]
+# 2. Live: one bounded provider request for exactly the projection you previewed.
+factory investigation-run --incident INCIDENT --run RUN --live \
+  --confirm-provider-spend-cap --projection-sha256 HASH_FROM_PREVIEW
+```
+
+Inputs are an incident ID and/or a deployment run ID. With only `--run`, the
+command finds the single local incident record that lists that run in the
+configured repository. With only `--incident`, it uses the incident's newest
+correlated run. Evidence comes only from `read_evidence`; there is no new
+collection path and no Nomad, Consul or GitHub call.
+
+The command refuses with a fixed code, before any provider request, when:
+
+- it runs inside a dispatcher worker or reviewer child: an inherited
+  lifecycle context gives `operator_context_required`. This mirrors the routing
+  fence and is not OS isolation;
+- the run is resolved, superseded or acknowledged (`run_already_resolved`), or
+  is not a committed failed run of that incident (`incident_run_mismatch`,
+  `run_identity_mismatch`, `not_a_failed_run`);
+- the diagnostics bytes do not match the manifest entry recorded for the run
+  (`diagnostics_hash_mismatch`), or the manifest or bundle identity differs;
+- no observation binds to the run's recorded job lineage (`lineage_unavailable`);
+- `[investigation].enabled` or `allow_export` is off (`model_export_disabled`),
+  the settings are invalid (`configuration_invalid`), or the model key is not
+  a configured dedicated or explicitly shared role (`model_credential_invalid`);
+- a live run lacks `--confirm-provider-spend-cap`, or `--projection-sha256` is
+  missing or no longer matches the fresh projection (`projection_changed`);
+- the persisted request, token or time budget is exhausted (`request_budget`),
+  the receipt was made for another projection or policy (`state_identity_changed`),
+  or another caller holds the per-run receipt lock (`investigation_busy`).
+
+The preview reports what would be sent as metadata only: projection, manifest
+and bundle hashes, row count, model ID, input bytes, reserved tokens, budgets,
+request hash and the existing receipt state. It never prints the prompt,
+evidence rows, endpoint or key. It takes the broker's per-run lock to read the
+receipt; it creates only the lock file.
+
+A live run calls `investigation_model.investigate`, which uses the existing
+receipts, reservations, ceilings and per-run lock. Replay is idempotent: when a
+receipt for the same incident, run and projection is already `complete` or
+`failed`, the command returns the cached outcome without another request. An
+unknown outcome (timeout or ambiguous transport) is recorded as `uncertain` and
+is never retried by this command, even with `--retry`. Recover it with the
+audited `investigation-reset --acknowledge-uncertain-spend` path below. A
+definite retryable receipt (connection refused, HTTP 429 or 503) needs an
+explicit `--retry` on a later invocation and still consumes its own reservation.
+
+Each invocation appends one `investigation-run` row to `.factory/events.jsonl`:
+incident and run IDs, mode, fixed outcome or refusal code, evidence hashes, row
+count, receipt state, request count, reservations, budgets, numeric usage and
+the result's outcome enum and hash. Evidence bodies, prompts, provider
+responses, endpoints and credentials are never journaled or printed.
+
+This command never publishes. After a `complete` or `failed` receipt it prints
+the next operator steps: `investigation-publish --preview`, or
+`investigation-export` followed by the dedicated broker's import, preview and
+`--send --confirm-public-write`. Public delivery stays that separate,
+operator-confirmed step.
 
 ### Audited recovery and synthetic provider acceptance
 
