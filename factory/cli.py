@@ -23,6 +23,7 @@ COMMANDS = {
     "investigation-accept": ("investigation_model", "accept_main", "exercise synthetic investigation evidence (provider export requires explicit flags)"),
     "investigation-publish": ("investigation_publisher", "main", "inspect/enqueue fixed findings; explicit opt-in and dedicated identity required to send"),
     "investigation-reset": ("investigation_model", "reset_main", "audit a bounded model retry without deleting prior attempts"),
+    "investigation-run": ("investigation_run", "main", "operator-only: preview (default) or run one bounded model investigation for an incident; never publishes"),
     "diagnostics": ("diagnostics", "main", "collect bounded read-only evidence for a terminal deployment run"),
     "manage": ("manage", "main", "recommend PR/issue viability, resolve untouched escalations, publish terminal human handoffs"),
     "gate": ("gate", "main", "run the deterministic quality gate in this worktree"),
