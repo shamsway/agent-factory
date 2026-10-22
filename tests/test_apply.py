@@ -13,6 +13,13 @@ from pathlib import Path
 
 from factory import config
 from tests.test_factory import build_fork, git, make_repo, merge_stage_mocks
+from tests.test_github_identity import pin_for_module
+
+
+def setUpModule() -> None:
+    # These tests exercise apply/incident behavior, not the GitHub identity guard
+    # (tests/test_github_identity.py): resolve as an approved account, pinned.
+    pin_for_module()
 
 
 def detached_from(fake_run):
@@ -36,8 +43,9 @@ class ApplyConfigTest(unittest.TestCase):
     def test_apply_env_is_host_owned_dir_and_enabled_are_not(self) -> None:
         # Matches the dashboard.port split: [apply].env is credential-shaped
         # and host-owned (never in the committed repo file); enabled/dir are
-        # policy about this repo and stay repo-owned.
-        self.assertEqual(config.HOST_KEYS["apply"], ("env",))
+        # policy about this repo and stay repo-owned. `github_logins` (who apply
+        # may act as on GitHub) is host-only too.
+        self.assertEqual(config.HOST_KEYS["apply"], ("env", "github_logins"))
         self.assertNotIn("apply", config.HOST_TABLES)
 
 

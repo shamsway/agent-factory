@@ -136,7 +136,22 @@ LIVE_CHECKS = {
 }
 
 
-BAD_STATUSES = ("empty", "invalid", "unavailable", "missing", "expired")
+BAD_STATUSES = ("empty", "invalid", "unavailable", "missing", "expired", "unconfigured", "mismatch", "malformed")
+
+
+def identity_row(cfg: config.Config, live: bool) -> dict:
+    """Apply's GitHub identity guard as metadata: approved logins, and with `live` the
+    login the dispatcher identity resolves to. Never the token or an environment."""
+    from . import github_identity
+    allowed = list(github_identity.allowed_logins(cfg))
+    if not live:
+        return {"scope": "apply", "key": "github_identity", "status": "configured" if allowed else "unconfigured",
+                "allowed": allowed,
+                "detail": f"approved: {', '.join(allowed)}" if allowed else "set host-owned [apply].github_logins"}
+    identity = github_identity.resolve(cfg)
+    return {"scope": "apply", "key": "github_identity",
+            "status": "valid" if identity.verified else identity.status,
+            "login": identity.login or None, "allowed": allowed, "detail": identity.reason}
 
 
 def _detail(result: str, secrets: list[str]) -> str | None:
@@ -296,6 +311,8 @@ def credential_rows(cfg: config.Config, scope: str, live: bool) -> list[dict]:
             rows.append({"scope": name, "key": key, "status": status, **({"detail": detail} if detail else {})})
         if name == "apply":
             rows += adapter_rows(cfg, live)
+            if cfg.apply_enabled:
+                rows.append(identity_row(cfg, live))
     if scope in ("all", "investigation"):
         from .investigation_model import KEY_NAME, credential_status, policy
         p = policy(cfg.investigation)

@@ -15,6 +15,13 @@ from unittest import mock
 
 from factory import config, deploy, incidents
 from tests.test_factory import make_repo
+from tests.test_github_identity import pin_for_module
+
+
+def setUpModule() -> None:
+    # These tests exercise apply/incident behavior, not the GitHub identity guard
+    # (tests/test_github_identity.py): resolve as an approved account, pinned.
+    pin_for_module()
 
 
 class Crash(BaseException):

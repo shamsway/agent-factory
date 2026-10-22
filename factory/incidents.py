@@ -18,7 +18,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import artifacts, config, deploy
+from . import artifacts, config, deploy, github_identity
 
 MAX_ATTEMPTS = 3
 MAX_RECORD_BYTES = 1024 * 1024
@@ -214,8 +214,8 @@ class GitHub:
             raise ValueError("invalid GitHub repository")
         self.repo = cfg.repo
         self.deadline = time.monotonic() + 60
-        # Same identity resolution as apply.post_comment: the process env/gh
-        # login. Never substitute the install role's token from host config.
+        # The process env; `api` swaps in the pinned apply identity's token when one is
+        # held. Never the apply role's `[apply].env` credentials.
         self.env = dict(os.environ)
 
     def api(self, endpoint: str, payload: dict | None = None, method: str = "GET"):
@@ -226,7 +226,7 @@ class GitHub:
         if payload is not None:
             cmd.extend(["--input", "-"])
         proc = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
-                              env=self.env, capture_output=True, text=True, timeout=min(20, remaining),
+                              env=github_identity.gh_env(self.env), capture_output=True, text=True, timeout=min(20, remaining),
                               check=False)
         if proc.returncode:
             status = re.search(r"\(HTTP (4\d\d)\)", proc.stderr or "")
@@ -251,6 +251,7 @@ class GitHub:
         raise RuntimeError("incomplete incident lookup")
 
     def create(self, row: dict) -> int:
+        github_identity.require_pinned("incident creation")
         result = self.api(f"repos/{self.repo}/issues", {
             "title": f"Deployment incident: {row['target']} / ticket #{row['original_ticket']}",
             "body": body(row), "labels": [config.LABEL_HUMAN]}, "POST")
@@ -260,6 +261,7 @@ class GitHub:
         return number
 
     def update(self, row: dict, issue: dict) -> None:
+        github_identity.require_pinned("incident update")
         old = issue.get("body") or ""
         start = old.find(marker(row["id"]))
         end = old.find(END, start)
@@ -277,7 +279,9 @@ class GitHub:
 
 
 def deliver(factory: Path, client: GitHub, *, only: str | None = None) -> list[dict]:
-    """Serialize local delivery; uncertain creates only reconcile, never recreate."""
+    """Serialize local delivery; uncertain creates only reconcile, never recreate.
+    Refused, before any record or request, without a verified apply GitHub identity."""
+    github_identity.require_pinned("incident delivery")
     with locked(factory) as store:
         results = []
         for path in sorted(store.glob("incident-*.json")):
@@ -373,6 +377,7 @@ def snapshot(factory: Path) -> dict:
 
 def recover(factory: Path, incident_id: str, client: GitHub, *, confirm_not_created: bool = False) -> None:
     marker(incident_id)
+    github_identity.require_pinned("incident retry")
     with locked(factory) as store:
         path = store / (incident_id + ".json")
         row = read(path)
@@ -437,11 +442,14 @@ def main(argv: list[str]) -> int:
             if not args.id:
                 raise ValueError("--attach-run requires --id")
             attach_run(cfg, args.attach_run, args.id)
-        if args.retry:
-            recover(cfg.factory, args.retry, GitHub(cfg), confirm_not_created=args.confirm_not_created)
-        if args.deliver:
-            queue_errors = sync_failed(cfg)
-            deliver(cfg.factory, GitHub(cfg), only=args.id or args.retry)
+        if args.retry or args.deliver:
+            # Same guard as `factory apply`: these talk to GitHub as the apply identity.
+            with github_identity.pinned(github_identity.require(cfg)):
+                if args.retry:
+                    recover(cfg.factory, args.retry, GitHub(cfg), confirm_not_created=args.confirm_not_created)
+                if args.deliver:
+                    queue_errors = sync_failed(cfg)
+                    deliver(cfg.factory, GitHub(cfg), only=args.id or args.retry)
         result = snapshot(cfg.factory)
         if queue_errors:
             result["queue_errors"] = queue_errors
@@ -451,6 +459,9 @@ def main(argv: list[str]) -> int:
                 raise ValueError("incident not found")
         print(json.dumps(result, indent=2))
         return 0 if result["status"] == "observed" else 1
+    except github_identity.IdentityRefused as exc:  # login names and status only
+        print(json.dumps({"status": "refused", "error_type": "IdentityRefused", "reason": str(exc)}))
+        return 1
     except Exception as exc:  # noqa: BLE001 - CLI reports only the error type
         print(json.dumps({"status": "unavailable", "error_type": type(exc).__name__}))
         return 1

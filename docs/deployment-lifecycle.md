@@ -111,10 +111,52 @@ adapter = "terraform"
   passes it only to the adapter's subprocesses. `factory inspect` and
   `factory verify-secrets` list the apply unit, require it while apply is
   scheduled, and report any `[apply].env` key found in its environment as leaked.
+- **GitHub identity.** Scheduled and manual applies resolve the same account and
+  refuse unless it is approved; see [GitHub identity](#github-identity).
 - **Pausing and opting out.** `systemctl --user stop <unit>.timer` stops new passes
   and so new applies; a running apply finishes. Host-owned `[install].apply = false`
   removes the trigger and the unit on the next `factory install` (refused while an
   apply is running), leaving applies to the operator.
+
+## GitHub identity
+
+Every GitHub call `factory apply` makes runs as one approved account: merged-PR
+discovery, review evidence, ticket reads for the plan check, pending publication
+retries, result, escalation and supersession comments, and incident creation and
+update (`factory incidents --deliver/--retry` uses the same guard).
+
+- **Approved logins.** Host-owned `[apply].github_logins`, under `[defaults.apply]`
+  or `[repo."owner/name".apply]`, lists the GitHub logins apply may act as
+  (machine user accounts; teams are not accepted). A committed value is refused,
+  so a merged PR can never widen it. Matching ignores case.
+- **One environment.** The account is chosen only by host config: the caller's
+  environment with gh's selectors (`GH_TOKEN`, `GITHUB_TOKEN`, the enterprise
+  tokens and `GH_CONFIG_DIR`) removed, then `[install].env`, then
+  `[install].dispatch_env`. That is what the apply unit carries, so an operator
+  shell signed in as a human resolves the same account as the scheduled run.
+  `[apply].env` never selects it.
+- **Pinned.** Before the apply lock, retention, discovery or any write, apply reads
+  the account's token once (`gh auth token`), resolves `gh api user` with only that
+  token, and checks the login. For the rest of the pass every `gh` call carries that
+  token, so `gh auth switch`, an edited gh config or a new `GH_TOKEN` cannot change
+  authorship between the check and the call. The token stays in memory; logs,
+  journal and reports carry login names only.
+- **Fail closed.** An unset `github_logins`, a login outside it, a token gh cannot
+  produce, an authentication failure, or a malformed response refuses the pass
+  (exit 1) with nothing read, posted, queued for delivery or deployed. `--dry-run`
+  and `--authorize-revision` refuse the same way. Local recovery
+  (`--acknowledge-failure`, `--reconcile-run`, `factory incidents --id/--attach-run`)
+  touches no GitHub and needs no identity; a repo without `[apply].enabled` is
+  unaffected.
+- **Checking it.** `factory doctor` resolves the identity live (`apply GitHub
+  identity`); `factory verify-secrets --scope apply` and `factory inspect` report a
+  `github_identity` row (`configured`/`unconfigured`, or with `--live`
+  `valid`/`mismatch`/`unavailable`/`malformed` and the resolved login).
+- **Rollout.** Upgrading a host with `[apply].enabled` stops applies until
+  `github_logins` is set: add the dispatcher's login, then run `factory doctor`.
+
+The identity guard decides who speaks for apply, not what may deploy: the
+revision-bound human approval below stays the deployment gate.
 
 ## DeployRun Contract & Persistence
 
@@ -152,7 +194,7 @@ Legacy events (`applied` with `ok=true`/`ok=false`, `apply-escalate`) are parsed
 
 ## Safety Guarantees
 
-1. **Revision-Bound Human Approval:** Merged PRs require `reviewDecision == "APPROVED"` plus an APPROVED review from a trusted human (OWNER/MEMBER/COLLABORATOR, excluding bots) at the exact head SHA, selected from `latestReviews(first:20)`. Dispatch merge applies the same check (`deploy.verify_revision_authorization`) to the PR's current head on apply-enabled repos, at listing and at both re-reads before `gh pr merge --match-head-commit`: GitHub keeps `reviewDecision` APPROVED after a push, so a stale approval waits for a fresh one instead of merging a head apply would reject. A refreshed (rebased) PR needs re-approval for the same reason. Review evidence comes from GraphQL `latestReviews { commit { oid } }`: `gh pr view --json latestReviews` returns an empty `commit.oid`, which this check cannot use. `trusted_reviewers` has no configuration wiring; this gate remains enforced when branch protection is unavailable. If review approval was on commit $A$ but an unapproved commit $B$ was merged, the deployment is rejected and escalated.
+1. **Revision-Bound Human Approval:** Merged PRs require `reviewDecision == "APPROVED"` plus an APPROVED review from a trusted human (OWNER/MEMBER/COLLABORATOR, excluding bots) at the exact head SHA, selected from `latestReviews(first:20)`. Dispatch merge applies the same check (`deploy.verify_revision_authorization`) to the PR's current head on apply-enabled repos, at listing and at both re-reads before `gh pr merge --match-head-commit`: GitHub keeps `reviewDecision` APPROVED after a push, so a stale approval waits for a fresh one instead of merging a head apply would reject. A refreshed (rebased) PR needs re-approval for the same reason. Review evidence comes from GraphQL `latestReviews { commit { oid } }`: `gh pr view --json latestReviews` returns an empty `commit.oid`, which this check cannot use. `trusted_reviewers` has no configuration wiring. This gate is load-bearing where branch protection is unavailable (a private repository on a plan without it, or protection not configured): GitHub then lets any writer merge, and the factory's own check is the only thing standing between a merge and a deploy, so it remains enforced at merge and again at apply. If review approval was on commit $A$ but an unapproved commit $B$ was merged, the deployment is rejected and escalated.
 2. **Unauthorized Direct Merge Refusal:** Any commit directly pushed or merged to `main` touching a target directory without an approved PR is flagged. `agent-factory` records a `deploy_unauthorized` audit event and halts execution for that target.
 3. **Topological Git Ordering:** Deployments are executed strictly in topological git commit order along `main`.
 4. **Idempotency & Notification Failure Isolation:** Durable disk recording (`deploy_run` with terminal status) occurs **before** GitHub notification posting. If GitHub API is down or fails, the deployment is never duplicate-executed on subsequent passes.
