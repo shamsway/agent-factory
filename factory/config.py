@@ -128,7 +128,7 @@ KNOWN_KEYS = {
 USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "cached_tokens", "cost")
 CHECK_KEYS = ("name", "run", "exclusive", "timeout", "when")
 CHECK_TIERS = ("attempt", "pr", "release")
-VERIFY_KEYS = ("nomad", "nomad_addr", "timeout", "interval", "periodic", "check")
+VERIFY_KEYS = ("nomad", "nomad_addr", "consul", "consul_addr", "timeout", "interval", "periodic", "check")
 VERIFY_CHECK_KEYS = ("name", "run", "timeout")
 PERIODIC_POLICIES = ("registered", "launch")
 ROUTE_REASONS = ("requirements", "implementation", "ci", "unknown")
@@ -164,6 +164,8 @@ class VerifyPolicy:
 
     nomad: bool = False  # observe the nomad_job resources the applied plan changed
     nomad_addr: str = ""  # falls back to NOMAD_ADDR in the apply env
+    consul: bool = False  # changed jobs' Consul services pass on the applied version's allocations
+    consul_addr: str = ""  # falls back to CONSUL_HTTP_ADDR in the apply env
     timeout: int = 300  # seconds for the whole observation window
     interval: int = 5  # seconds between polls
     periodic: str = "registered"  # or "launch": force one run and require it to complete
@@ -171,7 +173,7 @@ class VerifyPolicy:
 
     @property
     def active(self) -> bool:
-        return self.nomad or bool(self.checks)
+        return self.nomad or self.consul or bool(self.checks)
 
 
 # sequential: strict commit order; a failure halts the target until acknowledged.
@@ -213,6 +215,14 @@ def verify_policy(raw: object, where: str) -> VerifyPolicy | None:
         if not isinstance(raw["nomad_addr"], str):
             raise ConfigError(f"{where}.nomad_addr must be a string")
         policy.nomad_addr = raw["nomad_addr"]
+    if "consul" in raw:
+        if not isinstance(raw["consul"], bool):
+            raise ConfigError(f"{where}.consul must be true or false")
+        policy.consul = raw["consul"]
+    if "consul_addr" in raw:
+        if not isinstance(raw["consul_addr"], str):
+            raise ConfigError(f"{where}.consul_addr must be a string")
+        policy.consul_addr = raw["consul_addr"]
     for key in ("timeout", "interval"):
         if key in raw:
             setattr(policy, key, _positive_int(raw[key], f"{where}.{key}"))
