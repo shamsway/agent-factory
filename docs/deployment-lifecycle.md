@@ -548,11 +548,16 @@ A direct commit was pushed to `main` bypassing PR review:
 
 **Recovery Procedure:**
 1. Review the unapproved commit `abc12345`.
-2. If the commit was intentional, record an adoption baseline to acknowledge it:
+2. If the commit was intentional and its change is already live (for example,
+   an operator applied it by hand), record an adoption baseline at or after it:
    ```toml
    [apply]
    baseline = "abc12345"
    ```
+   Detection then starts from the later of the target's last successful deploy and
+   the baseline, so this also clears targets that have deployed before. A baseline
+   older than the last successful deploy changes nothing. Factory never deploys
+   adopted commits, so the change on `main` must match what is live.
 3. Or revert the unapproved commit on `main`.
 
 

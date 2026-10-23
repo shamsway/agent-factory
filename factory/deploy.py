@@ -637,6 +637,15 @@ def is_before_baseline(
     return False
 
 
+def is_ancestor(ancestor: str, descendant: str, root: Path) -> bool:
+    """True if `ancestor` is `descendant` or one of its ancestors."""
+    proc = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root, capture_output=True, check=False,
+    )
+    return proc.returncode == 0
+
+
 def touches_target_dir(commit: str, target_dir: str, root: Path) -> bool:
     """Check if commit touches target_dir."""
     proc = subprocess.run(
@@ -846,16 +855,18 @@ def select_candidates_for_target(
 
         candidates.append(dict(pr))
 
-    # Detect unauthorized direct merges on main
+    # Detect unauthorized direct merges on main, from the later of the last
+    # successful deploy and the adoption baseline: moving the baseline past a
+    # reviewed direct merge adopts it even on a target that has deployed before.
     since = tstate.latest_succeeded_commit
-    if not since and baseline:
+    baseline_commit = None
+    if baseline:
         if baseline.isdigit():
-            for pr in all_prs:
-                if str(pr.get("pr")) == str(baseline):
-                    since = pr.get("commit")
-                    break
+            baseline_commit = next((pr.get("commit") for pr in all_prs if str(pr.get("pr")) == str(baseline)), None)
         else:
-            since = baseline
+            baseline_commit = baseline
+    if baseline_commit and (not since or is_ancestor(since, baseline_commit, root)):
+        since = baseline_commit
 
     unauthorized = find_unauthorized_direct_merges(
         target_dir=target_dir,
