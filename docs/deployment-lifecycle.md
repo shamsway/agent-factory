@@ -541,15 +541,31 @@ Ticket `#11` failed during apply. Subsequent commits touching the target are blo
 ### 3. Unauthorized Direct Merge Detected
 
 **Symptom:**
-A direct commit was pushed to `main` bypassing PR review:
+A commit reached `main` without a Factory PR: either a direct push, or a PR merged
+from an operator's own branch rather than `agent/<n>`:
 ```
 [apply] unauthorized direct merge detected for target `collectors`: commit abc12345 touches terraform/collectors without an approved PR
+[apply]   merged by PR #42; once reviewed, run `factory apply --authorize-revision 42 --reason "..."` to deploy it, adding --adopt if it is already live
 ```
+The second line appears when the commit is the merge (or head) of a merged PR.
 
 **Recovery Procedure:**
 1. Review the unapproved commit `abc12345`.
-2. If the commit was intentional and its change is already live (for example,
-   an operator applied it by hand), record an adoption baseline at or after it:
+2. If it came from a reviewed PR, approve that PR's exact merged head on the Factory host:
+   ```bash
+   # Factory deploys it on the next pass, on each target it touches
+   factory apply --authorize-revision 42 --reason "reviewed operator change"
+   # The change is already live (for example, applied by hand): authorize it, never deploy it
+   factory apply --authorize-revision 42 --reason "applied by hand during the outage" --adopt
+   ```
+   The approval is recorded in the journal (`deploy_operator_approval`, with `mode`
+   `deploy` or `adopt`) and is bound to the merged head, so a later push to that
+   branch is not covered. Apply refuses an operator PR that touches no enabled
+   target, and `--adopt` on a Factory (`agent/<n>`) PR. A deployed operator PR
+   runs, fails and is acknowledged like any ticket; its PR number stands in for
+   the ticket, and its result is posted once, on the PR.
+3. For a direct push with no PR, if the change is intentional and already live,
+   record an adoption baseline at or after it:
    ```toml
    [apply]
    baseline = "abc12345"
@@ -558,7 +574,7 @@ A direct commit was pushed to `main` bypassing PR review:
    the baseline, so this also clears targets that have deployed before. A baseline
    older than the last successful deploy changes nothing. Factory never deploys
    adopted commits, so the change on `main` must match what is live.
-3. Or revert the unapproved commit on `main`.
+4. Or revert the unapproved commit on `main`.
 
 
 ### 4. No second reviewer is available

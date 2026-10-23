@@ -316,6 +316,9 @@ def publish(factory_dir: Path, target: str, run_id: str, post: PostFn) -> dict[s
             continue
         if number is None:
             state.update(status="skipped", last_error="no number recorded for this sink")
+        elif sink == "issue" and targets["pr"] is not None and int(number) == int(targets["pr"]):
+            # An operator-branch PR is its own ticket: one comment on that thread.
+            state.update(status="skipped", last_error="same thread as the PR sink")
         elif state.get("attempts", 0) >= MAX_PUBLISH_ATTEMPTS:
             state.update(status="failed")
         else:
