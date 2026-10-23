@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
 
-from factory import lifecycle
+from factory import github_identity, lifecycle
 
 CONFIG_NAME = ".factory.toml"
 LESSONS_NAME = ".factory-lessons.md"  # committed; `factory learn` writes, every worker prompt reads
@@ -622,8 +622,8 @@ def github_logins(raw_repo: dict, apply_t: dict) -> tuple[str, ...]:
         raise ConfigError(f"[apply].github_logins is host-only; set it in {host_config_path()} "
                           '[defaults.apply] or [repo."<slug>".apply]')
     logins = apply_t.get("github_logins", [])
-    login = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
-    if not isinstance(logins, list) or any(not isinstance(n, str) or not login.fullmatch(n) for n in logins):
+    if not isinstance(logins, list) or any(
+            not isinstance(n, str) or not github_identity.LOGIN.fullmatch(n) for n in logins):
         raise ConfigError("[apply].github_logins must be an array of GitHub logins")
     return tuple(logins)
 

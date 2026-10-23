@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 # Variables that choose gh's account. Ambient values are dropped: only host config selects it.
 TOKEN_KEYS = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
 SELECTORS = (*TOKEN_KEYS, "GH_CONFIG_DIR")
-LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?")
+# A GitHub login. Enterprise Managed Users carry an `_<shortcode>` suffix (`mona_acme`),
+# which a personal login can never contain.
+LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:_[A-Za-z0-9]{1,39})?")
 TOKEN = re.compile(r"[\x21-\x7e]{1,1024}")
 TIMEOUT_SEC = 20
 STATUSES = ("verified", "unconfigured", "mismatch", "malformed", "unavailable")

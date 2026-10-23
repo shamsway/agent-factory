@@ -21,7 +21,9 @@ from factory import apply, artifacts, config, dispatch, github_identity, inciden
 from tests.test_factory import make_repo
 
 BOT, ALICE = "factory-bot", "alice"
-TOKENS = {"bot-token-0001": BOT, "alice-token-0001": ALICE, "bad-login-0001": "not a login!"}
+EMU = "factory-bot_acme"  # Enterprise Managed User: login plus `_<shortcode>`
+TOKENS = {"bot-token-0001": BOT, "alice-token-0001": ALICE, "emu-token-0001": EMU,
+          "bad-login-0001": "not a login!"}
 
 FAKE_GH = textwrap.dedent('''\
     #!/usr/bin/env python3
@@ -170,6 +172,11 @@ class ResolveTest(unittest.TestCase):
         self.assertEqual(github_identity.resolve(cfg).status, "malformed")
         cfg.install["dispatch_env"] = {"GH_TOKEN": "two words"}
         self.assertEqual(github_identity.resolve(cfg).status, "malformed")
+
+    def test_enterprise_managed_user_login_is_verified(self) -> None:
+        cfg = cfg_for(self.root, logins=(EMU,), dispatch_env={"GH_TOKEN": "emu-token-0001"})
+        identity = github_identity.resolve(cfg)
+        self.assertEqual((identity.status, identity.login), ("verified", EMU))
 
     def test_unconfigured_allowlist_fails_closed_but_names_the_login(self) -> None:
         cfg = cfg_for(self.root, logins=(), dispatch_env={"GH_CONFIG_DIR": str(self.gh.bot_config)})
@@ -426,6 +433,11 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.load(repo).apply_github_logins, (BOT,))
         self.assertIn("github_logins", config.HOST_KEYS["apply"])
 
+    def test_enterprise_managed_user_logins_are_accepted(self) -> None:
+        repo = make_repo(self.root, "[apply]\nenabled = true\n")
+        self.host(f'[defaults.apply]\ngithub_logins = ["{EMU}"]\n')
+        self.assertEqual(config.load(repo).apply_github_logins, (EMU,))
+
     def test_committed_logins_are_refused(self) -> None:
         repo = make_repo(self.root, '[apply]\nenabled = true\ngithub_logins = ["alice"]\n')
         with self.assertRaisesRegex(config.ConfigError, "host-only"):
@@ -433,7 +445,8 @@ class ConfigTest(unittest.TestCase):
 
     def test_malformed_logins_are_refused(self) -> None:
         repo = make_repo(self.root, "[apply]\nenabled = true\n")
-        for bad in ('"factory-bot"', '["@acme/ops"]', '["bad login"]', "[1]"):
+        for bad in ('"factory-bot"', '["@acme/ops"]', '["bad login"]', "[1]", '["bot_"]', '["_acme"]',
+                    '["bot__acme"]', '["bot_acme_ops"]'):
             with self.subTest(bad=bad):
                 self.host(f"[defaults.apply]\ngithub_logins = {bad}\n")
                 with self.assertRaisesRegex(config.ConfigError, "github_logins"):
