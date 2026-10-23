@@ -42,6 +42,7 @@ LABEL_OPS = "kind/ops"
 LABEL_INITIATIVE = "initiative"
 LABEL_WONTFIX = "wontfix-proposal"
 LABEL_EXPERIMENT = "experiment"
+LABEL_HOST = "host"
 LABELS = {
     LABEL_VIABILITY: ("D4C5F9", "Opt in to a manager build/defer recommendation before triage"),
     LABEL_REVIEW: ("D4C5F9", "Opt in to a manager PR direction recommendation before review"),
@@ -58,6 +59,7 @@ LABELS = {
     LABEL_WONTFIX: ("EDEDED", "Triage or manager proposes not to action this; a human decides"),
     LABEL_INITIATIVE: ("1D76DB", "Shared initiative plan read by `factory plan`; never triaged, dispatched, managed or merged"),
     LABEL_EXPERIMENT: ("5319E7", "Experiment ticket: at most one active at a time; never ranks by its results"),
+    LABEL_HOST: ("D4C5F9", "Persistent host condition reported by factory watch"),
 }
 
 # Word-bounded strong signals only: bare words like "internal"/"private" are ordinary English.
@@ -106,13 +108,13 @@ KNOWN_KEYS = {
     "workers": None,
     "worker_wrap": ("command",),
     "check_wrap": ("command",),
-    "review": ("command",),
+    "review": ("command", "json_mode"),
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
     "release": ("auto", "version_file", "min_tickets"),
-    "watch": ("enabled", "repo", "engine_repo", "labels"),
+    "watch": ("enabled", "repo", "engine_repo", "labels", "host_failure_minutes"),
     "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
     "leak_scan": ("pattern", "exclude", "extra"),
-    "triage": ("url", "model", "key", "timeout"),
+    "triage": ("url", "model", "key", "timeout", "service"),
     "investigation": ("enabled", "allow_export", "url", "model", "key", "allow_loopback_http",
                       "max_input_bytes", "max_output_tokens", "token_budget", "timeout", "max_requests", "send_store_false", "allow_shared_model_key"),
     "publisher": ("enabled", "allow_publish", "key", "login", "kind", "timeout", "request_timeout", "max_requests", "max_response_bytes", "status_file", "status_uid"),
@@ -287,8 +289,16 @@ class Config:
         default_factory=lambda: {"default": DEFAULT_WORKER, LABEL_CHORE: DEFAULT_CHORE_WORKER}
     )
     worker_when: dict[str, str] = field(default_factory=dict)
+    # Per worker profile: a ticket label selected by a structured `when` rule.
+    worker_select_label: dict[str, str] = field(default_factory=dict)
+    # Per worker profile: environment applied only to that worker process.
+    worker_env: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Per worker profile: pinned release version recorded with its lifecycle evidence.
+    worker_version: dict[str, str] = field(default_factory=dict)
     # Per worker label: JSON paths read from its log (see `usage_spec`); absent = cost_pattern only.
     worker_usage: dict[str, dict] = field(default_factory=dict)
+    # Per worker label: compatible persisted transcript format; absent defaults by executable.
+    worker_transcript: dict[str, str] = field(default_factory=dict)
     # Host `[prices."<model>"]`: USD per million prompt/completion/cached tokens; empty = no priced dollars.
     prices: dict[str, dict] = field(default_factory=dict)
     # Host-only argv prefix for every worker launch: a trusted operator executable, not a sandbox.
@@ -296,6 +306,8 @@ class Config:
     # Host-only argv prefix for every configured `[[gate.check]]` run (built-in checks excluded).
     check_wrap: list[str] = field(default_factory=list)
     reviewer: list[str] = field(default_factory=lambda: list(DEFAULT_REVIEWER))
+    # None preserves executable-based compatibility for the built-in OMP reviewer.
+    reviewer_json_mode: bool | None = None
     manager: list[str] | None = None
     manager_rounds: int = 1
     manager_review: str = "escalated"
@@ -312,6 +324,8 @@ class Config:
     watch_enabled: bool = True
     watch_repo: str | None = None
     watch_labels: list[str] = field(default_factory=lambda: ["bug", "needs-triage"])
+    # A host condition is filed only after an uninterrupted streak this long.
+    watch_host_failure_minutes: int = 60
     checks: list[Check] = field(default_factory=list)
     protected_paths: list[str] = field(default_factory=list)
     add_only_paths: list[str] = field(default_factory=list)
@@ -325,6 +339,7 @@ class Config:
     investigation: dict = field(default_factory=dict, repr=False)  # host-only model role
     publisher: dict = field(default_factory=dict, repr=False)  # host-only dedicated publication role
     triage_timeout: int = 60  # seconds per triage model request
+    triage_service: str | None = None  # systemd user service restarted by the optional liveness probe
     manager_model: str | None = None  # dashboard's no-tools OMP briefing; never a command
     dashboard_port: int = 8765
     dashboard_theme: Path | None = None  # CSS file served after the built-in stylesheet
@@ -364,19 +379,33 @@ class Config:
         return f"{self.unit}-apply.service" if self.apply_enabled and self.install.get("apply", True) else None
 
     def worker_key(self, labels: set[str]) -> str:
-        """The `[workers]` label that owns these ticket labels (first match wins)."""
-        return next((k for k in self.workers if k in labels), "default")
+        """The `[workers]` profile that owns these ticket labels (first match wins)."""
+        return next(
+            (
+                key for key in self.workers
+                if (key in labels and key not in self.worker_select_label) or self.worker_select_label.get(key) in labels
+            ),
+            "default",
+        )
 
     def worker(self, labels: set[str], prompt: Path, cwd: Path) -> list[str]:
-        """argv for the worker that owns these ticket labels (first match wins)."""
-        argv = self.workers[self.worker_key(labels)]
-        return expand([*self.worker_wrap, *argv], prompt=str(prompt), cwd=str(cwd),
+        """argv for the worker profile that owns these ticket labels."""
+        return self.worker_command(self.worker_key(labels), prompt, cwd)
+
+    def worker_command(self, worker: str, prompt: Path, cwd: Path) -> list[str]:
+        """Expanded argv for an already selected worker profile."""
+        return expand([*self.worker_wrap, *self.workers[worker]], prompt=str(prompt), cwd=str(cwd),
                       root=str(self.root), repo=self.repo, home=str(Path.home()))
 
     def check_cmd(self, argv: list[str], cwd: Path) -> list[str]:
         """argv for one configured gate check: the host wrap (expanded) before the check's own argv."""
         wrap = expand(self.check_wrap, cwd=str(cwd), root=str(self.root), repo=self.repo, home=str(Path.home()))
         return [*wrap, *argv]
+    def worker_environment(self, worker: str, prompt: Path, cwd: Path) -> dict[str, str]:
+        """Expanded environment overrides for one selected worker profile."""
+        values = {"prompt": str(prompt), "cwd": str(cwd), "root": str(self.root),
+                  "repo": self.repo, "home": str(Path.home())}
+        return {key: expand([value], **values)[0] for key, value in self.worker_env.get(worker, {}).items()}
 
     def review_cmd(self, prompt: str) -> list[str]:
         return expand(self.reviewer, prompt=prompt)
@@ -687,11 +716,38 @@ def load(start: Path | None = None) -> Config:
             when = entry.get("when", "") if isinstance(entry, dict) else ""
             if not isinstance(command, list) or not command or any(not isinstance(arg, str) for arg in command) or not command[0]:
                 raise ConfigError(f"{path}: workers.{label} needs a non-empty command argv")
-            if not isinstance(when, str):
-                raise ConfigError(f"{path}: workers.{label}.when must be text")
+            if isinstance(when, dict):
+                if set(when) != {"label"} or not isinstance(when.get("label"), str) or not when["label"].strip():
+                    raise ConfigError(f"{path}: workers.{label}.when needs exactly one non-empty label")
+                cfg.worker_select_label[label] = when["label"]
+                when = f"Ticket has label `{when['label']}`."
+            elif not isinstance(when, str):
+                raise ConfigError(f"{path}: workers.{label}.when must be text or {{ label = \"...\" }}")
             cfg.workers[label] = command
+            if isinstance(entry, dict) and "env" in entry:
+                environment = entry["env"]
+                if (
+                    not isinstance(environment, dict)
+                    or any(
+                        not isinstance(key, str) or not key or "=" in key or "\0" in key
+                        or not isinstance(value, str) or "\0" in value
+                        for key, value in environment.items()
+                    )
+                ):
+                    raise ConfigError(f"workers.{label}.env must map valid environment names to text")
+                cfg.worker_env[label] = environment
+            if isinstance(entry, dict) and "version" in entry:
+                version = entry["version"]
+                if not isinstance(version, str) or not version.strip() or any(ord(char) < 32 for char in version):
+                    raise ConfigError(f"workers.{label}.version must be non-empty text without control characters")
+                cfg.worker_version[label] = version
             if isinstance(entry, dict) and "usage" in entry:
                 cfg.worker_usage[label] = usage_spec(label, entry["usage"])
+            if isinstance(entry, dict) and "transcript" in entry:
+                transcript = entry["transcript"]
+                if transcript != "omp-session":
+                    raise ConfigError(f"workers.{label}.transcript must be \"omp-session\"")
+                cfg.worker_transcript[label] = transcript
             if when:
                 cfg.worker_when[label] = when
     for table in ("worker_wrap", "check_wrap"):
@@ -704,8 +760,13 @@ def load(start: Path | None = None) -> Config:
             if not isinstance(command, list) or not command or any(not isinstance(a, str) for a in command) or not command[0]:
                 raise ConfigError(f"{table}.command needs a non-empty argv array of strings")
             setattr(cfg, table, command)
-    if "command" in raw.get("review", {}):
-        cfg.reviewer = list(raw["review"]["command"])
+    review = raw.get("review", {})
+    if "command" in review:
+        cfg.reviewer = list(review["command"])
+    json_mode = review.get("json_mode")
+    if json_mode is not None and type(json_mode) is not bool:
+        raise ConfigError("review.json_mode must be true or false")
+    cfg.reviewer_json_mode = json_mode
     cfg.manager, cfg.manager_model = manager_settings(manager)
     cfg.manager_rounds = int(manager.get("rounds", cfg.manager_rounds))
     cfg.manager_review = manager.get("review", cfg.manager_review)
@@ -746,7 +807,11 @@ def load(start: Path | None = None) -> Config:
         raise ConfigError('watch.repo must be "owner/name"')
     if not isinstance(labels, list) or not labels or any(not isinstance(x, str) or not x or "," in x for x in labels):
         raise ConfigError("watch.labels must be a non-empty array of label names")
+    host_failure_minutes = watch.get("host_failure_minutes", cfg.watch_host_failure_minutes)
+    if isinstance(host_failure_minutes, bool) or not isinstance(host_failure_minutes, int) or host_failure_minutes < 1:
+        raise ConfigError("watch.host_failure_minutes must be a positive integer")
     cfg.watch_enabled, cfg.watch_repo, cfg.watch_labels = enabled, watch_repo, list(labels)
+    cfg.watch_host_failure_minutes = host_failure_minutes
     journal = raw.get("journal", {})
     for key in ("max_mb", "retention"):
         value = journal.get(key, getattr(cfg, f"journal_{key}"))
@@ -784,6 +849,13 @@ def load(start: Path | None = None) -> Config:
     cfg.llm_model = triage.get("model", cfg.llm_model)
     cfg.llm_key = str(triage.get("key", cfg.llm_key))
     cfg.triage_timeout = int(triage.get("timeout", cfg.triage_timeout))
+    service = triage.get("service")
+    if service is not None and (
+        not isinstance(service, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@:-]*\.service", service) is None
+    ):
+        raise ConfigError("triage.service must be a systemd service unit name ending in .service")
+    cfg.triage_service = service
     cfg.dashboard_port = int(dash.get("port", cfg.dashboard_port))
     cfg.dashboard_theme = root / dash["theme"] if dash.get("theme") else None
     cfg.install = merge(DEFAULT_INSTALL, raw.get("install", {}))

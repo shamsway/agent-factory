@@ -775,7 +775,7 @@ class LeaseRefusedCLI(unittest.TestCase):
         self.reviewer.write_text(REVIEWER.replace(
             'print(',
             'if s["reviews"] == 1:\n'
-            '    import subprocess, os\n'
+            '    import subprocess\n'
             f'    os.chdir({str(self.wt)!r})\n'
             '    tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], check=True, capture_output=True, text=True).stdout.strip()\n'
             '    sha = subprocess.run(["git", "commit-tree", tree, "-p", "HEAD", "-m", "Update branch"], check=True, capture_output=True, text=True).stdout.strip()\n'

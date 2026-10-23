@@ -97,31 +97,16 @@ class AgentCredentialTest(unittest.TestCase):
             dispatch.review_external_pr(17, "base", "head-1")
         self.assert_no_github(json.loads(out.read_text()))
 
-    def test_both_review_lanes_avoid_planted_project_startup(self) -> None:
-        # A disposable CLI analogue discovers executable project config upwards,
-        # like agent CLIs. It must never see the planted configuration in either lane.
-        sentinel = self.tmp / "startup-executed"
-        project = self.tmp / ".omp"
-        project.mkdir()
-        (project / "startup.py").write_text(f"open({str(sentinel)!r}, 'w').write('executed')")
+    def test_ticket_review_prompt_carries_the_packet(self) -> None:
+        # Isolation of both lanes is covered by test_review_isolation; this pins the inline
+        # packet that keeps reviewers without file tools working.
         probe = self.tmp / "reviewer.py"
         out = self.tmp / "review.json"
         probe.write_text(
-            "import json, os, pathlib, sys\n"
-            "cwd = pathlib.Path.cwd()\n"
-            "for parent in [cwd, *cwd.parents]:\n"
-            "    config = parent / '.omp' / 'startup.py'\n"
-            "    if config.exists(): exec(config.read_text())\n"
-            "json.dump({'cwd': str(cwd), 'entries': os.listdir(cwd), "
-            "'git': [k for k in os.environ if k.startswith('GIT_')], "
-            "'prompt': sys.argv[2]}, open(sys.argv[1], 'w'))\n"
+            "import json, sys\n"
+            "json.dump({'prompt': sys.argv[2]}, open(sys.argv[1], 'w'))\n"
             "print('VERDICT: APPROVE')\n"
         )
-        # Positive control: the same probe executes the sentinel from the checkout.
-        subprocess.run([sys.executable, str(probe), str(out), "control"],
-                       cwd=self.tmp, check=True, capture_output=True)
-        self.assertTrue(sentinel.exists())
-        sentinel.unlink()
         self.cfg.reviewer = [sys.executable, str(probe), str(out), "{prompt}"]
         for args in (["init", "-q"], ["config", "user.name", "Test"],
                      ["config", "user.email", "test@example.invalid"]):
@@ -131,38 +116,21 @@ class AgentCredentialTest(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", "baseline"], cwd=self.tmp, check=True)
         subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
                        cwd=self.tmp, check=True)
+        (self.tmp / "AGENTS.md").write_text("Anything goes.\n")
         (self.tmp / "widget.txt").write_text("new widget\n")
-        subprocess.run(["git", "add", "widget.txt"], cwd=self.tmp, check=True)
+        subprocess.run(["git", "add", "AGENTS.md", "widget.txt"], cwd=self.tmp, check=True)
         subprocess.run(["git", "commit", "-qm", "widget"], cwd=self.tmp, check=True)
         head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.tmp, text=True).strip()
         issue = {"title": "Widget", "body": "Add a widget", "comments": [{"body": "Approved scope"}]}
-        real_run = dispatch.run
-
-        def run(cmd, **kwargs):
-            if cmd[0] == "gh":
-                return subprocess.CompletedProcess(cmd, 0, "external diff", "")
-            return real_run(cmd, **kwargs)
-
-        with mock.patch.object(dispatch, "gh_json", return_value=issue), \
-             mock.patch.object(dispatch, "run", side_effect=run):
+        with mock.patch.object(dispatch, "gh_json", return_value=issue):
             verdict, _ = dispatch.review(self.tmp, 17, "PASS", head)
-            self.assertEqual(verdict, "APPROVE")
-            ticket = json.loads(out.read_text())
-            # Git env is injected only for the external lane, after controller git calls.
-            with mock.patch.dict(os.environ, {"GIT_WORK_TREE": str(self.tmp), "GIT_DIR": str(self.tmp / ".git")}):
-                dispatch.review_external_pr(17, "base", head)
-            external = json.loads(out.read_text())
-        self.assertIn("+new widget", ticket["prompt"])
-        self.assertIn("Keep the widget compatible", ticket["prompt"])
-        self.assertIn("Approved scope", ticket["prompt"])
-        self.assertIn(head, ticket["prompt"])
-        self.assertIn("external diff", external["prompt"])
-        for seen in (ticket, external):
-            self.assertNotEqual(Path(seen["cwd"]), self.tmp)
-            self.assertFalse(Path(seen["cwd"]).exists())
-            self.assertEqual(seen["entries"], [])
-            self.assertEqual(seen["git"], [])
-        self.assertFalse(sentinel.exists())
+        self.assertEqual(verdict, "APPROVE")
+        prompt = json.loads(out.read_text())["prompt"]
+        self.assertIn("+new widget", prompt)
+        # Standards come from the base revision, never the worker's edit of them.
+        self.assertIn("--- AGENTS.md (base revision) ---\nKeep the widget compatible.", prompt)
+        self.assertIn("Approved scope", prompt)
+        self.assertIn(head, prompt)
 
     def test_dispatcher_commands_keep_configured_identity(self) -> None:
         code = "import os; print(os.environ.get('GH_CONFIG_DIR'), os.environ.get('GH_TOKEN'))"
