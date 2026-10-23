@@ -78,6 +78,7 @@ class PlanSummaryTest(unittest.TestCase):
             main="main",
             apply_enabled=apply_enabled,
             review_cmd=lambda p: ["reviewer", p],
+            reviewer_json_mode=None,
         )
 
         def fake_run(cmd, **kwargs):
@@ -100,6 +101,8 @@ class PlanSummaryTest(unittest.TestCase):
             mock.patch.object(dispatch, "EVENTS", root / "events.jsonl", create=True),
             mock.patch.object(dispatch, "gh_json", side_effect=responses),
             mock.patch.object(dispatch, "run", side_effect=fake_run),
+            # The launch boundary (snapshot, neutral cwd) is test_review_isolation's subject.
+            mock.patch.object(dispatch, "_run_reviewer", side_effect=lambda command, *_: dispatch.run(command)),
         ):
             verdict, findings = dispatch.review(root, 1, "PASS", "head")
         return verdict, findings, called

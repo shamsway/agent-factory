@@ -17,12 +17,11 @@ import socket
 import subprocess
 import sys
 import tempfile
-import urllib.error
 import urllib.request
 from contextlib import suppress
 from pathlib import Path
 
-from factory import __version__, config
+from factory import __version__, config, lifecycle
 from factory.config import (
     CONFIG_NAME,
     LABELS,
@@ -452,6 +451,14 @@ def _credential_expiry_checks(cfg: config.Config, report) -> None:
             report(None, label, detail)
         else:
             report(True, label, detail)
+def report_stage_success(cfg: config.Config, report) -> None:
+    try:
+        passes = lifecycle.last_successful_passes(cfg.factory / "events.jsonl")
+    except (OSError, ValueError) as exc:
+        report(None, "last successful pass", f"unavailable: {exc}")
+        return
+    detail = "; ".join(f"{stage} {timestamp or 'never'}" for stage, timestamp in passes.items())
+    report(True, "last successful pass", detail, info=True)
 
 
 def doctor(argv: list[str]) -> int:
@@ -507,6 +514,7 @@ def doctor(argv: list[str]) -> int:
     unset = unset_repo_keys(cfg.raw_repo)
     if unset:
         report(None, "defaults in effect", ", ".join(unset), info=True)
+    report_stage_success(cfg, report)
 
     for tmpl in (ISSUE_TEMPLATE, INITIATIVE_TEMPLATE):
         shipped, ours = sha256(TEMPLATES / tmpl.name), sha256(cfg.root / tmpl)
@@ -621,15 +629,14 @@ def doctor(argv: list[str]) -> int:
         ident = sh(["git", "config", "user.name"], cwd=cfg.root).stdout.strip()
         report(bool(ident), "git identity for Signed-off-by", ident or "set user.name/user.email")
 
-    base = cfg.llm_url.rsplit("/chat/completions", 1)[0]
-    req = urllib.request.Request(f"{base}/models")
-    if cfg.llm_key:
-        req.add_header("Authorization", f"Bearer {cfg.llm_key}")
-    try:
-        with urllib.request.urlopen(req, timeout=3):
-            report(True, "triage model endpoint", cfg.llm_url)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        report(None, "triage model endpoint", f"{cfg.llm_url} ({exc}); `factory triage` will not run")
+    from factory import triage
+
+    alive, detail = triage.probe_endpoint(cfg, opener=urllib.request.urlopen)
+    report(
+        True if alive else None,
+        "triage model endpoint",
+        f"{cfg.llm_url} ({detail})" if alive else f"{cfg.llm_url} ({detail}); `factory triage` will not run",
+    )
 
     timer = sh(["systemctl", "--user", "is-active", f"{cfg.unit}.timer"]).stdout.strip()
     report(True if timer == "active" else None, f"systemd timer {cfg.unit}.timer", timer or "not installed (factory install)")
@@ -637,10 +644,29 @@ def doctor(argv: list[str]) -> int:
         loaded = sh(["systemctl", "--user", "show", "--property=LoadState", "--value", cfg.apply_unit]).stdout.strip()
         report(True if loaded == "loaded" else None, f"apply unit {cfg.apply_unit}",
                "started after each pass" if loaded == "loaded" else "not installed (factory install); approved merges wait for a manual `factory apply`")
+    if cfg.triage_service:
+        probe_timer = f"{cfg.unit}-triage-probe.timer"
+        active = sh(["systemctl", "--user", "is-active", probe_timer]).stdout.strip()
+        report(
+            True if active == "active" else None,
+            "triage liveness probe",
+            f"{probe_timer} {active}" if active else "not installed (factory install)",
+        )
+    else:
+        report(
+            None,
+            "triage liveness probe",
+            "disabled; set [triage].service to a systemd user service unit",
+            info=True,
+        )
 
     port_ok, port_detail = _dashboard_port_check(cfg, cfg.install["host"], cfg.dashboard_port)
     report(port_ok, f"dashboard port {cfg.dashboard_port}", port_detail)
 
+    from factory.workspace import access_file_problem, key_directory_problem
+
+    key_problem = key_directory_problem(cfg.factory) or access_file_problem(cfg.factory)
+    report(key_problem is None, f"{cfg.factory.name} directory safe", key_problem or "")
     host = cfg.install.get("host", "127.0.0.1")
     if host in LOOPBACK_HOSTS:
         report(True, "dashboard bind", f"{host} (loopback; reach it via an SSH tunnel)")
@@ -719,7 +745,7 @@ try:
     import factory
     result["version"] = getattr(factory, "__version__", "unknown")
     from factory.cli import COMMANDS
-    for command in ("triage", "dispatch", "dashboard"):
+    for command in ("triage", "triage-probe", "dispatch", "dashboard"):
         entry = COMMANDS.get(command)
         if not entry:
             raise RuntimeError(f"missing {command} command")
@@ -909,6 +935,19 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
             f"Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
         ),
     }
+    if cfg.triage_service:
+        wanted.update({
+            f"{cfg.unit}-triage-probe.service": (
+                f"[Unit]\nDescription=Probe the triage model for {cfg.repo}\n\n"
+                f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{env}"
+                f"ExecStart={exe} triage-probe\n"
+            ),
+            f"{cfg.unit}-triage-probe.timer": (
+                f"[Unit]\nDescription=Probe the triage model for {cfg.repo} every 2 minutes\n\n"
+                "[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\nRandomizedDelaySec=30\n\n"
+                "[Install]\nWantedBy=timers.target\n"
+            ),
+        })
     if apply_unit:
         # The dispatcher's GitHub identity (dispatch_env) reads reviews and posts deploy
         # comments; `[apply].env` never enters a unit: `factory apply` hands it to the
@@ -955,6 +994,8 @@ def install(argv: list[str]) -> int:
 
     wanted = units(cfg, args.every, args.host)
     dash_unit = f"{cfg.unit}-dashboard.service"
+    probe_service = f"{cfg.unit}-triage-probe.service"
+    probe_timer = f"{cfg.unit}-triage-probe.timer"
     if not args.dashboard:
         wanted.pop(dash_unit)
     if args.print:
@@ -1002,6 +1043,20 @@ def install(argv: list[str]) -> int:
             systemctl("disable", "--now", dash_unit)
             (udir / dash_unit).unlink()
             print(f"removed {udir / dash_unit}")
+    if not cfg.triage_service and any((udir / name).exists() for name in (probe_service, probe_timer)):
+        if args.no_start:
+            active = sh(["systemctl", "--user", "is-active", probe_timer]).stdout.strip()
+            if active not in ("inactive", "failed", ""):
+                raise ConfigError(
+                    f"{probe_timer} is active but no longer wanted; stop it first "
+                    f"(`systemctl --user disable --now {probe_timer}`), then rerun `factory install --no-start`"
+                )
+        elif (udir / probe_timer).exists():
+            systemctl("disable", "--now", probe_timer)
+        for name in (probe_service, probe_timer):
+            if (udir / name).exists():
+                (udir / name).unlink()
+                print(f"removed {udir / name}")
     stale_apply = udir / f"{cfg.unit}-apply.service"
     if cfg.apply_unit is None and stale_apply.exists():
         # Never enabled (each pass starts it), so removal touches no links; only a running
@@ -1014,13 +1069,20 @@ def install(argv: list[str]) -> int:
     systemctl("daemon-reload")
     if args.no_start:
         print(f"factory install --no-start: units written to {udir}; systemd reloaded; nothing enabled or started")
-        print(f"activate explicitly with: systemctl --user enable --now {cfg.unit}.timer{f' {dash_unit}' if args.dashboard else ''}")
+        activate = [f"{cfg.unit}.timer", *([probe_timer] if cfg.triage_service else []),
+                    *([dash_unit] if args.dashboard else [])]
+        print(f"activate explicitly with: systemctl --user enable --now {' '.join(activate)}")
         return 0
     timer = f"{cfg.unit}.timer"
     systemctl("enable", "--now", timer)
     if timer in changed:
         systemctl("restart", timer)
     print(f"{'restarted' if timer in changed else 'started'} {timer}")
+    if cfg.triage_service:
+        systemctl("enable", "--now", probe_timer)
+        if probe_timer in changed:
+            systemctl("restart", probe_timer)
+        print(f"{'restarted' if probe_timer in changed else 'started'} {probe_timer}")
     if args.dashboard:
         systemctl("enable", "--now", dash_unit)
         if dash_unit in changed:
@@ -1028,5 +1090,10 @@ def install(argv: list[str]) -> int:
         print(f"{'restarted' if dash_unit in changed else 'started'} {dash_unit}")
     if sh(["loginctl", "show-user", "--property=Linger", "--value", Path.home().name]).stdout.strip() != "yes":
         print("hint: `loginctl enable-linger` keeps user timers running after logout and at boot")
-    print(f"stop with: systemctl --user disable --now {cfg.unit}.timer{f' {dash_unit}' if args.dashboard else ''}")
+    enabled = [f"{cfg.unit}.timer"]
+    if cfg.triage_service:
+        enabled.append(probe_timer)
+    if args.dashboard:
+        enabled.append(dash_unit)
+    print(f"stop with: systemctl --user disable --now {' '.join(enabled)}")
     return 0
