@@ -2477,7 +2477,7 @@ class OperatorApprovalTest(unittest.TestCase):
         self.assertEqual(candidate["operator_approval"]["reason"], "no second reviewer during testing")
 
     def test_cli_records_only_merged_revisions_with_a_reason(self) -> None:
-        merged = {"state": "MERGED", "headRefOid": self.commit, "mergeCommit": {"oid": "e" * 40}}
+        merged = {"state": "MERGED", "headRefName": "agent/30", "headRefOid": self.commit, "mergeCommit": {"oid": "e" * 40}}
         with mock.patch.object(dispatch, "gh_json", return_value=merged), \
              mock.patch.dict(os.environ, {"USER": "alice"}):
             self.assertEqual(apply.main(["--authorize-revision", "30"]), 1)  # no reason
@@ -2546,3 +2546,179 @@ class BaselineAfterSuccessTest(unittest.TestCase):
     def test_direct_merge_after_the_baseline_is_still_flagged(self) -> None:
         later = self.commit("c.tf")
         self.assertEqual(self.unauthorized(baseline=self.direct), [later])
+
+
+class OperatorBranchPRTest(unittest.TestCase):
+    """A PR merged from an operator branch is adopted or deployed by an approval of its exact head."""
+
+    def setUp(self) -> None:
+        from tests.test_factory import git
+
+        self.git = git
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = make_repo(Path(self.tmp.name), '[apply]\nenabled = true\ndir = "terraform"\n')
+        self.cfg = config.load(self.repo)
+        dispatch.configure(self.cfg)
+        apply.configure(self.cfg)
+        load = mock.patch.object(config, "load", return_value=self.cfg)
+        load.start()
+        self.addCleanup(load.stop)
+        self.cfg.factory.mkdir(parents=True, exist_ok=True)
+        (self.repo / "terraform").mkdir()
+        self.deployed = self.commit("a.tf")
+        deploy.record_deploy_run(deploy.DeployRun(
+            run_id=f"deploy-default-{self.deployed[:8]}-1", target="default", commit=self.deployed,
+            ticket=1, attempt=1, status=deploy.DeployStatus.SUCCEEDED, started_at="2026-10-22T01:00:00Z",
+        ), events_path=dispatch.EVENTS)
+        self.merged = self.commit("b.tf")
+        self.pr = {"pr": 40, "ticket": 40, "commit": self.merged, "head_commit": "d" * 40, "operator": True}
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def commit(self, name: str, directory: str = "terraform") -> str:
+        (self.repo / directory).mkdir(exist_ok=True)
+        (self.repo / directory / name).write_text(f"# {name}\n")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-q", "-m", name)
+        return self.git(self.repo, "rev-parse", "HEAD")
+
+    def select(self, *prs: dict):
+        return deploy.select_candidates_for_target(
+            target_name="default", target_dir="terraform", all_prs=[dict(pr) for pr in (prs or (self.pr,))],
+            root=self.repo, events_path=dispatch.EVENTS, fetch_evidence_fn=lambda pr: None)
+
+    def approve(self, mode: str = "deploy", head: str | None = None) -> None:
+        deploy.record_operator_approval(40, head or self.pr["head_commit"], self.merged, "alice", "reviewed",
+                                        events_path=dispatch.EVENTS, mode=mode)
+
+    def test_unapproved_operator_pr_stays_a_direct_merge(self) -> None:
+        self.assertEqual(self.select(), ([], [self.merged]))
+        self.approve(head="f" * 40)
+        self.assertEqual(self.select(), ([], [self.merged]), "an approval of another head does not count")
+
+    def test_deploy_approval_makes_it_a_candidate(self) -> None:
+        self.approve()
+        (candidate,), unauthorized = self.select()
+        self.assertEqual(unauthorized, [])
+        self.assertEqual((candidate["pr"], candidate["ticket"]), (40, 40))
+        self.assertNotIn("unauthorized_reason", candidate)
+        self.assertEqual(candidate["operator_approval"]["operator"], "alice")
+
+    def test_adopt_approval_authorizes_without_deploying(self) -> None:
+        self.approve(mode="adopt")
+        self.assertEqual(self.select(), ([], []))
+
+    def test_deployed_operator_pr_is_not_selected_again(self) -> None:
+        self.approve()
+        deploy.record_deploy_run(deploy.DeployRun(
+            run_id=f"deploy-default-{self.merged[:8]}-1", target="default", commit=self.merged,
+            ticket=40, attempt=1, status=deploy.DeployStatus.SUCCEEDED, started_at="2026-10-22T02:00:00Z", pr=40,
+        ), events_path=dispatch.EVENTS)
+        self.assertEqual(self.select(), ([], []))
+
+    def test_agent_and_operator_prs_deploy_in_commit_order(self) -> None:
+        self.approve()
+        agent_commit = self.commit("c.tf")
+        agent = {"pr": 41, "ticket": 9, "commit": agent_commit, "head_commit": agent_commit,
+                 "reviewDecision": "APPROVED", "latestReviews": [
+                     {"state": "APPROVED", "authorAssociation": "OWNER", "author": {"login": "bob"},
+                      "commit": {"oid": agent_commit}}]}
+        candidates, unauthorized = self.select(agent, self.pr)
+        self.assertEqual(unauthorized, [])
+        self.assertEqual([c["pr"] for c in candidates], [40, 41])
+
+    def test_pass_points_an_operator_merge_at_authorize_revision(self) -> None:
+        logged: list[str] = []
+        with mock.patch.object(dispatch, "run"), \
+             mock.patch.object(apply, "fetch_all_merged_prs", return_value=[dict(self.pr)]) as fetch, \
+             mock.patch.object(apply, "log", side_effect=logged.append), \
+             mock.patch.object(apply, "apply_one") as apply_one:
+            self.assertEqual(apply.main([]), 1)
+        fetch.assert_called_once_with(include_operator=True)
+        apply_one.assert_not_called()
+        self.assertTrue(any("merged by PR #40" in line and "--authorize-revision 40" in line and "--adopt" in line
+                            for line in logged), logged)
+
+    def gh_pr(self, branch: str = "ops/rotate", merge: str | None = None) -> dict:
+        return {"state": "MERGED", "headRefName": branch, "headRefOid": "d" * 40,
+                "mergeCommit": {"oid": merge or self.merged}}
+
+    def authorize(self, view: dict, *extra: str) -> tuple[int, list[str]]:
+        logged: list[str] = []
+        with mock.patch.object(dispatch, "gh_json", return_value=view), \
+             mock.patch.object(apply, "log", side_effect=logged.append), \
+             mock.patch.dict(os.environ, {"USER": "alice"}):
+            code = apply.main(["--authorize-revision", "40", "--reason", "reviewed", *extra])
+        return code, logged
+
+    def recorded(self) -> dict:
+        return deploy.operator_approvals(lifecycle.read_events(dispatch.EVENTS)).get(40, {})
+
+    def test_cli_adopts_an_operator_pr_on_the_targets_it_touches(self) -> None:
+        code, logged = self.authorize(self.gh_pr(), "--adopt")
+        self.assertEqual(code, 0, logged)
+        self.assertEqual(self.recorded()["d" * 40]["mode"], "adopt")
+        self.assertIn("adopted as already live on `default`", logged[-1])
+        self.assertEqual(self.select(), ([], []))
+
+    def test_cli_defaults_to_deploying_an_operator_pr(self) -> None:
+        code, logged = self.authorize(self.gh_pr())
+        self.assertEqual(code, 0, logged)
+        self.assertEqual(self.recorded()["d" * 40]["mode"], "deploy")
+        self.assertIn("the next apply pass deploys it on `default`", logged[-1])
+
+    def test_cli_refuses_an_approval_that_would_do_nothing(self) -> None:
+        elsewhere = self.commit("README.md", directory="docs")
+        code, logged = self.authorize(self.gh_pr(merge=elsewhere))
+        self.assertEqual(code, 1)
+        self.assertIn("touches no enabled deploy target", logged[-1])
+
+        code, logged = self.authorize(self.gh_pr(branch="agent/9"), "--adopt")
+        self.assertEqual(code, 1)
+        self.assertIn("--adopt applies to PRs merged from an operator branch", logged[-1])
+        self.assertEqual(self.recorded(), {})
+
+        logged = []
+        with mock.patch.object(apply, "log", side_effect=logged.append):
+            self.assertEqual(apply.main(["--adopt"]), 1)
+        self.assertIn("--adopt needs --authorize-revision", logged[-1])
+
+    def test_fetch_marks_operator_prs_only_when_asked(self) -> None:
+        nodes = [{"number": 40, "headRefName": "ops/rotate", "headRefOid": "d" * 40, "mergeCommit": {"oid": "m40"}},
+                 {"number": 41, "headRefName": "agent/9", "headRefOid": "e" * 40, "mergeCommit": {"oid": "m41"}}]
+        page = {"data": {"repository": {"pullRequests": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}
+        with mock.patch.object(dispatch, "gh_json", return_value=page):
+            self.assertEqual([pr["pr"] for pr in apply.fetch_all_merged_prs()], [41])
+            rows = apply.fetch_all_merged_prs(include_operator=True)
+        self.assertEqual([(pr["pr"], pr["ticket"], pr.get("operator", False)) for pr in rows],
+                         [(40, 40, True), (41, 9, False)])
+
+    def test_operator_pr_escalation_comments_once(self) -> None:
+        with mock.patch.object(dispatch, "run") as run, \
+             mock.patch.object(apply, "post_comment") as post, \
+             mock.patch.object(apply.incidents, "sync_failed", return_value=[]):
+            apply.apply_escalate(40, 40, "boom", commit=self.merged)
+        self.assertEqual([c.args[0][:3] for c in run.call_args_list if c.args[0][0] == "gh"],
+                         [["gh", "issue", "comment"]])
+        post.assert_not_called()
+
+
+class SameThreadPublicationTest(unittest.TestCase):
+    """A run whose ticket is its own PR posts its result once."""
+
+    def test_issue_sink_is_skipped_when_it_is_the_pr(self) -> None:
+        from factory import artifacts
+
+        with tempfile.TemporaryDirectory() as d:
+            factory_dir = Path(d)
+            run = deploy.DeployRun(run_id="deploy-default-abcdef12-1", target="default", commit="abcdef12" * 5,
+                                   ticket=40, attempt=1, status=deploy.DeployStatus.SUCCEEDED,
+                                   started_at="2026-10-22T01:00:00Z", completed_at="2026-10-22T01:01:00Z", pr=40)
+            artifacts.write_run_artifacts(factory_dir, run, headline="`terraform apply`")
+            posted: list[tuple[str, int]] = []
+            result = artifacts.publish(factory_dir, "default", run.run_id,
+                                       lambda sink, number, body: (posted.append((sink, number)) or True, ""))
+        self.assertEqual(result, {"issue": "skipped", "pr": "ok"})
+        self.assertEqual(posted, [("pr", 40)])

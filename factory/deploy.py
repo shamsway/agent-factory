@@ -432,13 +432,19 @@ def record_unauthorized_event(
 OPERATOR_APPROVAL_EVENT = "deploy_operator_approval"
 
 
+APPROVAL_MODES = ("deploy", "adopt")
+
+
 def record_operator_approval(pr: int, head_commit: str, merge_commit: str, operator: str, reason: str,
-                             events_path: Path | None = None) -> dict:
+                             events_path: Path | None = None, mode: str = "deploy") -> dict:
     """Record a host operator's approval of one merged PR revision.
 
     This stands in for the second human's GitHub review when no other reviewer
     is available. It is bound to the exact merged head, so a later push to the
-    same PR is not covered."""
+    same PR is not covered. For a PR merged from an operator branch, `adopt`
+    authorizes a change that is already live without deploying it."""
+    if mode not in APPROVAL_MODES:
+        raise ValueError(f"unknown approval mode {mode!r}")
     row = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "event": OPERATOR_APPROVAL_EVENT,
@@ -447,6 +453,7 @@ def record_operator_approval(pr: int, head_commit: str, merge_commit: str, opera
         "merge_commit": merge_commit,
         "operator": operator,
         "reason": reason,
+        "mode": mode,
     }
     if events_path is not None:
         events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -835,6 +842,13 @@ def select_candidates_for_target(
 
     check_touches = touches_fn or (lambda c: touches_target_dir(c, target_dir, root))
 
+    def approval_for(pr: dict) -> dict | None:
+        nonlocal approvals
+        if approvals is None:
+            approvals = operator_approvals(lifecycle.read_events(events_path)) if events_path else {}
+        head = str(pr.get("head_commit") or pr.get("headRefOid") or "")
+        return approvals.get(int(pr["pr"]), {}).get(head)
+
     # Identify PRs touching this target and not terminal or before baseline
     candidates = []
     authorized_commits = set()
@@ -842,9 +856,16 @@ def select_candidates_for_target(
         commit = pr.get("commit", "")
         pr_num = int(pr["pr"])
         ticket_num = int(pr.get("ticket") or pr["pr"])
+        # A PR merged from an operator branch counts only once the operator has
+        # approved its exact head: `adopt` authorizes it without deploying it.
+        approval = approval_for(pr) if pr.get("operator") else None
+        if pr.get("operator") and not approval:
+            continue
         authorized_commits.add(commit)
         if head := pr.get("head_commit"):
             authorized_commits.add(head)
+        if approval and approval.get("mode") == "adopt":
+            continue
 
         if not check_touches(commit):
             continue
@@ -853,7 +874,10 @@ def select_candidates_for_target(
         if is_before_baseline(pr_num, commit, baseline, root):
             continue
 
-        candidates.append(dict(pr))
+        row = dict(pr)
+        if approval:
+            row["operator_approval"] = {key: approval.get(key) for key in ("operator", "reason", "at")}
+        candidates.append(row)
 
     # Detect unauthorized direct merges on main, from the later of the last
     # successful deploy and the adoption baseline: moving the baseline past a
@@ -880,6 +904,8 @@ def select_candidates_for_target(
 
     # Verify revision-bound authorization (enrich evidence if missing)
     for c in candidates:
+        if c.get("operator"):
+            continue
         if not c.get("reviewDecision") or not c.get("latestReviews") or not (c.get("head_commit") or c.get("headRefOid")):
             if fetch_evidence_fn is not None:
                 evidence = fetch_evidence_fn(c["pr"])
@@ -896,11 +922,7 @@ def select_candidates_for_target(
 
         ok, reason = verify_revision_authorization(c, c.get("commit", ""))
         if not ok:
-            if approvals is None:
-                approvals = operator_approvals(lifecycle.read_events(events_path)) if events_path else {}
-            head = str(c.get("head_commit") or c.get("headRefOid") or "")
-            approval = approvals.get(int(c["pr"]), {}).get(head)
-            if approval:
+            if approval := approval_for(c):
                 c["operator_approval"] = {key: approval.get(key) for key in ("operator", "reason", "at")}
             else:
                 c["unauthorized_reason"] = reason

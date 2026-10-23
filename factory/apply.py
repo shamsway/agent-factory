@@ -108,12 +108,15 @@ def fetch_pr_review_evidence(pr_number: int, repo: str = "") -> dict | None:
         return None
 
 
-def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict]:
+def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10, include_operator: bool = False) -> list[dict]:
     """Discover merged PRs with pagination up to max_pages.
 
     Uses a consistent paginated query for merged PRs, stopping only at the actual
     raw query boundary (when raw returned count < page_size or no next page),
-    never based on the filtered count of matching factory PRs.
+    never based on the filtered count of matching factory PRs. With
+    `include_operator`, PRs from other branches are returned too, marked
+    `operator` and keyed by their own number; selection ignores them until the
+    operator approves their exact head.
     """
     all_prs: list[dict] = []
     seen_prs: set[int] = set()
@@ -193,7 +196,7 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
         for pr in raw_items:
             m = re.fullmatch(r"agent/(\d+)", pr.get("headRefName", ""))
             merge_commit = pr.get("mergeCommit")
-            if not m or not merge_commit:
+            if not merge_commit or not (m or include_operator):
                 continue
             merge_oid = (
                 merge_commit["oid"]
@@ -207,9 +210,11 @@ def fetch_all_merged_prs(page_size: int = 100, max_pages: int = 10) -> list[dict
 
             row: dict[str, Any] = {
                 "pr": pr_num,
-                "ticket": int(m.group(1)),
+                "ticket": int(m.group(1)) if m else pr_num,
                 "commit": merge_oid,
             }
+            if not m:
+                row["operator"] = True
             if pr.get("mergedAt"):
                 row["queued_at"] = pr["mergedAt"]
             if pr.get("headRefOid"):
@@ -337,7 +342,7 @@ def apply_escalate(
             ],
             check=False,
         )
-        if pr is not None:
+        if pr is not None and pr != n:
             post_comment("pr", pr, body)
     except Exception as exc:  # noqa: BLE001 - notifications are best-effort after escalation is recorded
         log(f"#{n}: notification failed: {exc}")
@@ -594,13 +599,25 @@ def apply_one(ticket: dict, dry_run: bool, target: str = "default", adapter: dep
         adapter.cleanup(ctx)
 
 
-def authorize_revision(pr: int, reason: str | None, dry_run: bool) -> int:
-    """Record an operator approval for one merged PR, bound to its merged head."""
+def target_dirs_touched(commit: str) -> list[str]:
+    """Names of the enabled deploy targets whose directory `commit` changes."""
+    targets = cfg.targets or {
+        "default": config.DeployTarget(name="default", dir=cfg.apply_dir, enabled=cfg.apply_enabled)
+    }
+    return [name for name, target in targets.items() if target.enabled and touches_target_dir(commit, target.dir)]
+
+
+def authorize_revision(pr: int, reason: str | None, dry_run: bool, adopt: bool = False) -> int:
+    """Record an operator approval for one merged PR, bound to its merged head.
+
+    A PR merged from an operator branch (not `agent/<n>`) is deployed by the next
+    pass on each target it touches, or with `adopt` authorized as already live
+    and never deployed."""
     if not (reason or "").strip():
         log("error: --authorize-revision needs --reason")
         return 1
     try:
-        args = ["pr", "view", str(pr), "--json", "state,headRefOid,mergeCommit"]
+        args = ["pr", "view", str(pr), "--json", "state,headRefName,headRefOid,mergeCommit"]
         if cfg.repo:
             args[3:3] = ["--repo", cfg.repo]
         data = dispatch.gh_json(args)
@@ -612,12 +629,28 @@ def authorize_revision(pr: int, reason: str | None, dry_run: bool) -> int:
     if (data or {}).get("state") != "MERGED" or not re.fullmatch(r"[0-9a-f]{40}", head):
         log(f"error: PR #{pr} is not merged with a known head; only a merged revision can be approved")
         return 1
+    is_agent = bool(re.fullmatch(r"agent/\d+", str((data or {}).get("headRefName") or "")))
+    if adopt and is_agent:
+        log(f"error: --adopt applies to PRs merged from an operator branch; PR #{pr} is a Factory PR")
+        return 1
+    mode = "adopt" if adopt else "deploy"
+    if is_agent:
+        effect = "the next apply pass may deploy it"
+    else:
+        dispatch.run(["git", "fetch", "origin", cfg.main], cwd=cfg.root, check=False)
+        touched = target_dirs_touched(merge) if re.fullmatch(r"[0-9a-f]{40}", merge) else []
+        if not touched:
+            log(f"error: PR #{pr} touches no enabled deploy target; there is nothing to approve")
+            return 1
+        names = ", ".join(f"`{name}`" for name in touched)
+        effect = (f"adopted as already live on {names}; it will not be deployed" if adopt
+                  else f"the next apply pass deploys it on {names}")
     operator = os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
     if dry_run:
-        log(f"would record operator approval of PR #{pr} head {head[:12]} by {operator}")
+        log(f"would record operator approval ({mode}) of PR #{pr} head {head[:12]} by {operator}")
         return 0
-    deploy.record_operator_approval(pr, head, merge, operator, reason.strip(), events_path=dispatch.EVENTS)
-    log(f"recorded operator approval of PR #{pr} head {head[:12]} by {operator}; the next apply pass may deploy it")
+    deploy.record_operator_approval(pr, head, merge, operator, reason.strip(), events_path=dispatch.EVENTS, mode=mode)
+    log(f"recorded operator approval ({mode}) of PR #{pr} head {head[:12]} by {operator}; {effect}")
     return 0
 
 
@@ -647,7 +680,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--target", help="optional target name to limit apply or reconciliation")
     parser.add_argument("--authorize-revision", metavar="PR", type=int,
                         help="record the host operator's approval of a merged PR's exact head, for when no "
-                             "second reviewer is available; the next pass deploys it if it is a candidate")
+                             "second reviewer is available; the next pass deploys it if it is a candidate. "
+                             "Also covers a PR merged from an operator branch, which apply otherwise "
+                             "reports as an unauthorized direct merge")
+    parser.add_argument("--adopt", action="store_true",
+                        help="with --authorize-revision on an operator-branch PR: the change is already "
+                             "live; authorize it without deploying it")
     parser.add_argument("--reason", help="why the operator approves (required with --authorize-revision)")
     args = parser.parse_args(argv)
     configure(config.load())
@@ -656,7 +694,10 @@ def main(argv: list[str]) -> int:
         if (identity := verify_identity()) is None:
             return 1
         with github_identity.pinned(identity):
-            return authorize_revision(args.authorize_revision, args.reason, args.dry_run)
+            return authorize_revision(args.authorize_revision, args.reason, args.dry_run, adopt=args.adopt)
+    if args.adopt:
+        log("error: --adopt needs --authorize-revision")
+        return 1
 
     if args.acknowledge_failure:
         target_name = args.target or "default"
@@ -797,7 +838,11 @@ def run_pass(args: argparse.Namespace) -> int:
         if not args.dry_run:
             for rid, sinks in artifacts.retry_pending(cfg.factory, post_comment).items():
                 log(f"retried publication for {rid}: {sinks}")
-        all_prs = fetch_all_merged_prs()
+        all_prs = fetch_all_merged_prs(include_operator=True)
+        merged_by = {str(pr.get(key)): pr for pr in all_prs if pr.get("operator")
+                     for key in ("commit", "head_commit") if pr.get(key)}
+        # One journal read for the pass: every target checks operator PRs against it.
+        approvals = deploy.operator_approvals(lifecycle.read_events(dispatch.EVENTS)) if merged_by else None
 
         targets = cfg.targets or {
             "default": config.DeployTarget(name="default", dir=cfg.apply_dir, enabled=cfg.apply_enabled)
@@ -861,12 +906,16 @@ def run_pass(args: argparse.Namespace) -> int:
                     touches_fn=check_touch,
                     supersession=mode,
                     repo=cfg.repo,
+                    approvals=approvals,
                 )
 
                 if unauthorized:
                     for unauth_commit in unauthorized:
                         msg = f"unauthorized direct merge detected for target `{target_name}`: commit {unauth_commit[:8]} touches {target.dir} without an approved PR"
                         log(msg)
+                        if source := merged_by.get(unauth_commit):
+                            log(f"  merged by PR #{source['pr']}; once reviewed, run `factory apply --authorize-revision "
+                                f"{source['pr']} --reason \"...\"` to deploy it, adding --adopt if it is already live")
                         if not args.dry_run:
                             deploy.record_unauthorized_event(unauth_commit, target_name, msg, events_path=dispatch.EVENTS)
                     has_errors = True
