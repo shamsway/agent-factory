@@ -2492,3 +2492,57 @@ class OperatorApprovalTest(unittest.TestCase):
         with mock.patch.object(dispatch, "gh_json", side_effect=RuntimeError("gh down")):
             self.assertEqual(apply.main(["--authorize-revision", "32", "--reason", "r"]), 1)
         self.assertEqual(set(deploy.operator_approvals(lifecycle.read_events(dispatch.EVENTS))), {30})
+
+
+class BaselineAfterSuccessTest(unittest.TestCase):
+    """The adoption baseline adopts reviewed direct merges on a target that has deployed before."""
+
+    def setUp(self) -> None:
+        from tests.test_factory import git
+
+        self.git = git
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = make_repo(Path(self.tmp.name), '[apply]\nenabled = true\ndir = "terraform"\n')
+        self.events = Path(self.tmp.name) / "events.jsonl"
+        (self.repo / "terraform").mkdir()
+        self.deployed = self.commit("a.tf")
+        deploy.record_deploy_run(deploy.DeployRun(
+            run_id=f"deploy-default-{self.deployed[:8]}-1", target="default", commit=self.deployed,
+            ticket=1, attempt=1, status=deploy.DeployStatus.SUCCEEDED, started_at="2026-10-22T01:00:00Z",
+        ), events_path=self.events)
+        self.direct = self.commit("b.tf")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def commit(self, name: str) -> str:
+        (self.repo / "terraform" / name).write_text(f"# {name}\n")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-q", "-m", name)
+        return self.git(self.repo, "rev-parse", "HEAD")
+
+    def unauthorized(self, baseline: str | None = None, all_prs: list[dict] | None = None) -> list[str]:
+        _, unauthorized = deploy.select_candidates_for_target(
+            target_name="default", target_dir="terraform", all_prs=all_prs or [], root=self.repo,
+            baseline=baseline, events_path=self.events)
+        return unauthorized
+
+    def test_direct_merge_after_success_is_flagged_without_a_baseline(self) -> None:
+        self.assertEqual(self.unauthorized(), [self.direct])
+
+    def test_baseline_at_the_direct_merge_adopts_it(self) -> None:
+        self.assertEqual(self.unauthorized(baseline=self.direct), [])
+        self.assertEqual(self.unauthorized(baseline=self.direct[:8]), [])
+
+    def test_pr_number_baseline_resolves_to_its_merge_commit(self) -> None:
+        merged = {"pr": 7, "ticket": 7, "commit": self.commit("c.tf")}
+        self.assertEqual(self.unauthorized(all_prs=[merged]), [self.direct])
+        self.assertEqual(self.unauthorized(baseline="7", all_prs=[merged]), [])
+
+    def test_baseline_older_than_the_last_success_changes_nothing(self) -> None:
+        root = self.git(self.repo, "rev-list", "--max-parents=0", "HEAD")
+        self.assertEqual(self.unauthorized(baseline=root), [self.direct])
+
+    def test_direct_merge_after_the_baseline_is_still_flagged(self) -> None:
+        later = self.commit("c.tf")
+        self.assertEqual(self.unauthorized(baseline=self.direct), [later])
