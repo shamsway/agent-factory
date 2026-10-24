@@ -55,6 +55,7 @@ SYNC_LOG: Path
 EVENTS: Path
 MAX_ACTIVE: int
 MAX_ATTEMPTS: int
+_PENDING_REVIEWS: dict[int, dict] = {}
 
 
 def configure(c: Config) -> None:
@@ -71,7 +72,12 @@ def configure(c: Config) -> None:
     EVENTS = FACTORY / "events.jsonl"
     MAX_ACTIVE = cfg.max_active
     MAX_ATTEMPTS = cfg.max_attempts
+    _PENDING_REVIEWS.clear()
 
+
+# `factory learn` branches: lessons, CURATE and the revert a failed promotion opens.
+# `promote_pass` merges them; the ticket merge stage's `agent/(\d+)` never matches.
+LESSONS_BRANCH = re.compile(r"agent/(lessons|curate|revert-lessons)-")
 
 STANDING_INSTRUCTIONS = """
 ## Instructions
@@ -158,12 +164,17 @@ def run(
 def _run(cmd, cwd, check, stdout, stderr, env) -> subprocess.CompletedProcess:
     execution = lifecycle.current()
     if execution is None:
-        return subprocess.run(cmd, cwd=cwd, check=check, stdout=stdout, stderr=stderr, text=True, env=env)
+        return subprocess.run(
+            cmd, cwd=cwd, check=check, stdout=stdout, stderr=stderr,
+            encoding="utf-8", errors="replace", env=env,
+        )
     launch = execution.env()
     if env is not None:
         launch = {**env, lifecycle.CONTEXT_ENV: launch[lifecycle.CONTEXT_ENV]}
-    with subprocess.Popen(cmd, cwd=cwd, stdout=stdout, stderr=stderr,
-                          text=True, env=launch) as proc:
+    with subprocess.Popen(
+        cmd, cwd=cwd, stdout=stdout, stderr=stderr,
+        encoding="utf-8", errors="replace", env=launch,
+    ) as proc:
         try:
             execution.child(proc.pid)
             out, err = proc.communicate()
@@ -458,16 +469,18 @@ def frontier(label: str = LABEL_AGENT) -> list[dict]:
 
 
 def review_intake_pass(dry_run: bool) -> None:
-    """Review opted-in PR revisions without running the issue/merge pipeline."""
+    """Review opted-in PR revisions, and `factory learn` PRs, without running the issue/merge pipeline."""
     prs = gh_json([
         "pr", "list", "--repo", REPO, "--state", "open", "--limit", "1000",
-        "--json", "number,state,isDraft,headRefOid,baseRefOid,labels,reviewRequests",
+        "--json", "number,state,isDraft,isCrossRepository,headRefName,headRefOid,baseRefOid,labels,reviewRequests",
     ])
     login = None
     for pr in prs:
         if pr["state"] != "OPEN" or pr["isDraft"]:
             continue
-        opted_in = any(label["name"] == LABEL_REVIEW for label in pr["labels"])
+        # Branch-name admission is for the dispatcher's own chore PRs; a fork can name its branch anything.
+        opted_in = any(label["name"] == LABEL_REVIEW for label in pr["labels"]) or (
+            not pr.get("isCrossRepository") and bool(LESSONS_BRANCH.match(pr.get("headRefName") or "")))
         requests = pr["reviewRequests"]
         if not opted_in and requests:
             if login is None:
@@ -530,7 +543,7 @@ def review_intake_pass(dry_run: bool) -> None:
             log(f"PR #{n}: {'would record' if dry_run else 'recording'} review intake at {head}")
             if not dry_run:
                 record("review-intake", pr=n, head=head)
-                review_external_pr(n, pr["baseRefOid"], head)
+                review_external_pr(n, pr["baseRefOid"], head, pr.get("headRefName") or "")
                 review_readiness(n, head, lifecycle.read_events(EVENTS))
 
 
@@ -577,8 +590,10 @@ def review_readiness(n: int, head: str, history: list[dict]) -> None:
            review_head=review.get("head"), checks=rows if valid else [])
 
 
-def review_external_pr(n: int, base: str, head: str) -> None:
-    """Publish findings against the immutable revision admitted by intake."""
+def review_external_pr(n: int, base: str, head: str, branch: str = "") -> None:
+    """Publish findings against the immutable revision admitted by intake. `factory learn` PRs are
+    the dispatcher's own, and GitHub rejects self-approval: their findings post as a COMMENT review
+    while the journal keeps the verdict `promote_pass` reads."""
     with lifecycle.scope(EVENTS, "review") as execution:
         clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         try:
@@ -634,7 +649,7 @@ def review_external_pr(n: int, base: str, head: str) -> None:
         event = "APPROVE" if lines[-1] == "VERDICT: APPROVE" else "REQUEST_CHANGES"
         run([
             "gh", "api", "--method", "POST", f"repos/{REPO}/pulls/{n}/reviews",
-            "-f", f"commit_id={head}", "-f", f"event={event}",
+            "-f", f"commit_id={head}", "-f", f"event={'COMMENT' if LESSONS_BRANCH.match(branch) else event}",
             "-f", f"body={findings}",
         ])
         record("review-result", pr=n, head=head, verdict=event, findings=findings)
@@ -833,6 +848,180 @@ def _decision_parent(rows: list[dict], ticket: int) -> int | None:
                  and type(row.get("parent")) is int), None)
 
 
+def _latest_decision_id(n: int, stages: set[str]) -> str | None:
+    return next((
+        row["decision_id"] for row in reversed(lifecycle.read_events(EVENTS))
+        if row.get("event") == "decision" and row.get("ticket") == n
+        and row.get("stage") in stages and isinstance(row.get("decision_id"), str)
+    ), None)
+
+
+def _record_gate_decision(
+    n: int, passed: bool, report: str, head: str, report_path: str, seconds: float,
+) -> str:
+    from factory import trace
+
+    failures = re.findall(r"(?m)^- ([^:\n]+): FAIL(?: \(([^\n]*)\))?", report)
+    options = ([{"option": "pass", "eligible": passed,
+                 "reason": "every configured check passed" if passed else "one or more checks failed"}]
+               if passed else [])
+    options += [
+        {"option": name, "eligible": True, "reason": detail or f"{name} failed"}
+        for name, detail in failures
+    ]
+    chosen = "pass" if passed else failures[0][0] if failures else "gate failed"
+    cause = _latest_decision_id(n, {"claim", "worker_select", "review", "manager"})
+    payload = trace.decision(
+        ticket=n,
+        stage="gate",
+        inputs=[
+            {"kind": "head", "ref": f"https://github.com/{REPO}/commit/{head}",
+             "summary": f"gated head {head}"},
+            {"kind": "gate_log", "ref": report_path, "summary": "deterministic gate report"},
+        ],
+        options=options,
+        chosen=chosen,
+        rationale="gate passed" if passed else f"gate failed: {', '.join(name for name, _ in failures) or 'unknown check'}",
+        causes=[{"decision_id": cause, "relation": "follows"}] if cause else [],
+        cost={"seconds": seconds},
+        actor=_decision_actor("deterministic", "dispatch.run_gate"),
+    )
+    record("decision", **payload)
+    return payload["decision_id"]
+
+
+def _required_fixes(findings: str, review_ref: str) -> list[dict]:
+    fixes = []
+    sections = re.finditer(
+        r"(?ims)^#{1,6}\s+Required fixes[^\r\n]*\r?\n(.*?)(?=^#{1,6}\s|\Z)",
+        findings,
+    )
+    for section in sections:
+        for line in section[1].splitlines():
+            summary = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+            if not summary or summary.rstrip(".").casefold() == "none":
+                continue
+            location = re.search(r"`?([A-Za-z0-9_.\-/]+:\d+)`?", summary)
+            fixes.append({
+                "kind": "finding",
+                "ref": location.group(1) if location else review_ref,
+                "summary": summary,
+            })
+    return fixes
+
+
+def _reviewer_model(usage: dict | None) -> str | None:
+    if usage and isinstance(usage.get("model"), str):
+        return usage["model"]
+    for index, value in enumerate(cfg.reviewer):
+        if value == "--model" and index + 1 < len(cfg.reviewer):
+            return cfg.reviewer[index + 1]
+        if value.startswith("--model="):
+            return value.split("=", 1)[1]
+    return None
+
+
+def _record_review_decision(
+    n: int, verdict: str, findings: str, head: str, parsed: bool, accepted: bool,
+    usage: dict | None, seconds: float, comment_url: str | None = None,
+) -> str:
+    from factory import trace
+
+    pr = next((
+        row.get("pr") for row in reversed(lifecycle.read_events(EVENTS))
+        if row.get("ticket") == n and row.get("event") == "pr-opened" and type(row.get("pr")) is int
+    ), None)
+    chosen = verdict if parsed and accepted else "unparseable verdict"
+    reason = "selected by the reviewer" if parsed and accepted else "review evidence was rejected and failed closed to REVISE"
+    cause = _latest_decision_id(n, {"gate"})
+    review_ref = comment_url or (f"https://github.com/{REPO}/pull/{pr}" if pr else f".factory/review-{n}.md")
+    inputs = [
+        {"kind": "head", "ref": f"https://github.com/{REPO}/commit/{head}", "summary": f"reviewed head {head}"},
+        {"kind": "review_comment",
+         "ref": review_ref,
+         "summary": "published review comment" if comment_url else "review comment target"},
+        *_required_fixes(findings, review_ref),
+    ]
+    payload = trace.decision(
+        ticket=n,
+        stage="review",
+        pr=pr,
+        inputs=inputs,
+        options=[
+            {"option": "APPROVE", "eligible": chosen == "APPROVE",
+             "reason": reason if chosen == "APPROVE" else "required fixes remain or evidence was invalid"},
+            {"option": "REVISE", "eligible": chosen == "REVISE",
+             "reason": reason if chosen == "REVISE" else "no accepted REVISE verdict"},
+            {"option": "unparseable verdict", "eligible": chosen == "unparseable verdict",
+             "reason": reason if chosen == "unparseable verdict" else "the verdict parsed"},
+        ],
+        chosen=chosen,
+        rationale=reason,
+        causes=[{"decision_id": cause, "relation": "follows"}] if cause else [],
+        cost={**(usage or {}), "seconds": seconds},
+        actor=_decision_actor("model", "dispatch.review", model=_reviewer_model(usage)),
+    )
+    record("decision", **payload)
+    return payload["decision_id"]
+
+
+def record_merge_decision(
+    n: int, pr: int, chosen: str, rationale: str, head: str | None,
+    approval_head: str | None, checks: list[dict], merge_sha: str | None = None,
+) -> str:
+    from factory import trace
+
+    reasons = {
+        "merge now": (
+            rationale if chosen in {"merge now", "refresh branch"}
+            else "head, approval, or CI is not currently mergeable"
+        ),
+        "refresh branch": rationale if chosen == "refresh branch" else "head contains current main",
+        "remove stale factory-approved label": (
+            rationale if chosen == "remove stale factory-approved label" else "approval remains current"
+        ),
+        "ci-rerun": rationale if chosen == "ci-rerun" else "CI rerun is not required",
+        "ci-infra": rationale if chosen == "ci-infra" else "CI infrastructure is available",
+        "conflict-requeue": rationale if chosen == "conflict-requeue" else "no refresh conflict",
+    }
+    inputs = [
+        {"kind": "head", "ref": f"https://github.com/{REPO}/commit/{head or 'unknown'}",
+         "summary": f"PR head {head or 'unknown'}"},
+        {"kind": "approval_head", "ref": ".factory/events.jsonl",
+         "summary": f"approval head {approval_head or 'missing'}"},
+    ]
+    if merge_sha:
+        inputs.append({
+            "kind": "merge_sha",
+            "ref": f"https://github.com/{REPO}/commit/{merge_sha}",
+            "summary": f"merge SHA {merge_sha}",
+        })
+    inputs += [
+        {"kind": "ci_run",
+         "ref": str(check.get("link") or check.get("run") or check.get("id") or ".factory/events.jsonl"),
+         "summary": f"{check.get('name', 'check')}: {check.get('bucket', 'unknown')}"}
+        for check in checks[:14]
+    ]
+    cause = _latest_decision_id(n, {"manager", "review", "gate"})
+    payload = trace.decision(
+        ticket=n,
+        stage="merge",
+        pr=pr,
+        inputs=inputs,
+        options=[
+            {"option": option, "eligible": option == chosen, "reason": reason}
+            for option, reason in reasons.items()
+        ],
+        chosen=chosen,
+        rationale=rationale,
+        causes=[{"decision_id": cause, "relation": "follows"}] if cause else [],
+        cost=None,
+        actor=_decision_actor("deterministic", "dispatch.merge_pass_locked"),
+    )
+    record("decision", **payload)
+    return payload["decision_id"]
+
+
 def record_binding_decision(n: int, body: str, linked: int | None, chosen: str, rationale: str) -> str:
     from factory import trace
 
@@ -922,11 +1111,14 @@ def _worker_options(labels: set[str], chosen: str, selected_worker: str | None) 
 
 def record_worker_selection(
     n: int, labels: set[str], *, selected_worker: str | None = None, cause: str | None = None,
+    relation: str = "follows",
 ) -> str:
     from factory import trace
 
+    if cause is None and selected_worker is not None:
+        cause = _latest_decision_id(n, {"manager"})
     chosen = cfg.worker_key({selected_worker} if selected_worker else labels)
-    causes = [{"decision_id": cause, "relation": "follows"}] if cause else []
+    causes = [{"decision_id": cause, "relation": relation}] if cause else []
     version = cfg.worker_version.get(chosen)
     payload = trace.decision(
         ticket=n,
@@ -949,12 +1141,19 @@ def record_worker_selection(
     return chosen
 
 
-def record_claim_decision(n: int, claimed: bool, admission_id: str | None, *, returncode: int | None = None) -> str:
+def record_claim_decision(
+    n: int, claimed: bool, admission_id: str | None, *, returncode: int | None = None,
+    relation: str = "follows",
+) -> str:
     from factory import trace
 
     chosen = "claimed" if claimed else "claim_failed"
-    rationale = ("GitHub accepted the @me assignment."
-                 if claimed else f"GitHub rejected the @me assignment with exit {returncode}.")
+    rationale = (
+        "The existing GitHub claim continued into a review retry."
+        if claimed and relation == "retries"
+        else "GitHub accepted the @me assignment."
+        if claimed else f"GitHub rejected the @me assignment with exit {returncode}."
+    )
     payload = trace.decision(
         ticket=n,
         stage="claim",
@@ -968,7 +1167,7 @@ def record_claim_decision(n: int, claimed: bool, admission_id: str | None, *, re
         ],
         chosen=chosen,
         rationale=rationale,
-        causes=([{"decision_id": admission_id, "relation": "follows"}] if admission_id else []),
+        causes=([{"decision_id": admission_id, "relation": relation}] if admission_id else []),
         cost=None,
         actor=_decision_actor("deterministic", "GitHub issue claim"),
     )
@@ -1001,7 +1200,7 @@ def _activity(wt: Path, logfile: Path, handoff: Path) -> tuple:
     def git(*args: str) -> str:
         # Runs while the worker does: never through the worktree's own `.git` pointer.
         return subprocess.run(["git", "--no-optional-locks", "-C", str(wt), *args],
-                              capture_output=True, text=True, check=False,
+                              capture_output=True, encoding="utf-8", errors="replace", check=False,
                               env=gitguard.env(globals().get("ROOT"), wt)).stdout
 
     return (stat(logfile), git("rev-parse", "HEAD"),
@@ -1168,6 +1367,8 @@ def run_gate(
     The gate gets hashes, never refs a worker could have moved."""
     report_rel = f".factory/gate-report-{n}.md"
     (wt / ".factory").mkdir(exist_ok=True)
+    started = time.monotonic()
+    head = run(["git", "rev-parse", "HEAD"], cwd=wt, check=False).stdout.strip() or "unknown"
     # GPU serialization is the gate's job: the gate flocks the exclusive lock
     # itself. Locking here too deadlocks the gate subprocess (seen in run #7).
     # Isolated launch of this engine: the worktree is worker-written, so a planted
@@ -1189,6 +1390,12 @@ def run_gate(
     proc = run(cmd, cwd=wt, check=False, env=gitguard.env(ROOT, wt))
     report = wt / report_rel
     text = report.read_text() if report.exists() else proc.stdout + proc.stderr
+    match = re.fullmatch(r"(\d+)(?:-pr)?", str(n))
+    if match:
+        _record_gate_decision(
+            int(match[1]), proc.returncode == 0, text, head, str(report),
+            time.monotonic() - started,
+        )
     return proc.returncode == 0, text
 
 
@@ -1266,6 +1473,25 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "", *, cod
             ["issue", "view", str(n), "--repo", REPO, "--json", "labels"]).get("labels", [])}
     except Exception:  # noqa: BLE001 - an unreadable issue escalates from the agent lane
         labels = set()
+    from factory import trace
+
+    cause = _latest_decision_id(n, {"gate", "review", "manager", "claim"})
+    payload = trace.decision(
+        ticket=n,
+        stage="escalate",
+        inputs=[
+            {"kind": "escalation_packet", "ref": str(packet), "summary": reason},
+            *([{"kind": "worker_log", "ref": str(log_path), "summary": "failing worker or gate log"}]
+              if log_path else []),
+        ],
+        options=[{"option": code, "eligible": True, "reason": reason}],
+        chosen=code,
+        rationale=reason,
+        causes=[{"decision_id": cause, "relation": "follows"}] if cause else [],
+        cost=None,
+        actor=_decision_actor("deterministic", "dispatch.escalate"),
+    )
+    record("decision", **payload)
     record(
         "escalate", ticket=n, code=code, reason=reason,
         log=str(log_path) if log_path else None, packet=str(packet), round=round_number,
@@ -1397,6 +1623,7 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
         f"`VERDICT: APPROVE` or `VERDICT: REVISE`.\n\n"
         + packet
     )
+    started = time.monotonic()
     with lifecycle.scope(EVENTS, "review", ticket=n) as execution:
         clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         before = run(["git", "rev-parse", "HEAD"], cwd=wt, env=clean).stdout.strip()
@@ -1405,6 +1632,7 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
         findings = ""
         parsed = False
         matches = []
+        usage = None
         actual_head = before
         if before == expected_head:
             command, structured = _review_command(prompt)
@@ -1465,6 +1693,11 @@ def review(wt: Path, n: int, gate_report: str, expected_head: str) -> tuple[str,
             "review", ticket=n, verdict=verdict, parsed=parsed, accepted=accepted,
             head=expected_head, actual_head=actual_head,
         )
+        _PENDING_REVIEWS[n] = {
+            "verdict": verdict, "findings": findings, "head": expected_head,
+            "parsed": parsed, "accepted": accepted, "usage": usage,
+            "seconds": time.monotonic() - started,
+        }
     return verdict, findings
 
 
@@ -1639,7 +1872,7 @@ def push_and_pr(
 def pr_comment(n: int, text: str) -> None:
     body_file = FACTORY / f"review-{n}.md"
     body_file.write_text(text + "\n")
-    run(
+    posted = run(
         [
             "gh",
             "pr",
@@ -1652,6 +1885,10 @@ def pr_comment(n: int, text: str) -> None:
         ],
         check=False,
     )
+    pending = _PENDING_REVIEWS.pop(n, None)
+    if pending is not None:
+        match = re.search(r"https://\S+", posted.stdout or "")
+        _record_review_decision(n, **pending, comment_url=match[0] if match else None)
 
 
 def refuse_investigation_route(n, reason, *, dry_run=False):
@@ -2036,6 +2273,34 @@ def approve_pr(n: int, head: str) -> bool:
             check=False,
         )
         return False
+    if not manager_approval(events, n, head):
+        from factory import trace
+
+        cause = _latest_decision_id(n, {"review"})
+        approval = trace.decision(
+            ticket=n,
+            stage="manager",
+            pr=pr["number"],
+            inputs=[
+                {"kind": "head", "ref": f"https://github.com/{REPO}/commit/{head}",
+                 "summary": f"approved head {head}"},
+            ],
+            options=[
+                {"option": option, "eligible": option == "APPROVE",
+                 "reason": "gate and independent review approved this head"
+                 if option == "APPROVE" else "approval path selected instead"}
+                for option in (
+                    "RETRY", "REWRITE", "HUMAN", "CLOSE", "RESOLVE",
+                    "APPROVE", "SPLIT", "ROUTE", "AUTHORIZE", "FIX",
+                )
+            ],
+            chosen="APPROVE",
+            rationale="gate and independent review approved this exact head",
+            causes=[{"decision_id": cause, "relation": "follows"}] if cause else [],
+            cost=None,
+            actor=_decision_actor("deterministic", "dispatch.approve_pr"),
+        )
+        record("decision", **approval)
     record(
         "approved", ticket=n, pr=pr["number"], head=head,
         gate_head=head, review_head=head,
@@ -2112,7 +2377,10 @@ def _run_in_progress(run_id: int) -> bool:
         return False
 
 
-def triage_cancelled(pr: int, checks: list[dict], dry_run: bool = False) -> list[dict]:
+def triage_cancelled(
+    pr: int, checks: list[dict], dry_run: bool = False,
+    ticket: int | None = None, head: str | None = None,
+) -> list[dict]:
     """Rebucket `cancel` rows so a CI runner outage is not a code failure.
 
     A cancel that ran steps becomes `fail`. An infra cancel reads `pending` while
@@ -2150,6 +2418,11 @@ def triage_cancelled(pr: int, checks: list[dict], dry_run: bool = False) -> list
             ok = run(["gh", "run", "rerun", str(run_id), "--failed", "--repo", REPO],
                      check=False).returncode == 0
             record("ci-rerun", pr=pr, run=run_id, attempt=attempt, checks=names, ok=ok)
+            if ticket is not None:
+                record_merge_decision(
+                    ticket, pr, "ci-rerun", f"reran CI run {run_id} after runner starvation",
+                    head, head, checks,
+                )
             bucket = "pending" if ok else "infra"
         elif rerun.get("ok") and attempt <= rerun["attempt"]:
             bucket = "pending"  # the rerun attempt is not visible yet
@@ -2308,6 +2581,11 @@ def refresh_pr_branch(n: int, pr: int, carries_upstream: bool) -> bool:
             files = "## Conflicting files\n\n" + ("\n".join(f"- `{path}`" for path in conflicts) or "(none listed)")
             withdraw(f"{verb} onto moved main conflicts ({why}); worktree {wt}", "refresh_conflict", extra=files)
             return False
+        record_merge_decision(
+            n, pr, "conflict-requeue",
+            f"{verb} onto moved {cfg.main} conflicted; requeued to a worker",
+            remote_head, remote_head, [],
+        )
         record("conflict-requeue", ticket=n, pr=pr, head=remote_head, verb=verb, files=conflicts, round=rounds + 1)
         run(["gh", "issue", "edit", str(n), "--repo", REPO,
              "--remove-label", LABEL_HUMAN, "--add-label", LABEL_AGENT, "--remove-assignee", "@me"], check=False)
@@ -2574,6 +2852,7 @@ def human_head_approval(pr_number: int, head: str) -> tuple[bool, str]:
 
 
 def merge_pass_locked(dry_run: bool) -> None:
+    """Ticket PR merge stage; `factory learn` PRs in the same listing go to `learn.promote_pass` first."""
     prs = gh_json(
         [
             "pr",
@@ -2587,6 +2866,12 @@ def merge_pass_locked(dry_run: bool) -> None:
         ]
     )
     resume_head_syncs(prs, dry_run)
+    from factory.learn import promote_pass
+
+    try:
+        promote_pass(prs, dry_run)
+    except Exception as exc:  # noqa: BLE001 - a lessons merge failure never blocks ticket merges
+        log(f"promotion: failed ({type(exc).__name__}: {exc})")
     candidates = []
     for pr in prs:
         m = re.fullmatch(r"agent/(\d+)", pr["headRefName"])
@@ -2622,7 +2907,7 @@ def merge_pass_locked(dry_run: bool) -> None:
                 if execution:
                     execution.outcome, execution.reason = "not_eligible", "initiative"
                 continue
-            checks = triage_cancelled(pr_num, pr_checks(pr_num), dry_run)
+            checks = triage_cancelled(pr_num, pr_checks(pr_num), dry_run, n, listed_head)
             buckets: dict[str, int] = {}
             for c in checks:
                 buckets[c["bucket"]] = buckets.get(c["bucket"], 0) + 1
@@ -2631,6 +2916,11 @@ def merge_pass_locked(dry_run: bool) -> None:
                 if dry_run:
                     log(f"PR #{pr_num}: would escalate (CI failed: {', '.join(failed)})")
                     continue
+                record_merge_decision(
+                    n, pr_num, "remove stale factory-approved label",
+                    f"CI failed ({', '.join(failed)}); approval is no longer eligible",
+                    listed_head, listed_head, checks,
+                )
                 run(
                     [
                         "gh",
@@ -2653,6 +2943,11 @@ def merge_pass_locked(dry_run: bool) -> None:
                 continue
             starved = [c for c in checks if c["bucket"] == "infra"]
             if starved and runner_unavailable(n, pr_num, starved, dry_run):
+                if not dry_run:
+                    record_merge_decision(
+                        n, pr_num, "ci-infra", "CI runner infrastructure is unavailable",
+                        listed_head, listed_head, checks,
+                    )
                 continue
             if buckets.get("pending") or starved:
                 log(f"PR #{pr_num}: CI pending {buckets}; waiting")
@@ -2722,6 +3017,11 @@ def merge_pass_locked(dry_run: bool) -> None:
                     != 0
                 )
             if behind:
+                record_merge_decision(
+                    n, pr_num, "refresh branch",
+                    f"approval head {head} is stale because the branch is behind {cfg.main}",
+                    head, head, checks,
+                )
                 if refresh_pr_branch(n, pr_num, carries_upstream):
                     execution.outcome = "refreshed"
                 return
@@ -2736,6 +3036,11 @@ def merge_pass_locked(dry_run: bool) -> None:
                 for e in events
             )
             if not approved:
+                record_merge_decision(
+                    n, pr_num, "remove stale factory-approved label",
+                    f"approval evidence is missing or stale for head {head}",
+                    head, None, checks,
+                )
                 run(
                     ["gh", "pr", "edit", str(pr_num), "--repo", REPO,
                      "--remove-label", FACTORY_APPROVED],
@@ -2749,10 +3054,15 @@ def merge_pass_locked(dry_run: bool) -> None:
                 )
                 execution.outcome, execution.reason = "project_escalation", "state_changed"
                 continue
-            latest_checks = triage_cancelled(pr_num, pr_checks(pr_num))
+            latest_checks = triage_cancelled(pr_num, pr_checks(pr_num), False, n, head)
             latest_failed = [c["name"] for c in latest_checks if c["bucket"] == "fail"]
             latest_starved = [c for c in latest_checks if c["bucket"] == "infra"]
             if latest_failed:
+                record_merge_decision(
+                    n, pr_num, "remove stale factory-approved label",
+                    f"CI failed after eligibility check ({', '.join(latest_failed)})",
+                    head, head, latest_checks,
+                )
                 run(
                     ["gh", "pr", "edit", str(pr_num), "--repo", REPO,
                      "--remove-label", FACTORY_APPROVED],
@@ -2766,6 +3076,10 @@ def merge_pass_locked(dry_run: bool) -> None:
                 )
                 continue
             if latest_starved and runner_unavailable(n, pr_num, latest_starved, False):
+                record_merge_decision(
+                    n, pr_num, "ci-infra", "CI runner infrastructure became unavailable",
+                    head, head, latest_checks,
+                )
                 continue
             if any(c["bucket"] in ("pending", "infra") for c in latest_checks):
                 execution.outcome, execution.reason = "not_eligible", "ci_pending"
@@ -2776,6 +3090,11 @@ def merge_pass_locked(dry_run: bool) -> None:
                 execution.wait("no_passing_ci", mode="eligibility", pr=pr_num)
                 continue
             if gh_json(["api", f"repos/{REPO}/compare/{cfg.main}...{head}"])["behind_by"]:
+                record_merge_decision(
+                    n, pr_num, "refresh branch",
+                    f"approval head {head} became stale because the branch moved behind {cfg.main}",
+                    head, head, latest_checks,
+                )
                 if refresh_pr_branch(n, pr_num, carries_upstream):
                     execution.outcome = "refreshed"
                 return
@@ -2813,7 +3132,22 @@ def merge_pass_locked(dry_run: bool) -> None:
                         body,
                     ]
                 )
-                record("merged", ticket=n, pr=pr_num, method=method[2:], head=head)
+                try:
+                    merged_pr = gh_json([
+                        "pr", "view", str(pr_num), "--repo", REPO, "--json", "mergeCommit",
+                    ])
+                    merge_commit = merged_pr.get("mergeCommit") if isinstance(merged_pr, dict) else None
+                    merge_sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+                except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+                    merge_sha = None
+                record(
+                    "merged", ticket=n, pr=pr_num, method=method[2:], head=head,
+                    merge_sha=merge_sha,
+                )
+                record_merge_decision(
+                    n, pr_num, "merge now", f"gate, review, approval, and CI passed for {head}",
+                    head, head, latest_checks, merge_sha=merge_sha,
+                )
             execution.outcome = "merged"
             log(f"PR #{pr_num}: merged into {cfg.main} ({method[2:]}, ticket #{n})")
             cleanup_after_merge(n, head)
@@ -3257,6 +3591,10 @@ def process_ticket(
                     f"Address required fixes only; optional suggestions are not requirements.\n\n"
                     f"{findings}"
                 )
+                retry_decision = _latest_decision_id(n, {"gate"} if pr_failed else {"review"})
+                if retry_decision:
+                    record_worker_selection(n, labels, cause=retry_decision, relation="retries")
+                    record_claim_decision(n, True, retry_decision, relation="retries")
                 ok, report, logfile, gate_head = worker_round(
                     n, wt, labels, title, extra, MAX_ATTEMPTS + bounce, deadline
                 )
