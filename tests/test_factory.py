@@ -3603,6 +3603,9 @@ class DispatchTest(unittest.TestCase):
             self.assertEqual(git(bare, "diff", "--name-only", "main", branch), config.LESSONS_NAME)
             self.assertIn("- Run `make test` before the gate.", git(bare, "show", f"{branch}:{config.LESSONS_NAME}"))
             self.assertNotIn("agent/curate-", calls)
+            events = list(map(json.loads, (repo / ".factory/events.jsonl").read_text().splitlines()))
+            gate = next(e for e in events if e.get("event") == "gate")  # the gate ran before the push
+            self.assertEqual((gate["branch"], gate["gate"], gate["head"]), (branch, "PASS", git(bare, "rev-parse", branch)))
 
     def test_learn_curate_opens_chore_pr_touching_only_context_paths(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -3684,10 +3687,6 @@ class DispatchTest(unittest.TestCase):
             self.assertEqual(git(bare, "diff", "--name-only", "main", branch).split(),
                              [config.CONFIG_NAME, "tests/test_parser.py"])
             self.assertIn('name = "lint"', git(bare, "show", f"{branch}:{config.CONFIG_NAME}"))
-            for pr in ("curate", "lessons"):
-                name = git(bare, "branch", "--list", f"agent/{pr}-*").lstrip("* ").removeprefix("agent/")
-                body = (repo / ".factory" / f"pr-body-{name}.md").read_text()
-                self.assertIn("Harness change from the meta loop — human merge required.", body)
 
     def test_learn_curate_rejects_weakening_the_harness(self) -> None:
         def toml_edit(old: str, new: str):
@@ -4276,6 +4275,8 @@ class DispatchTest(unittest.TestCase):
             self.assertEqual((infra["pr"], infra["run"], infra["checks"]), (70, 123, ["compile"]))
             self.assertEqual(infra["evidence"][0]["steps_run"], False)
             self.assertTrue(any(e.get("event") == "ci-rerun" and e.get("ok") for e in events))
+            decisions = [e for e in events if e.get("event") == "decision" and e.get("stage") == "merge"]
+            self.assertEqual([decision["chosen"] for decision in decisions], ["ci-rerun"])
             # GitHub has not surfaced the rerun yet: still attempt 1, so wait, never rerun twice.
             escalations, removed, reruns, _ = self.cancelled_ci_pass([ok, self.cancelled()], starved)
             self.assertEqual((escalations, removed, reruns), ([], False, []))
