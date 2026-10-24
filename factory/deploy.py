@@ -624,14 +624,23 @@ def verify_revision_authorization(
     return True, ""
 
 
+def baseline_pr(baseline: str | None) -> int | None:
+    """The PR number an adoption baseline names, or None for a commit. Config stringifies the
+    TOML value, so digits alone can't tell them apart: a 7+ digit run is an abbreviated SHA
+    (git's minimum abbreviation; about 2% of 8-character prefixes are all digits)."""
+    if baseline and baseline.isdigit() and len(baseline) < 7:
+        return int(baseline)
+    return None
+
+
 def is_before_baseline(
     pr_number: int, commit: str, baseline: str | None, root: Path
 ) -> bool:
     """True if PR or commit is at or before the adoption baseline."""
     if not baseline:
         return False
-    if baseline.isdigit():
-        return pr_number <= int(baseline)
+    if (number := baseline_pr(baseline)) is not None:
+        return pr_number <= number
     if commit:
         if commit.startswith(baseline) or baseline.startswith(commit):
             return True
@@ -885,8 +894,8 @@ def select_candidates_for_target(
     since = tstate.latest_succeeded_commit
     baseline_commit = None
     if baseline:
-        if baseline.isdigit():
-            baseline_commit = next((pr.get("commit") for pr in all_prs if str(pr.get("pr")) == str(baseline)), None)
+        if (number := baseline_pr(baseline)) is not None:
+            baseline_commit = next((pr.get("commit") for pr in all_prs if str(pr.get("pr")) == str(number)), None)
         else:
             baseline_commit = baseline
     if baseline_commit and (not since or is_ancestor(since, baseline_commit, root)):

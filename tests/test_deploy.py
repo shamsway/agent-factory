@@ -2534,6 +2534,14 @@ class BaselineAfterSuccessTest(unittest.TestCase):
         self.assertEqual(self.unauthorized(baseline=self.direct), [])
         self.assertEqual(self.unauthorized(baseline=self.direct[:8]), [])
 
+    def test_all_digit_short_sha_baseline_is_a_commit_not_a_pr(self) -> None:
+        self.assertEqual(deploy.baseline_pr("231"), 231)
+        self.assertIsNone(deploy.baseline_pr("54740897"))
+        self.assertIsNone(deploy.baseline_pr("0c59f6c7"))
+        self.assertIsNone(deploy.baseline_pr(None))
+        sha = "54740897" + "a" * 32
+        self.assertTrue(deploy.is_before_baseline(99999999, sha, "54740897", self.repo))
+
     def test_pr_number_baseline_resolves_to_its_merge_commit(self) -> None:
         merged = {"pr": 7, "ticket": 7, "commit": self.commit("c.tf")}
         self.assertEqual(self.unauthorized(all_prs=[merged]), [self.direct])
