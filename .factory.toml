@@ -2,7 +2,7 @@
 # Gate checks proposed by District from: --check
 
 [gate]
-protected_paths = [".factory.toml", "**/acceptance/**", "**/*review*prompt*", "TRACKING*", "**/TRACKING*"]
+protected_paths = [".factory.toml", "**/acceptance/**", "**/*review*prompt*", "TRACKING*", "**/TRACKING*", "scripts/privacy-check.py"]
 add_only_paths = ["tests/**"]
 
 [[gate.check]]
@@ -47,6 +47,14 @@ run = [
 exclusive = false
 when = "pr"
 
+# Fork only: this repository is public. Workers can't see the private denylist (the sandbox
+# home is empty), so the host sets FACTORY_PRIVACY_DENYLIST and exposes that file read-only to
+# checks; without it the check exits 2 instead of passing on the generic rules alone.
+[[gate.check]]
+name = "privacy"
+run = ["python3", "scripts/privacy-check.py", "--range", "origin/main...HEAD", "--require-denylist"]
+exclusive = false
+
 [dashboard]
 theme = ".factory-dashboard.css"
 
@@ -54,7 +62,8 @@ theme = ".factory-dashboard.css"
 review_rounds = 3
 
 [release]
-auto = true
+# Fork only: releases are cut upstream; a fork release would reuse upstream's version numbers.
+auto = false
 
 [manager]
 rounds = 3
