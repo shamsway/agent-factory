@@ -47,6 +47,8 @@ supersession = "sequential" # "sequential" halts on failure; strict git commit o
 [apply]
 enabled = true
 baseline = "c0ffee12"       # Commit SHA baseline: commits <= c0ffee12 are ignored
+# A baseline of fewer than 7 digits is a PR number; anything else is a commit, so an
+# abbreviated SHA that happens to be all digits (e.g. "54740897") still reads as one.
 supersession = "sequential"
 
 [[apply.targets]]
