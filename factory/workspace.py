@@ -25,7 +25,16 @@ from pathlib import Path
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlsplit
 
-from factory import artifacts, briefing, config, flow, runtime_events, runtime_local, settings, trace
+from factory import (
+    artifacts,
+    briefing,
+    config,
+    flow,
+    runtime_events,
+    runtime_local,
+    settings,
+    trace,
+)
 from factory.config import Config
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
