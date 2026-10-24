@@ -13,8 +13,9 @@ location and mask the match, so a CI log never repeats a protected term.
     scripts/privacy-check.py --range origin/main...HEAD --branch "$(git branch --show-current)"
     scripts/privacy-check.py --text pr-body.md
     scripts/privacy-check.py --tree        # report existing exposure
+    scripts/privacy-check.py --range origin/main...HEAD --require-denylist   # gate check
 
-Exit 0: clean; 1: findings; 2: usage or git error.
+Exit 0: clean; 1: findings; 2: usage or git error, or a required denylist missing or empty.
 """
 
 from __future__ import annotations
@@ -33,16 +34,23 @@ BUILTIN = {
 DEFAULT_DENYLIST = Path("~/.config/factory/privacy-denylist")
 
 
-def load_rules(denylist: Path | None) -> list[tuple[str, re.Pattern[str]]]:
+def fail(message: str) -> None:
+    print(f"privacy-check: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def load_rules(denylist: Path | None, required: bool = False) -> list[tuple[str, re.Pattern[str]]]:
     rules = [(label, re.compile(pattern)) for label, pattern in BUILTIN.items()]
     path = denylist or Path(os.environ.get("FACTORY_PRIVACY_DENYLIST") or DEFAULT_DENYLIST).expanduser()
-    if denylist and not path.is_file():
-        raise SystemExit(f"privacy-check: denylist {path} not found")
+    if (denylist or required) and not path.is_file():
+        fail(f"denylist {path} not found")
     if path.is_file():
         for number, line in enumerate(path.read_text().splitlines(), 1):
             line = line.strip()
             if line and not line.startswith("#"):
                 rules.append((f"denylist rule {number}", re.compile(line, re.IGNORECASE)))
+    if required and len(rules) == len(BUILTIN):
+        fail(f"denylist {path} has no rules")
     return rules
 
 
@@ -71,7 +79,7 @@ def git(*args: str) -> str:
     proc = subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",
                           errors="replace", check=False)
     if proc.returncode:
-        raise SystemExit(f"privacy-check: git {' '.join(args[:2])} failed: {proc.stderr.strip()[:200]}")
+        fail(f"git {' '.join(args[:2])} failed: {proc.stderr.strip()[:200]}")
     return proc.stdout
 
 
@@ -97,10 +105,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--text", nargs="*", default=[], help="text files to check (PR title/body drafts)")
     parser.add_argument("--tree", action="store_true", help="check every tracked file (existing exposure)")
     parser.add_argument("--denylist", type=Path, help="private denylist (one regex per line)")
+    parser.add_argument("--require-denylist", action="store_true",
+                        help="fail (exit 2) unless the default or $FACTORY_PRIVACY_DENYLIST denylist exists and has "
+                             "a rule; for a gate check, where a missing file must not pass on the generic rules alone")
     args = parser.parse_args(argv)
     if not (args.range or args.branch or args.text or args.tree):
         parser.error("nothing to check")
-    rules = load_rules(args.denylist)
+    rules = load_rules(args.denylist, args.require_denylist)
     found = []
     if args.range:
         for path, rows in added_lines(args.range).items():

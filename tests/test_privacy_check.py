@@ -88,6 +88,23 @@ class PrivacyCheckTest(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("not found", proc.stderr)
 
+    def test_required_denylist_comes_from_the_environment_and_must_have_rules(self) -> None:
+        def run(env_path: Path) -> subprocess.CompletedProcess:
+            return subprocess.run([sys.executable, str(SCRIPT), "--require-denylist", "--tree"], cwd=self.repo,
+                                  capture_output=True, text=True, check=False,
+                                  env={"PATH": "/usr/bin:/bin", "HOME": str(self.tmp),
+                                       "FACTORY_PRIVACY_DENYLIST": str(env_path)})
+        missing = run(self.tmp / "absent")
+        self.assertEqual(missing.returncode, 2)
+        self.assertIn("not found", missing.stderr)
+        empty = self.tmp / "empty"
+        empty.write_text("# comments only\n\n")
+        self.assertEqual(run(empty).returncode, 2)
+        self.assertIn("has no rules", run(empty).stderr)
+        found = run(self.denylist)
+        self.assertEqual(found.returncode, 1, found.stderr)
+        self.assertIn("old.txt:1: denylist rule 2", found.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
