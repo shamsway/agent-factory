@@ -59,6 +59,9 @@ exclusive = false
 theme = ".factory-dashboard.css"
 
 [dispatch]
+# Fork only: one ticket in flight while the fork's factory is new; the dispatch table is
+# repo-owned, so the host config cannot lower the default of 2.
+max_active = 1
 review_rounds = 3
 
 [release]
