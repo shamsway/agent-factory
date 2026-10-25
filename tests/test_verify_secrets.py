@@ -180,6 +180,50 @@ class VerifySecretsTest(unittest.TestCase):
                         self.assertEqual(report["ok"], expected_rc == 0)
                         self.assertEqual(report["apply_isolation"], expected_isolation)
 
+    def _gh_live(self, headers: str, returncode: int = 0) -> dict:
+        """The GH_TOKEN row from a live credential check whose `gh api -i user` probe is stubbed."""
+        import subprocess
+        from unittest import mock
+
+        from factory import config, verify_secrets
+
+        probe = subprocess.CompletedProcess([], returncode, f"HTTP/2 200\n{headers}\n{{}}\n", "")
+        cfg = config.Config(Path("/nonexistent"), "acme/widgets")
+        cfg.install = dict(config.DEFAULT_INSTALL, env={"GH_TOKEN": "tok"})
+        cfg.apply_env = {}
+        with mock.patch.object(verify_secrets, "_probe", return_value=probe):
+            rows = verify_secrets.credential_rows(cfg, "install", True)
+        return next(row for row in rows if row["key"] == "GH_TOKEN")
+
+    def test_classic_token_without_org_read_is_invalid_with_missing_scope_detail(self) -> None:
+        row = self._gh_live("x-oauth-scopes: repo\n")
+        self.assertEqual(row["status"], "invalid")
+        self.assertEqual(row["detail"], "scopes: repo; missing read:org (dispatch review-request intake)")
+
+    def test_classic_token_with_read_org_is_valid(self) -> None:
+        row = self._gh_live("x-oauth-scopes: repo, read:org\n")
+        self.assertEqual(row["status"], "valid")
+        self.assertEqual(row["detail"], "scopes: repo, read:org")
+
+    def test_classic_token_with_admin_org_is_valid(self) -> None:
+        self.assertEqual(self._gh_live("x-oauth-scopes: repo, admin:org\n")["status"], "valid")
+
+    def test_classic_token_with_write_org_is_valid(self) -> None:
+        self.assertEqual(self._gh_live("x-oauth-scopes: repo, write:org\n")["status"], "valid")
+
+    def test_empty_scopes_header_is_missing_org_read_not_the_next_header(self) -> None:
+        row = self._gh_live("x-oauth-scopes: \nx-accepted-oauth-scopes: repo\n")
+        self.assertEqual(row["status"], "invalid")
+        self.assertEqual(row["detail"], "scopes: none; missing read:org (dispatch review-request intake)")
+
+    def test_token_without_scopes_header_stays_valid(self) -> None:
+        self.assertEqual(self._gh_live("content-type: application/json\n")["status"], "valid")
+
+    def test_probe_failure_is_invalid_without_detail(self) -> None:
+        row = self._gh_live("x-oauth-scopes: repo\n", returncode=1)
+        self.assertEqual(row["status"], "invalid")
+        self.assertNotIn("detail", row)
+
 
 if __name__ == "__main__":
     unittest.main()
