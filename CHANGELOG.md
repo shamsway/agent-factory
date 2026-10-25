@@ -6,6 +6,7 @@
 - `factory investigation-run`: a supported, operator-only command that runs the existing model broker on one real, unresolved deployment incident. It previews by default; a live request needs `--live --confirm-provider-spend-cap --projection-sha256 H` and the existing `[investigation]` switches. It reuses the evidence reader, receipts, budgets and per-run lock, returns cached results without a second request, never retries an unknown outcome, journals safe metadata only and never publishes.
 - Gate and dispatcher subprocess reads now decode arbitrary check, Git, and toolchain output as UTF-8 with replacement, so invalid bytes preserve the command's real pass/fail result instead of crashing the pipeline (#365).
 - The Factory Workspace adds a read-only Decisions breadboard for `trace.explain()` graphs, with authenticated per-repository trace reads, stage-grouped recorded and synthesized nodes, labeled relationships, costed retry folds, timeline replay, evidence details, frontier and coverage state, cross-ticket navigation, and terminal outcomes (#360).
+- `factory verify-secrets --live` marks a classic `GH_TOKEN` that reports `X-OAuth-Scopes` but lacks `read:org`, `write:org` and `admin:org` as `invalid`, naming the missing scope, instead of `valid`; dispatch review-request intake otherwise fails on every pass (#67). Fine-grained and app tokens and probe failures are unchanged.
 
 ## 0.4.6 — 2026-10-23
 

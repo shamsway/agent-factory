@@ -111,12 +111,27 @@ def _probe(argv: list[str], name: str, token: str) -> subprocess.CompletedProces
         )
 
 
+# Dispatch review-request intake reads reviewer login/name/slug over GraphQL, which GitHub only
+# grants with one of these classic scopes (each implies read:org).
+GH_ORG_READ_SCOPES = frozenset({"read:org", "write:org", "admin:org"})
+SCOPE_NAME = re.compile(r"[A-Za-z0-9:_.-]+")
+# Result prefix for a classic token that answers but lacks GH_ORG_READ_SCOPES. Not "OK", so the row is invalid.
+SCOPE_GAP = "SCOPE GAP"
+
+
 def check_gh_token(token: str) -> str:
     r = _probe(["gh", "api", "-i", "user"], "GH_TOKEN", token)
     if r.returncode != 0:
         return "auth FAILED"
-    m = re.search(r"^x-oauth-scopes:\s*(.*)$", r.stdout, re.IGNORECASE | re.MULTILINE)
-    return f"OK, scopes: {m.group(1).strip()}" if m else "OK (no scopes header -- fine-grained or app token)"
+    m = re.search(r"^x-oauth-scopes:[ \t]*(.*)$", r.stdout, re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return "OK (no scopes header -- fine-grained or app token)"
+    raw = m.group(1).strip()
+    # Rebuild the list from scope-shaped names only, so the detail never carries provider text.
+    granted = [name for name in (part.strip() for part in raw.split(",")) if SCOPE_NAME.fullmatch(name)]
+    if GH_ORG_READ_SCOPES.isdisjoint(granted):
+        return f"{SCOPE_GAP}, scopes: {', '.join(granted) or 'none'}; missing read:org (dispatch review-request intake)"
+    return f"OK, scopes: {raw}"
 
 
 def check_op_token(token: str) -> str:
@@ -155,12 +170,17 @@ def identity_row(cfg: config.Config, live: bool) -> dict:
 
 
 def _detail(result: str, secrets: list[str]) -> str | None:
-    """Non-secret scope detail from a successful live check ("OK, scopes: repo" ->
-    "scopes: repo"). A failure's text is provider output and never escapes."""
-    if not result.startswith("OK"):
+    """Non-secret detail from a live check: the scopes of a successful one ("OK, scopes: repo" ->
+    "scopes: repo") or the Factory-written gap of a rejected token (SCOPE_GAP). Any other failure's
+    text is provider output and never escapes."""
+    if result.startswith("OK"):
+        text = result[2:]
+    elif result.startswith(SCOPE_GAP):
+        text = result[len(SCOPE_GAP):]
+    else:
         return None
     from factory import artifacts
-    text = result[2:].lstrip(" ,").strip()
+    text = text.lstrip(" ,").strip()
     return artifacts.sanitize(text, secrets)[:200] or None
 
 
