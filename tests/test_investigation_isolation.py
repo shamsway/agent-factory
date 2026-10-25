@@ -29,6 +29,16 @@ def real_boundary(test):
         if required:
             test.fail("required user/network namespaces unavailable")
         test.skipTest("runner prohibits unprivileged namespaces")
+    # A sandboxed gate check hides the runtime dir, so systemd-run has no user manager to reach.
+    try:
+        manager = subprocess.run(["systemctl", "--user", "show-environment"],
+                                 capture_output=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        manager = None
+    if manager is None or manager.returncode:
+        if required:
+            test.fail("required systemd user manager unavailable")
+        test.skipTest("no systemd user manager reachable")
 
 
 class IsolationTest(unittest.TestCase):

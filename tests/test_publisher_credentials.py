@@ -19,6 +19,10 @@ NOW = 1800000000
 APP = {'app_id': 10, 'installation_id': 20, 'repository_id': 30,
        'repository': 'owner/repo', 'login': 'findings[bot]', 'key_file': '/not-a-live-key'}
 PERMISSIONS = {'issues': 'write', 'metadata': 'read'}
+# In an unprivileged user namespace (a bwrap-sandboxed gate check) real root is unmapped and `/`
+# reads as the overflow UID, so the ancestor-ownership guard rightly refuses every path.
+ROOT_UNMAPPED = os.stat('/').st_uid != 0
+UNMAPPED_REASON = 'root is unmapped in this user namespace; ancestor ownership cannot be exercised'
 
 
 class ProtectedReadTests(unittest.TestCase):
@@ -30,6 +34,7 @@ class ProtectedReadTests(unittest.TestCase):
         self.path.write_bytes(b'synthetic')
         self.path.chmod(0o400)
 
+    @unittest.skipIf(ROOT_UNMAPPED, UNMAPPED_REASON)
     def test_regular_private_file(self):
         self.assertEqual(credentials.protected_read(self.path, secret=True), b'synthetic')
 
@@ -85,6 +90,7 @@ class ProtectedReadTests(unittest.TestCase):
             return meta
         return mock.patch.object(os, 'fstat', side_effect=layout)
 
+    @unittest.skipIf(ROOT_UNMAPPED, UNMAPPED_REASON)
     def test_systemd_root_group_credential_layout(self):
         for mode in (0o440, 0o400):
             with self.subTest(mode=oct(mode)), self.systemd_layout(mode):
@@ -100,6 +106,7 @@ class ProtectedReadTests(unittest.TestCase):
             ):
                 credentials.protected_read(self.path, secret=True)
 
+    @unittest.skipIf(ROOT_UNMAPPED, UNMAPPED_REASON)
     def test_real_checker_reads_and_parses_systemd_layout(self):
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
@@ -140,6 +147,7 @@ class ProtectedReadTests(unittest.TestCase):
         with self.assertRaises(PublisherRefused):
             credentials.protected_read(self.path, maximum=3)
 
+    @unittest.skipIf(ROOT_UNMAPPED, UNMAPPED_REASON)
     def test_fifo_not_read(self):
         fifo = self.root / 'fifo'
         os.mkfifo(fifo)
