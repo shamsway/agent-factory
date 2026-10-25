@@ -1516,12 +1516,16 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "", *, cod
         ],
         check=False,
     )
+    # handoff imports dispatch, so this import stays local
+    from factory.handoff import public as public_text
+
     body = f"Factory dispatcher escalating: {reason}.\n\nEscalation packet: `{packet}`"
     if log_path:
         body += f"\n\nWorker logs: `{log_path}`"
     handoff = wt / ".factory" / f"handoff-{n}.md"
     if handoff.exists():
         body += f"\n\nWorker handoff notes:\n\n{handoff.read_text().strip()[-4000:]}"
+    body = public_text(body)  # public issue comment: no runner-local paths, no live mentions
     posted = run(["gh", "issue", "comment", str(n), "--repo", REPO, "--body", body], check=False)
     comment_receipt(n, "escalation", posted.stdout if posted.returncode == 0 else "", round=round_number)
 
