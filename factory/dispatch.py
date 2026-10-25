@@ -1516,7 +1516,8 @@ def escalate(n: int, reason: str, log_path: Path | None, extra: str = "", *, cod
         ],
         check=False,
     )
-    from factory.handoff import public as public_text  # handoff imports dispatch, so this import stays local
+    # handoff imports dispatch, so this import stays local
+    from factory.handoff import public as public_text
 
     body = f"Factory dispatcher escalating: {reason}.\n\nEscalation packet: `{packet}`"
     if log_path:
