@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Escalation comments on public issues withhold runner-local absolute paths (`(local path withheld)`) and neutralize `@` mentions in worker handoff notes, through the same sanitizer as terminal handoffs. The reason line and `Factory dispatcher escalating: ` prefix are unchanged; URLs are untouched; the journal, packets, logs and handoff files keep the raw text (#69).
 - `factory investigation-run`: a supported, operator-only command that runs the existing model broker on one real, unresolved deployment incident. It previews by default; a live request needs `--live --confirm-provider-spend-cap --projection-sha256 H` and the existing `[investigation]` switches. It reuses the evidence reader, receipts, budgets and per-run lock, returns cached results without a second request, never retries an unknown outcome, journals safe metadata only and never publishes.
 - Gate and dispatcher subprocess reads now decode arbitrary check, Git, and toolchain output as UTF-8 with replacement, so invalid bytes preserve the command's real pass/fail result instead of crashing the pipeline (#365).
 - The Factory Workspace adds a read-only Decisions breadboard for `trace.explain()` graphs, with authenticated per-repository trace reads, stage-grouped recorded and synthesized nodes, labeled relationships, costed retry folds, timeline replay, evidence details, frontier and coverage state, cross-ticket navigation, and terminal outcomes (#360).
