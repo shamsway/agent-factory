@@ -10,6 +10,9 @@ from factory.publisher_credentials import protected_read
 
 
 class ExpectedOwnerTests(unittest.TestCase):
+    # Real root is unmapped in an unprivileged user namespace (a bwrap-sandboxed gate check), so
+    # `/` reads as the overflow UID and the ancestor-ownership guard refuses every path.
+    @unittest.skipIf(os.stat('/').st_uid != 0, 'root is unmapped in this user namespace')
     def test_explicit_owner_and_real_publisher_owned_ancestors(self):
         # scripts/test-linux.sh runs as root: exercise actual different ownership.
         # Ordinary CI also exercises the explicit owner restriction as its own UID.
