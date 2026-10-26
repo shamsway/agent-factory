@@ -14,6 +14,7 @@ location and mask the match, so a CI log never repeats a protected term.
     scripts/privacy-check.py --text pr-body.md
     scripts/privacy-check.py --tree        # report existing exposure
     scripts/privacy-check.py --range origin/main...HEAD --require-denylist   # gate check
+    scripts/privacy-check.py --range origin/main...HEAD --published upstream/main   # skip upstream's own text
 
 Exit 0: clean; 1: findings; 2: usage or git error, or a required denylist missing or empty.
 """
@@ -98,6 +99,20 @@ def added_lines(rng: str) -> dict[str, list[tuple[int, str]]]:
     return out
 
 
+def resolve(ref: str) -> str | None:
+    """`ref`'s commit, or None when it does not resolve (then nothing counts as published)."""
+    proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                          capture_output=True, text=True, check=False)
+    return proc.stdout.strip() or None
+
+
+def published_lines(commit: str, path: str) -> set[str]:
+    """The lines of `path` at an already-public `commit` (empty when the file is absent there)."""
+    proc = subprocess.run(["git", "show", f"{commit}:{path}"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+    return set(proc.stdout.splitlines()) if proc.returncode == 0 else set()
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--range", help="commit range whose added lines and messages are checked, e.g. origin/main...HEAD")
@@ -105,6 +120,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--text", nargs="*", default=[], help="text files to check (PR title/body drafts)")
     parser.add_argument("--tree", action="store_true", help="check every tracked file (existing exposure)")
     parser.add_argument("--denylist", type=Path, help="private denylist (one regex per line)")
+    parser.add_argument("--published", action="append", default=[], metavar="REF",
+                        help="already-public revision, e.g. upstream/main (repeatable): a --range line equal to a "
+                             "line of the same file there, or a message of a commit it contains, is not new "
+                             "exposure; a REF that does not resolve excludes nothing")
     parser.add_argument("--require-denylist", action="store_true",
                         help="fail (exit 2) unless the default or $FACTORY_PRIVACY_DENYLIST denylist exists and has "
                              "a rule; for a gate check, where a missing file must not pass on the generic rules alone")
@@ -114,9 +133,11 @@ def main(argv: list[str]) -> int:
     rules = load_rules(args.denylist, args.require_denylist)
     found = []
     if args.range:
+        published = [commit for ref in args.published if (commit := resolve(ref))]
         for path, rows in added_lines(args.range).items():
-            found += scan(path, rows, rules)
-        for sha in git("rev-list", args.range.replace("...", "..")).split():
+            public = set().union(*(published_lines(commit, path) for commit in published))
+            found += scan(path, [row for row in rows if row[1] not in public], rules)
+        for sha in git("rev-list", args.range.replace("...", ".."), *(f"^{c}" for c in published)).split():
             found += scan(f"commit {sha[:12]} message", git("log", "-1", "--format=%B", sha).splitlines(), rules)
     if args.branch:
         found += scan("branch name", [args.branch], rules)

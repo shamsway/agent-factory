@@ -105,6 +105,24 @@ class PrivacyCheckTest(unittest.TestCase):
         self.assertEqual(found.returncode, 1, found.stderr)
         self.assertIn("old.txt:1: denylist rule 2", found.stdout)
 
+    def test_published_revision_text_is_not_new_exposure_but_everything_else_is(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "upstream")
+        self.commit({"fixture.json": f"ok\n\"body\": \"{HOME}\"\n"}, f"fixture from {HOME}")
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "checkout", "-q", "-b", "sync")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-edit", "upstream")
+        self.commit({"fixture.json": f"ok\n\"body\": \"{HOME}\"\nlocal {TERM}\n"}, "local change")
+
+        published = self.check("--range", "main...HEAD", "--published", "upstream")
+        self.assertEqual(published.returncode, 1)
+        self.assertIn("fixture.json:3: denylist rule 2", published.stdout)
+        self.assertNotIn("fixture.json:2", published.stdout)
+        self.assertNotIn("user home path", published.stdout)  # neither the line nor upstream's message
+
+        unresolved = self.check("--range", "main...HEAD", "--published", "no-such-ref")
+        self.assertIn("fixture.json:2: user home path", unresolved.stdout)
+        self.assertIn("message:1: user home path", unresolved.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

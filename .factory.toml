@@ -55,9 +55,11 @@ when = "pr"
 # Fork only: this repository is public. Workers can't see the private denylist (the sandbox
 # home is empty), so the host sets FACTORY_PRIVACY_DENYLIST and exposes that file read-only to
 # checks; without it the check exits 2 instead of passing on the generic rules alone.
+# Text already published on upstream main is not this fork's exposure (sync merges carry it).
 [[gate.check]]
 name = "privacy"
-run = ["python3", "scripts/privacy-check.py", "--range", "origin/main...HEAD", "--require-denylist"]
+run = ["python3", "scripts/privacy-check.py", "--range", "origin/main...HEAD", "--require-denylist",
+       "--published", "upstream/main"]
 exclusive = false
 
 [dashboard]
