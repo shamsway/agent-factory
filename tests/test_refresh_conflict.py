@@ -134,7 +134,7 @@ class RefreshConflictTest(unittest.TestCase):
         self.cfg = config.Config(
             root=self.root, repo="acme/widgets", main="main", review_rounds=3, idle_timeout=0, exit_grace=0,
             workers={"default": [sys.executable, str(resolver), str(self.prompt_seen)]},
-            reviewer=[sys.executable, "-c", "print('VERDICT: APPROVE')"],
+            reviewer=[sys.executable, "-c", "print('```json\\n{\"verdict\":\"APPROVE\",\"findings\":[]}\\n```\\nVERDICT: APPROVE')"],
         )
         dispatch.configure(self.cfg)
         self.github = FakeGitHub(self.origin, dispatch.run)
@@ -281,6 +281,148 @@ class RefreshConflictTest(unittest.TestCase):
         self.assertEqual(len(self.events("conflict-requeue")), 1)
 
 
+
+class RefreshGateFailureTest(unittest.TestCase):
+    """#381: a refresh gate gets one retry, then returns routine failures to the worker."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
+        self.prompt_seen = self.tmp / "prompt-seen.md"
+        resolver = self.tmp / "resolver.py"
+        resolver.write_text(RESOLVER)
+        self.root, self.origin = build_fork(self.tmp)
+        git(self.origin, "checkout", "-qb", "agent/9")
+        (self.origin / "feature.txt").write_text("agent change\n")
+        git(self.origin, "add", "-A")
+        git(self.origin, "commit", "-qm", "agent change")
+        self.approved_head = git(self.origin, "rev-parse", "HEAD")
+        git(self.origin, "checkout", "-q", "main")
+        (self.origin / "main.txt").write_text("main change\n")
+        git(self.origin, "add", "-A")
+        git(self.origin, "commit", "-qm", "main moved")
+        self.cfg = config.Config(
+            root=self.root, repo="acme/widgets", main="main", review_rounds=3,
+            idle_timeout=0, exit_grace=0,
+            workers={"default": [sys.executable, str(resolver), str(self.prompt_seen)]},
+            reviewer=[sys.executable, "-c", "print('```json\\n{\"verdict\":\"APPROVE\",\"findings\":[]}\\n```\\nVERDICT: APPROVE')"],
+        )
+        dispatch.configure(self.cfg)
+        self.github = FakeGitHub(self.origin, dispatch.run)
+
+    def patched(self):
+        return mock.patch.multiple(dispatch, gh_json=self.github.gh_json, run=self.github.run)
+
+    def events(self, name: str) -> list[dict]:
+        return [e for e in lifecycle.read_events(dispatch.EVENTS) if e.get("event") == name]
+
+    def test_flaky_gate_failure_after_refresh_reruns_once_then_pushes_and_merges(self) -> None:
+        with self.patched(), mock.patch.object(
+            dispatch, "run_gate", side_effect=[(False, "first flaky report"), (True, "second passing report")]
+        ) as gate:
+            dispatch.merge_pass_locked(False)
+            self.assertEqual(gate.call_count, 2)
+            [rerun] = self.events("gate-rerun")
+            self.assertEqual(rerun["reports"], ["first flaky report", "second passing report"])
+            [refreshed] = self.events("refreshed")
+            self.assertTrue(refreshed["gate_rerun"])
+            self.assertNotEqual(self.github.head(), self.approved_head)
+            self.assertNotIn(config.LABEL_HUMAN, self.github.issue_labels)
+
+            dispatch.merge_pass_locked(False)
+
+        self.assertTrue(self.github.merged)
+        self.assertEqual(self.events("escalate"), [])
+
+    def test_repeated_gate_failure_after_refresh_requeues_to_same_worker_with_report(self) -> None:
+        first = "# Gate report\n- test: FAIL\n\ntests/test_flaky.py:7 failed"
+        second = "# Gate report\n- test: FAIL\n\ntests/test_flaky.py:7 failed again"
+        with self.patched(), mock.patch.object(
+            dispatch, "run_gate",
+            side_effect=[(False, first), (False, second), (True, "worker gate ok")],
+        ) as gate:
+            self.assertFalse(dispatch.refresh_pr_branch(9, 102, False))
+
+            self.assertEqual(gate.call_count, 2)
+            self.assertEqual(self.events("escalate"), [])
+            [requeue] = self.events("gate-requeue")
+            self.assertEqual((requeue["pr"], requeue["head"], requeue["round"]),
+                             (102, self.approved_head, 1))
+            self.assertEqual(requeue["reports"], [first, second])
+            self.assertTrue(requeue["unrelated"])
+            self.assertIn(config.LABEL_AGENT, self.github.issue_labels)
+            self.assertNotIn(config.LABEL_HUMAN, self.github.issue_labels)
+            self.assertEqual(self.github.assignees, [])
+
+            [ready] = dispatch.frontier()
+            dispatch.process_ticket(ready, 30, False)
+
+            resolved = self.github.head()
+            self.assertNotEqual(resolved, self.approved_head)
+            self.assertEqual(
+                git(self.origin, "merge-base", "main", resolved),
+                git(self.origin, "rev-parse", "main"),
+            )
+            prompt = self.prompt_seen.read_text()
+            self.assertIn("## Refresh gate failure, round 1", prompt)
+            self.assertIn(first, prompt)
+            self.assertIn(second, prompt)
+            self.assertIn("failure appears unrelated to this PR's changes", prompt)
+            self.assertEqual(gate.call_count, 3)
+            self.assertEqual(self.events("escalate"), [])
+            self.assertIn(config.LABEL_APPROVED, self.github.pr_labels)
+
+            dispatch.merge_pass_locked(False)
+
+        self.assertTrue(self.github.merged)
+        self.assertEqual(self.events("escalate"), [])
+
+    def test_gate_failure_after_refresh_flags_failures_outside_pr_diff(self) -> None:
+        self.cfg.review_rounds = 0
+        report = "# Gate report\n- test: FAIL\n\napps/other/tests/test_status.py:12 failed"
+        with self.patched(), mock.patch.object(
+            dispatch, "run_gate", return_value=(False, report)
+        ):
+            self.assertFalse(dispatch.refresh_pr_branch(9, 102, False))
+
+        [rerun] = self.events("gate-rerun")
+        self.assertTrue(rerun["unrelated"])
+        [escalation] = self.events("escalate")
+        packet = Path(escalation["packet"]).read_text()
+        self.assertIn("failure appears unrelated to this PR's changes", packet)
+        self.assertIn("apps/other/tests/test_status.py:12 failed", packet)
+
+    def test_gate_failure_after_refresh_past_round_limit_escalates(self) -> None:
+        for round_number in range(1, self.cfg.review_rounds + 1):
+            dispatch.record("gate-requeue", ticket=9, pr=102, round=round_number,
+                            head=self.approved_head, reports=["old failure", "old failure"])
+        with self.patched(), mock.patch.object(
+            dispatch, "run_gate", return_value=(False, "persistent failure")
+        ):
+            self.assertFalse(dispatch.refresh_pr_branch(9, 102, False))
+
+        [escalation] = self.events("escalate")
+        self.assertEqual(escalation["code"], "gate_failed")
+        self.assertIn("after 3 gate-resolution round(s)", escalation["reason"])
+        self.assertEqual(len(self.events("gate-requeue")), 3)
+        self.assertIn("persistent failure", Path(escalation["packet"]).read_text())
+        self.assertIn(config.LABEL_HUMAN, self.github.issue_labels)
+
+    def test_closed_ticket_gate_failure_after_refresh_escalates_without_requeue(self) -> None:
+        closed_issue = {**self.github.issue(), "state": "CLOSED"}
+        with self.patched(), mock.patch.object(self.github, "issue", return_value=closed_issue), \
+                mock.patch.object(dispatch, "run_gate", return_value=(False, "persistent failure")) as gate:
+            self.assertFalse(dispatch.refresh_pr_branch(9, 102, False))
+
+        self.assertEqual(gate.call_count, 2)
+        [escalation] = self.events("escalate")
+        self.assertEqual(escalation["code"], "gate_failed")
+        self.assertIn("ticket is not open", escalation["reason"])
+        self.assertEqual(self.events("gate-requeue"), [])
+        self.assertIn(config.LABEL_HUMAN, self.github.issue_labels)
+
+
 class ManagerFixAheadTest(unittest.TestCase):
     """#264: a kept worktree ahead of the PR head with only the worker's own commits."""
 
@@ -357,3 +499,95 @@ class ManagerFixAheadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TriageExemptionRegateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        from factory import triage
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.tmp = Path(temp.name)
+        self.root, self.origin = build_fork(self.tmp)
+        git(self.origin, "checkout", "-qb", "agent/9")
+        (self.origin / "fix.txt").write_text("fix\n")
+        git(self.origin, "add", "fix.txt")
+        git(self.origin, "commit", "-qm", "fix")
+        git(self.origin, "checkout", "-q", "main")
+        self.cfg = config.Config(root=self.root, repo="acme/widgets", main="main")
+        dispatch.configure(self.cfg)
+        self.wt = dispatch.ensure_worktree(9)
+        self.issue = {
+            "title": "bug", "body": "Fix the hardware failure.",
+            "labels": [{"name": "bug"}],
+            "comments": [{
+                "author": {"login": "factory-bot"},
+                "body": "Triage: hardware issue\n\nAgent brief: investigate\n"
+                "No repro test: hardware-only triage reason\n"
+                "factory-protected-override: comment is not override authority",
+            }],
+        }
+        self.requests = []
+        self.login = mock.patch.object(triage, "login", return_value="factory-bot")
+        self.login.start()
+        self.addCleanup(self.login.stop)
+
+    def gh_json(self, args):
+        fields = args[args.index("--json") + 1].split(",")
+        if args[:2] == ["issue", "view"]:
+            self.requests.append(fields)
+            return {key: self.issue[key] for key in fields}
+        self.assertEqual(args[:2], ["pr", "view"])
+        pr = {
+            "state": "OPEN", "headRefName": "agent/9", "baseRefName": "main",
+            "headRefOid": git(self.wt, "rev-parse", "HEAD"), "reviewDecision": "",
+        }
+        return {key: pr[key] for key in fields}
+
+    def assert_triage_flags(self, gate):
+        kwargs = dict(gate.call_args.kwargs)
+        if "base" in kwargs:
+            self.assertRegex(kwargs.pop("base"), r"^[0-9a-f]{40}$")
+        self.assertEqual(kwargs, {
+            "protected_override": False, "bug": True,
+            "no_repro_test": "hardware-only triage reason",
+        })
+        self.assertTrue(any("comments" in fields for fields in self.requests))
+
+    def test_manager_fix_fetches_trusted_triage_comments_for_worker_gate(self) -> None:
+        packet = self.tmp / "packet.md"
+        packet.write_text("manager guidance")
+        with mock.patch.object(dispatch, "gh_json", side_effect=self.gh_json), \
+                mock.patch.object(dispatch, "build_prompt", return_value="fix the bug"), \
+                mock.patch.object(dispatch, "run_worker", return_value=(0, None)), \
+                mock.patch.object(dispatch, "commit_leftovers"), \
+                mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")) as gate, \
+                mock.patch.object(dispatch, "push_agent"), \
+                mock.patch.object(dispatch, "pr_gate_and_review", return_value=("APPROVE", "ok", False)), \
+                mock.patch.object(dispatch, "pr_comment"), \
+                mock.patch.object(dispatch, "approve_pr", return_value=True):
+            manage.apply(9, self.issue, "FIX", "", {"worker": "default", "guidance": "fix"}, packet)
+
+        self.assert_triage_flags(gate)
+
+    def test_refresh_fetches_trusted_triage_comments_for_gate(self) -> None:
+        (self.origin / "moved.txt").write_text("moved main\n")
+        git(self.origin, "add", "moved.txt")
+        git(self.origin, "commit", "-qm", "main moved")
+        real_run = dispatch.run
+
+        def run(cmd, *args, **kwargs):
+            if cmd[0] == "gh":
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            return real_run(cmd, *args, **kwargs)
+
+        with mock.patch.object(dispatch, "gh_json", side_effect=self.gh_json), \
+                mock.patch.object(dispatch, "run", side_effect=run), \
+                mock.patch.object(dispatch, "run_gate", return_value=(True, "ok")) as gate, \
+                mock.patch.object(dispatch, "push_agent", return_value="pushed"), \
+                mock.patch.object(dispatch, "review", return_value=("APPROVE", "ok")), \
+                mock.patch.object(dispatch, "pr_comment"), \
+                mock.patch.object(dispatch, "approve_pr", return_value=True):
+            self.assertTrue(dispatch.refresh_pr_branch(9, 102, False))
+
+        self.assert_triage_flags(gate)

@@ -23,6 +23,7 @@ from pathlib import Path
 
 from factory import __version__, config, lifecycle
 from factory.config import (
+    BANDS_NAME,
     CONFIG_NAME,
     LABELS,
     LOOPBACK_HOSTS,
@@ -76,7 +77,7 @@ def ensure_labels(slug: str) -> list[str]:
 def init(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="factory init",
-        description="Prepare this repository: .factory.toml, .gitignore, issue template, labels.",
+        description=f"Prepare this repository: {CONFIG_NAME}, {BANDS_NAME}, issue templates, labels.",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--no-labels", action="store_true", help="skip creating GitHub labels")
@@ -101,6 +102,12 @@ def init(argv: list[str]) -> int:
     else:
         shutil.copyfile(TEMPLATES / "factory.toml", cfg_path)
         done.append(f"wrote {CONFIG_NAME}")
+    bands_path = root / BANDS_NAME
+    if bands_path.exists():
+        done.append(f"kept existing {BANDS_NAME}")
+    else:
+        shutil.copyfile(TEMPLATES / BANDS_NAME, bands_path)
+        done.append(f"wrote {BANDS_NAME}")
 
     for line in GITIGNORE_LINES:
         if ensure_line(root / ".gitignore", line):
@@ -137,7 +144,7 @@ def init(argv: list[str]) -> int:
         "\nnext:\n"
         f"  1. edit {CONFIG_NAME}: put your real test/lint commands in [[gate.check]],\n"
         f"     and the same commands in {CI_WORKFLOW} (the merge stage needs a passing check)\n"
-        f"  2. git add {CONFIG_NAME} .gitignore {ISSUE_TEMPLATE.parent} {WORKFLOWS} && git commit\n"
+        f"  2. git add {CONFIG_NAME} {BANDS_NAME} .gitignore {ISSUE_TEMPLATE.parent} {WORKFLOWS} && git commit\n"
         "  3. factory doctor\n"
         "  4. factory install --dashboard   # systemd user timer, every 10 min"
     )
@@ -498,6 +505,18 @@ def doctor(argv: list[str]) -> int:
            f"{len(found)} saved plan(s) or plan scratch dir(s) may hold secrets; delete them: {', '.join(found[:5])}"
            + (" ..." if len(found) > 5 else "") + (f" (scanned only {scope.rstrip(',')})" if truncated else "")
            if found else (f"none in {scope} or temp dir" + ("; scan truncated" if truncated else "")))
+    bands_present = (cfg.root / BANDS_NAME).exists()
+    report(
+        True if bands_present else None,
+        f"{BANDS_NAME} present",
+        "" if bands_present else "missing; control-band alarms are disabled (run `factory init`)",
+    )
+    bands_tracked = sh(["git", "ls-files", "--error-unmatch", BANDS_NAME], cwd=cfg.root).returncode == 0
+    report(
+        True if bands_tracked else None,
+        f"{BANDS_NAME} committed",
+        "" if bands_tracked else "commit it so clones use the reviewed thresholds and tiers",
+    )
 
     unknown = config.unknown_keys(cfg.raw_repo)
     report(
@@ -515,6 +534,11 @@ def doctor(argv: list[str]) -> int:
     if unset:
         report(None, "defaults in effect", ", ".join(unset), info=True)
     report_stage_success(cfg, report)
+    if cfg.watch_bands:
+        from factory import watch
+
+        detail = watch.baseline_status(cfg, lifecycle.read_events(cfg.factory / "events.jsonl"))
+        report(None if detail else True, "watch control bands", detail or f"{len(cfg.watch_bands)} configured")
 
     for tmpl in (ISSUE_TEMPLATE, INITIATIVE_TEMPLATE):
         shipped, ours = sha256(TEMPLATES / tmpl.name), sha256(cfg.root / tmpl)
@@ -957,6 +981,20 @@ def units(cfg: config.Config, every: str, host: str) -> dict[str, str]:
             f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{dispatch_env}"
             f"ExecStart={exe} apply\n"
         )
+    if cfg.eval_schedule:
+        profile = systemd_argument(cfg.eval_profile)
+        wanted.update({
+            f"{cfg.unit}-eval.service": (
+                f"[Unit]\nDescription=Run the frozen worker eval suite for {cfg.repo}\n\n"
+                f"[Service]\nType=oneshot\nWorkingDirectory={cfg.root}\n{env}"
+                f"ExecStart={exe} eval --profile {profile} --scheduled\n"
+            ),
+            f"{cfg.unit}-eval.timer": (
+                f"[Unit]\nDescription=Run the frozen worker eval suite for {cfg.repo} weekly\n\n"
+                "[Timer]\nOnCalendar=weekly\nPersistent=true\nRandomizedDelaySec=30min\n\n"
+                "[Install]\nWantedBy=timers.target\n"
+            ),
+        })
     return wanted
 
 
@@ -996,6 +1034,8 @@ def install(argv: list[str]) -> int:
     dash_unit = f"{cfg.unit}-dashboard.service"
     probe_service = f"{cfg.unit}-triage-probe.service"
     probe_timer = f"{cfg.unit}-triage-probe.timer"
+    eval_service = f"{cfg.unit}-eval.service"
+    eval_timer = f"{cfg.unit}-eval.timer"
     if not args.dashboard:
         wanted.pop(dash_unit)
     if args.print:
@@ -1066,6 +1106,13 @@ def install(argv: list[str]) -> int:
             raise ConfigError(f"{stale_apply.name} is {active}; let the apply finish, then rerun `factory install`")
         stale_apply.unlink()
         print(f"removed {stale_apply}")
+    if not cfg.eval_schedule:
+        if (udir / eval_timer).exists():
+            systemctl("disable", "--now", eval_timer)
+        for name in (eval_service, eval_timer):
+            if (udir / name).exists():
+                (udir / name).unlink()
+                print(f"removed {udir / name}")
     systemctl("daemon-reload")
     if args.no_start:
         print(f"factory install --no-start: units written to {udir}; systemd reloaded; nothing enabled or started")
@@ -1083,6 +1130,11 @@ def install(argv: list[str]) -> int:
         if probe_timer in changed:
             systemctl("restart", probe_timer)
         print(f"{'restarted' if probe_timer in changed else 'started'} {probe_timer}")
+    if cfg.eval_schedule:
+        systemctl("enable", "--now", eval_timer)
+        if eval_timer in changed:
+            systemctl("restart", eval_timer)
+        print(f"{'restarted' if eval_timer in changed else 'started'} {eval_timer}")
     if args.dashboard:
         systemctl("enable", "--now", dash_unit)
         if dash_unit in changed:
@@ -1093,6 +1145,8 @@ def install(argv: list[str]) -> int:
     enabled = [f"{cfg.unit}.timer"]
     if cfg.triage_service:
         enabled.append(probe_timer)
+    if cfg.eval_schedule:
+        enabled.append(eval_timer)
     if args.dashboard:
         enabled.append(dash_unit)
     print(f"stop with: systemctl --user disable --now {' '.join(enabled)}")

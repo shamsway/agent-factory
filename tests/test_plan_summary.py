@@ -75,6 +75,7 @@ class PlanSummaryTest(unittest.TestCase):
         root = Path(tmp.name)
         called = []
         cfg = SimpleNamespace(
+            review_policy="REVIEW.md",
             main="main",
             apply_enabled=apply_enabled,
             review_cmd=lambda p: ["reviewer", p],
@@ -88,7 +89,7 @@ class PlanSummaryTest(unittest.TestCase):
                 output = "head\n"
             else:
                 called.append(cmd)
-                output = "VERDICT: APPROVE"
+                output = '```json\n{"verdict":"APPROVE","findings":[]}\n```\nVERDICT: APPROVE'
             return subprocess.CompletedProcess(cmd, 0, stdout=output, stderr="")
 
         responses = [
@@ -140,6 +141,7 @@ class PlanSummaryTest(unittest.TestCase):
             path = root / ".factory/terraform-plan-summary-1.md"
             path.write_text(SUMMARY + "credential-fixture-secret")
             cfg = SimpleNamespace(
+                review_policy="REVIEW.md",
                 apply_enabled=True,
                 apply_env={"KEY": "credential-fixture-secret"},
                 install={},
