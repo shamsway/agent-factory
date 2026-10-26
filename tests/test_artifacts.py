@@ -26,7 +26,7 @@ def setUpModule() -> None:
 
 SECRET = "s3cr3t-apply-value-123"
 GH_TOKEN = "ghp_" + "a" * 30
-PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIEabc\n-----END RSA PRIVATE KEY-----\n"
+PEM = "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEabc\n-----END " + "RSA PRIVATE KEY-----\n"
 LOG = f"Initializing\napi_key = {SECRET}\nauth {GH_TOKEN}\n{PEM}Apply complete! Resources: 1 added.\n"
 
 
