@@ -711,8 +711,13 @@ def main(argv: list[str]) -> int:
                         help="attempt: every check except `when = \"pr\"`/`\"release\"` ones (reported SKIP); "
                         "pr: only the `when = \"pr\"` checks (release ones reported SKIP); "
                         "release: only the `when = \"release\"` checks")
+    parser.add_argument("--replay", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    configure(config.load())
+    if args.replay:
+        # A learn replay gates its own linked worktree: that checkout's config and journal,
+        # never the main checkout's, and no context inherited from the evaluating process.
+        os.environ.pop(lifecycle.CONTEXT_ENV, None)
+    configure(config.load(worktree=args.replay))
     with lifecycle.scope(cfg.factory / "events.jsonl", "gate") as execution:
         return execute(args, execution)
 

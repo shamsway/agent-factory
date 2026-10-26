@@ -1602,10 +1602,11 @@ def run_gate(
     test_override: bool = False, add_only_override: bool = False,
     tier: str = "attempt", upstream: list[str] = (), bug: bool = False,
     repro_test: str | None = None, no_repro_test: str | None = None,
-    base: str | None = None, timeout: float | None = None,
+    base: str | None = None, timeout: float | None = None, replay: bool = False,
 ) -> tuple[bool, str]:
     """`base`: the comparison commit, captured before the worker ran (default: origin/<main> now).
-    The gate gets hashes, never refs a worker could have moved."""
+    The gate gets hashes, never refs a worker could have moved. `replay`: a learn replay
+    worktree, gated on its own config and journal."""
     report_rel = f".factory/gate-report-{n}.md"
     (wt / ".factory").mkdir(exist_ok=True)
     started = time.monotonic()
@@ -1635,6 +1636,8 @@ def run_gate(
         cmd += ["--upstream", trusted_rev(ref)]
     if tier != "attempt":
         cmd += ["--tier", tier]
+    if replay:
+        cmd.append("--replay")
     # The gate's own git reads inherit the pinned Git paths; it strips them for checks.
     proc = run(cmd, cwd=wt, check=False, env=gitguard.env(ROOT, wt), timeout=timeout)
     report = wt / report_rel

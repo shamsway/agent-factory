@@ -351,7 +351,7 @@ def replay_ticket(
                 ok = False
             else:
                 ok, report = dispatch.run_gate(
-                    wt, f"learn-{case.ticket}-{attempt}", base=base,
+                    wt, f"learn-{case.ticket}-{attempt}", base=base, replay=True,
                 )
             if attempt == 1:
                 first_gate_pass = ok
@@ -367,7 +367,7 @@ def replay_ticket(
             review_report = report
             if _pr_checks(wt):
                 pr_ok, pr_report = dispatch.run_gate(
-                    wt, f"learn-{case.ticket}-pr-{bounce + 1}", tier="pr", base=base,
+                    wt, f"learn-{case.ticket}-pr-{bounce + 1}", tier="pr", base=base, replay=True,
                 )
                 review_report = f"{report}\n{pr_report}"
                 if not pr_ok:
@@ -432,7 +432,7 @@ def replay_ticket(
             ok, report = (False, f"worker replay stopped by {fired or 'budget_min'}") if (
                 fired or time.monotonic() >= deadline
             ) else dispatch.run_gate(
-                wt, f"learn-{case.ticket}-review-{bounce + 1}", base=base,
+                wt, f"learn-{case.ticket}-review-{bounce + 1}", base=base, replay=True,
             )
 
         return {
