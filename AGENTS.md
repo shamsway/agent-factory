@@ -38,7 +38,8 @@ anything (`experiments/verification-claims/REPORT.md`).
 
 Gate checks come from `.factory.toml`: `test` runs `unittest discover -s tests`, so
 it exercises every test listed below. `privacy` runs `scripts/privacy-check.py --require-denylist` on the
-change against the host's private denylist, which workers can't read. The built-in `conflict-markers`,
+change against the host's private denylist, which workers can't read; text already on upstream main
+(`--published upstream/main`) is upstream's publication, not the fork's. The built-in `conflict-markers`,
 `protected-paths` and `leak-scan` (default pattern) checks run on every diff.
 `tests/test_agents_map.py` fails when a `factory/` module is missing from this
 map or a path in it does not exist; update the map in the same change.

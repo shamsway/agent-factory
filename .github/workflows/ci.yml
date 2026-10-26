@@ -22,12 +22,15 @@ jobs:
       - name: Publication privacy (added lines, commit messages, branch name)
         # Generic rules only here; operator terms live in a private denylist, run locally.
         # Upstream sync merges carry the upstream history and are reviewed separately.
+        # Text already on upstream main is published there, not by this fork.
         if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'sync/')
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           BRANCH: ${{ github.head_ref }}
-        run: python3 scripts/privacy-check.py --range "$BASE...$HEAD" --branch "$BRANCH"
+        run: |
+          git fetch --quiet --no-tags https://github.com/mikeroySoft/factory.git main
+          python3 scripts/privacy-check.py --range "$BASE...$HEAD" --branch "$BRANCH" --published FETCH_HEAD
       - name: Ruff
         run: uvx ruff@0.16.10 check .
   test:
