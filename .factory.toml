@@ -1,6 +1,11 @@
 # agent-factory configuration. Docs: https://github.com/mikeroySoft/factory
 # Gate checks proposed by District from: --check
 
+# Fork only: the dispatcher stages upstream main into an `upstream sync:` ticket whenever it
+# moves; the host's root needs a remote named `upstream`. Sync PRs merge with operator approval.
+[repo]
+upstream = "upstream"
+
 [gate]
 protected_paths = [".factory.toml", "**/acceptance/**", "**/*review*prompt*", "TRACKING*", "**/TRACKING*", "scripts/privacy-check.py"]
 add_only_paths = ["tests/**"]

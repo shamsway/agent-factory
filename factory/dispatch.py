@@ -2043,6 +2043,10 @@ def sync_issue(tip: str, count: str, staged: str, evidence: str) -> int:
         "and the gate passes. The dispatcher rejects a passing gate whose HEAD does not contain "
         f"the tip. Never push `{cfg.main}`; the merge stage lands the reviewed PR."
     )
+    # handoff imports dispatch, so this import stays local
+    from factory.handoff import public as public_text
+
+    body = public_text(body)  # public issue: gate output and merge stderr carry runner-local paths
     body_file = FACTORY / "sync-issue.md"
     body_file.write_text(body)
     out = run(

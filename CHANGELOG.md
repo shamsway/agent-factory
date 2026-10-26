@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The upstream sync issue withholds runner-local absolute paths and neutralizes `@` mentions in its body, through the same sanitizer as escalation comments, so the staged gate report and merge stderr it quotes no longer publish host paths on a public repository. The tip, counts and exit gate are unchanged; `.factory/sync-issue.md` is written sanitized.
 - Escalation comments on public issues withhold runner-local absolute paths (`(local path withheld)`) and neutralize `@` mentions in worker handoff notes, through the same sanitizer as terminal handoffs. The reason line and `Factory dispatcher escalating: ` prefix are unchanged; URLs are untouched; the journal, packets, logs and handoff files keep the raw text (#69).
 - `factory investigation-run`: a supported, operator-only command that runs the existing model broker on one real, unresolved deployment incident. It previews by default; a live request needs `--live --confirm-provider-spend-cap --projection-sha256 H` and the existing `[investigation]` switches. It reuses the evidence reader, receipts, budgets and per-run lock, returns cached results without a second request, never retries an unknown outcome, journals safe metadata only and never publishes.
 - Gate and dispatcher subprocess reads now decode arbitrary check, Git, and toolchain output as UTF-8 with replacement, so invalid bytes preserve the command's real pass/fail result instead of crashing the pipeline (#365).
