@@ -33,8 +33,12 @@ class MergeBlockedTest(unittest.TestCase):
             "files": [{"path": "factory/dispatch.py"}],
         }
         self.pr = pr
-        # Gate, review and approval already recorded for this exact head.
+        # Risk tier, gate, review and approval already recorded for this exact head.
+        # Without a risk row the head is an unclassified legacy head, and its High-risk
+        # path (factory/dispatch.py) fails the evidence check before the merge.
         for row in (
+            {"event": "risk", "ticket": 7, "head": HEAD, "tier": "Medium",
+             "matched_rules": ["medium:fixture"]},
             {"event": "attempt", "ticket": 7, "head": HEAD, "gate": "PASS", "actual_head": HEAD},
             {"event": "review", "ticket": 7, "head": HEAD, "accepted": True,
              "verdict": "APPROVE", "actual_head": HEAD},
