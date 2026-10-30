@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Reviewer calibration model replay resolves the git HEAD contract only when it runs the default matrix runner, so injected runners work in copies without a `.git` directory (the mutation-tier baseline copy).
 - Fork: `learn` replays run in a linked worktree under `.factory/`, because gitguard pins git there and a standalone clone has no admin directory. Their gate now runs with `--replay`, so it reads that worktree's `.factory.toml` and journals into the worktree, not the main checkout's `events.jsonl`, even when the evaluating process carries a lifecycle context (#73).
 - Fork: `scripts/privacy-check.py --published REF` treats lines already present in REF's copy of a file, and messages of commits REF contains, as already public. The gate check and CI pass upstream main, so an upstream sync no longer fails on upstream's own fixtures; a REF that does not resolve excludes nothing (#73).
 - Reviewer calibration runs now take their default model from the effective Factory reviewer configuration, record the selected model, and can replay the frozen split three times across an explicit model matrix with quality/noise, stable pass→fail, token, configured-price, wall-time, and viability reports (#438).
