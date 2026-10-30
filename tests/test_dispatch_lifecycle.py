@@ -148,6 +148,80 @@ class LocalCLI(unittest.TestCase):
     def rows(self):
         return [r for r in lifecycle.read_events(self.events) if r.get("event") == "lifecycle"]
 
+    def test_run_gate_uses_installed_runner_and_discards_stale_report(self):
+        import shutil
+        import venv
+        from unittest import mock
+
+        from factory import config, dispatch
+
+        check_cwd = self.base / "check-cwd"
+        check = self.base / "check.py"
+        check.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(check_cwd)!r}).write_text(str(Path.cwd()))\n"
+        )
+        self.write_config(check=[sys.executable, str(check)])
+
+        stub = self.repo / "factory"
+        stub.mkdir()
+        (stub / "__init__.py").write_text("")
+        (stub / "__main__.py").write_text(
+            "import sys\n"
+            "print('worktree factory rejected --bug', file=sys.stderr)\n"
+            "raise SystemExit(64)\n"
+        )
+        stale = self.repo / ".factory" / "gate-report-7.md"
+        stale.parent.mkdir(exist_ok=True)
+        stale.write_text("STALE REPORT\n")
+
+        runner = self.base / "runner"
+        venv.EnvBuilder(with_pip=False).create(runner)
+        runner_python = runner / "bin" / "python"
+        purelib = subprocess.run(
+            [
+                str(runner_python),
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        shutil.copytree(Path(dispatch.__file__).parent, Path(purelib) / "factory")
+
+        dispatch.configure(config.load(self.repo))
+        with mock.patch.object(dispatch.sys, "executable", str(runner_python)), \
+                mock.patch.dict(os.environ, {"PYTHONPATH": str(self.repo)}):
+            ok, report = dispatch.run_gate(
+                self.repo, 7, bug=True, no_repro_test="fixture exemption",
+            )
+
+        self.assertTrue(ok, report)
+        self.assertIn("- code: PASS", report)
+        self.assertNotIn("STALE REPORT", report)
+        self.assertEqual(check_cwd.read_text(), str(self.repo))
+
+        failed_runner = self.base / "failed-runner"
+        failed_runner.write_text(
+            "#!/bin/sh\n"
+            "echo 'isolated runner failed' >&2\n"
+            "exit 64\n"
+        )
+        failed_runner.chmod(0o755)
+        stale.write_text("STALE REPORT\n")
+        with mock.patch.object(dispatch.sys, "executable", str(failed_runner)):
+            ok, report = dispatch.run_gate(self.repo, 7)
+        self.assertFalse(ok)
+        self.assertNotIn("STALE REPORT", report)
+        self.assertIn("isolated runner failed", report)
+
+        failed_runner.write_text("#!/bin/sh\nexit 0\n")
+        with mock.patch.object(dispatch.sys, "executable", str(failed_runner)):
+            ok, report = dispatch.run_gate(self.repo, 7)
+        self.assertFalse(ok)
+        self.assertIn("did not write .factory/gate-report-7.md", report)
+
     def test_host_worker_wrap_launches_real_worker(self):
         # Launch-contract proof only: a recording wrapper, NOT sandbox proof.
         log = self.base / "wrap.log"
@@ -626,6 +700,85 @@ class LocalCLI(unittest.TestCase):
         self.assertIn("- slow: SKIP (pr tier)", report)
         self.assertEqual(self.pr_runs(), [])
 
+    def protected_path_escalation(self, *, delete=False, bounce=False):
+        path = self.repo / "tests" / "test_old.py"
+        path.parent.mkdir()
+        path.write_text("def test_old():\n    assert True\n")
+        config = self.repo / ".factory.toml"
+        config.write_text(config.read_text().replace(
+            "[gate]\n", '[gate]\nadd_only_paths = ["tests/**"]\n',
+        ))
+        self.git("add", ".factory.toml", "tests/test_old.py")
+        self.git("commit", "-qm", "protect existing tests")
+        self.git("push", "-q", "origin", "main")
+        issue_setup = (
+            'issue["labels"].append({"name": "bug"})\n'
+            'issue["body"] += "\\nNo repro test: escalation guidance fixture"\n'
+        )
+        if delete:
+            issue_setup += 'issue["labels"].append({"name": "factory-add-only-override"})\n'
+        (self.bin / "gh").write_text(GH.replace(
+            'if s.get("sync"):', issue_setup + 'if s.get("sync"):',
+        ))
+        change = "p.unlink()" if delete else 'p.write_text("# obsolete test removed\\n")'
+        self.worker.write_text(
+            "from pathlib import Path\n"
+            'p = Path("tests/test_old.py")\n'
+            + ("if Path('change.txt').exists():\n    " + change + "\n"
+               "else:\n    Path('change.txt').write_text('first attempt\\n')\n"
+               if bounce else change + "\n")
+        )
+
+        self.cli("dispatch", "--ticket", "7")
+
+        events = lifecycle.read_events(self.events)
+        [escalation] = [e for e in events if e.get("event") == "escalate"]
+        self.assertEqual(escalation["code"], "protected_paths")
+        self.assertEqual(escalation["reason"], "worker removed or changed existing tests")
+        self.assertEqual(len([e for e in events if e.get("event") == "review"]), int(bounce))
+        packet = Path(escalation["packet"]).read_text()
+        self.assertIn("`add-only`", packet)
+        if delete:
+            self.assertIn("already present", packet)
+            self.assertIn("human-only", packet.lower())
+            self.assertIn("`factory-protected-override`", packet)
+            self.assertIn("cannot", packet)
+        else:
+            self.assertIn("`factory-add-only-override`", packet)
+            self.assertIn("AUTHORIZE", packet)
+
+        wt = self.repo / ".factory" / "wt-7"
+        result = subprocess.run(
+            [sys.executable, "-m", "factory", "gate", "--bug", "--no-repro-test",
+             "escalation guidance fixture", "--add-only-override"],
+            cwd=wt, env=self.env, capture_output=True, text=True, timeout=60, check=False,
+        )
+        self.assertEqual(result.returncode, int(delete), result.stdout + result.stderr)
+        report = (wt / ".factory" / "gate-report.md").read_text()
+        if delete:
+            self.assertIn("- protected-paths: FAIL (add-only", report)
+            self.assertIn("deleted file mode", report)
+            result = subprocess.run(
+                [sys.executable, "-m", "factory", "gate", "--bug", "--no-repro-test",
+                 "escalation guidance fixture", "--protected-override"],
+                cwd=wt, env=self.env, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotIn(": FAIL", report)
+
+    def test_add_only_text_edit_escalation_names_manager_authority(self):
+        self.protected_path_escalation()
+
+    def test_add_only_text_edit_review_bounce_names_manager_authority(self):
+        self.protected_path_escalation(bounce=True)
+
+    def test_authorized_file_deletion_escalates_to_human_authority(self):
+        self.protected_path_escalation(delete=True)
+
+    def test_authorized_file_deletion_review_bounce_escalates_to_human_authority(self):
+        self.protected_path_escalation(delete=True, bounce=True)
+
     def test_invalid_when_is_a_config_error_naming_the_key(self):
         self.pr_config(fails=0, when="nightly")
         result = self.cli("gate", expected=1)
@@ -671,6 +824,61 @@ class LocalCLI(unittest.TestCase):
         self.assertEqual([e["code"] for e in escalations], ["no_change"])
         self.assertIn("committed nothing", escalations[0]["reason"])
         self.assertFalse(json.loads(self.state.read_text()).get("pr"))
+
+    def test_early_ticket_exit_does_not_poison_later_manager_fix_push(self):
+        from unittest import mock
+
+        from factory import config, dispatch, manage
+
+        wt = self.repo / ".factory" / "wt-7"
+        wt.parent.mkdir(exist_ok=True)
+        self.git("worktree", "add", str(wt), "-b", "agent/7")
+        self.git("-C", str(wt), "commit", "--allow-empty", "-qm", "remote work")
+        self.git("-C", str(wt), "push", "-q", "origin", "agent/7")
+        remote = self.git("rev-parse", "agent/7").stdout.strip()
+        self.git("-C", str(wt), "checkout", "-q", "--detach", "main")
+        issue = {"number": 7, "title": "local change", "body": "", "labels": []}
+        pr = {"state": "OPEN", "headRefName": "agent/7", "headRefOid": remote,
+              "baseRefName": "main", "reviewDecision": ""}
+        packet = wt.parent / "packet.md"
+        packet.write_text("fix it")
+
+        with mock.patch.dict(os.environ, self.env):
+            dispatch.configure(config.load(self.repo))
+            with mock.patch.object(dispatch, "ensure_worktree", return_value=wt), \
+                    mock.patch.object(dispatch, "worker_round", return_value=(
+                        False, "- protected-tests: FAIL", None, remote,
+                    )):
+                dispatch.process_ticket(issue, 1, False, forced=True)
+
+            escalations = [e for e in lifecycle.read_events(self.events) if e.get("event") == "escalate"]
+            self.assertEqual([e["code"] for e in escalations], ["protected_paths"])
+            self.assertEqual(
+                self.git("ls-remote", "origin", "refs/heads/agent/7").stdout.split()[0], remote,
+            )
+            self.git("-C", str(wt), "checkout", "-q", "agent/7")
+
+            def worker(*args, **kwargs):
+                self.git("-C", str(wt), "reset", "-q", "main")
+                self.git("-C", str(wt), "commit", "--allow-empty", "-qm", "manager worker rewrite")
+                head = self.git("-C", str(wt), "rev-parse", "HEAD").stdout.strip()
+                return True, "- code: PASS", None, head
+
+            with mock.patch.object(dispatch, "gh_json", return_value=pr), \
+                    mock.patch.object(dispatch, "worker_round", side_effect=worker), \
+                    mock.patch.object(dispatch, "record_risk"), \
+                    mock.patch.object(dispatch, "pr_gate_and_review", return_value=("APPROVE", "", False)), \
+                    mock.patch.object(dispatch, "pr_comment"), \
+                    mock.patch.object(dispatch, "approve_pr", return_value=True), \
+                    mock.patch.object(dispatch, "escalate") as escalate:
+                manage.apply(7, issue, "FIX", "", {"worker": "default", "guidance": "fix"}, packet)
+
+            head = self.git("-C", str(wt), "rev-parse", "HEAD").stdout.strip()
+            self.assertNotEqual(head, remote)
+            self.assertEqual(
+                self.git("ls-remote", "origin", "refs/heads/agent/7").stdout.split()[0], head,
+            )
+            escalate.assert_not_called()
 
     def test_worker_that_dies_without_commits_or_handoff_stays_pr_unpublished(self):
         # A crashed worker is a factory failure watch must still count, not a ticket outcome.
