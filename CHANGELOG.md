@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Fork: `scripts/privacy-check.py --range` also checks each commit's author and committer identity (`%an <%ae>`, `%cn <%ce>`) against the same rules, reporting `commit <sha> author` or `commit <sha> committer`. Commits reachable from `--published` are skipped for identities too; merge commits GitHub creates at merge time are out of scope (#78).
 - A merge GitHub refuses on base branch policy (`base branch policy prohibits the merge`) no longer aborts the merge pass. The PR keeps its approval label and gets a `merge blocked` merge decision plus a `merge_blocked` merge-eligibility wait, so later passes retry the merge; other `gh pr merge` failures still raise (#77).
 - Fork: `learn` replays run in a linked worktree under `.factory/`, because gitguard pins git there and a standalone clone has no admin directory. Their gate now runs with `--replay`, so it reads that worktree's `.factory.toml` and journals into the worktree, not the main checkout's `events.jsonl`, even when the evaluating process carries a lifecycle context (#73).
 - Fork: `scripts/privacy-check.py --published REF` treats lines already present in REF's copy of a file, and messages of commits REF contains, as already public. The gate check and CI pass upstream main, so an upstream sync no longer fails on upstream's own fixtures; a REF that does not resolve excludes nothing (#73).
