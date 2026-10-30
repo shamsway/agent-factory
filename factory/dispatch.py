@@ -1180,6 +1180,9 @@ def record_merge_decision(
             else "head, approval, or CI is not currently mergeable"
         ),
         "refresh branch": rationale if chosen == "refresh branch" else "head contains current main",
+        "merge blocked": (
+            rationale if chosen == "merge blocked" else "GitHub has not refused the merge"
+        ),
         "remove stale factory-approved label": (
             rationale if chosen == "remove stale factory-approved label" else "approval remains current"
         ),
@@ -3638,6 +3641,14 @@ def human_head_approval(pr_number: int, head: str) -> tuple[bool, str]:
     return deploy.verify_revision_authorization(evidence)
 
 
+MERGE_POLICY_REFUSAL = "base branch policy prohibits the merge"
+
+
+def _merge_policy_refusal(exc: subprocess.CalledProcessError) -> bool:
+    """True when GitHub refused `gh pr merge` because the base branch policy blocks it (#77)."""
+    return MERGE_POLICY_REFUSAL in (exc.stderr or "")
+
+
 def merge_pass_locked(dry_run: bool) -> None:
     """Ticket PR merge stage; `factory learn` PRs in the same listing go to `learn.promote_pass` first."""
     prs = gh_json(
@@ -3948,40 +3959,61 @@ def merge_pass_locked(dry_run: bool) -> None:
                 continue
             method = "--merge" if carries_upstream else "--squash"
             body = f"Closes #{n}\n\n{signoff()}" if cfg.signoff else f"Closes #{n}"
-            with lifecycle.scope(EVENTS, "merge", ticket=n):
-                run(
-                    [
-                        "gh",
-                        "pr",
-                        "merge",
-                        str(pr_num),
-                        "--repo",
-                        REPO,
-                        method,
-                        "--match-head-commit",
-                        head,
-                        "--subject",
-                        final["title"],
-                        "--body",
-                        body,
-                    ]
-                )
+            blocked = None
+            with lifecycle.scope(EVENTS, "merge", ticket=n) as merge:
                 try:
-                    merged_pr = gh_json([
-                        "pr", "view", str(pr_num), "--repo", REPO, "--json", "mergeCommit",
-                    ])
-                    merge_commit = merged_pr.get("mergeCommit") if isinstance(merged_pr, dict) else None
-                    merge_sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
-                except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
-                    merge_sha = None
-                record(
-                    "merged", ticket=n, pr=pr_num, method=method[2:], head=head,
-                    merge_sha=merge_sha,
+                    run(
+                        [
+                            "gh",
+                            "pr",
+                            "merge",
+                            str(pr_num),
+                            "--repo",
+                            REPO,
+                            method,
+                            "--match-head-commit",
+                            head,
+                            "--subject",
+                            final["title"],
+                            "--body",
+                            body,
+                        ]
+                    )
+                except subprocess.CalledProcessError as exc:
+                    if not _merge_policy_refusal(exc):
+                        raise
+                    blocked = exc
+                    merge.outcome, merge.reason = "not_eligible", "merge_blocked"
+                if blocked is None:
+                    try:
+                        merged_pr = gh_json([
+                            "pr", "view", str(pr_num), "--repo", REPO, "--json", "mergeCommit",
+                        ])
+                        merge_commit = merged_pr.get("mergeCommit") if isinstance(merged_pr, dict) else None
+                        merge_sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+                    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+                        merge_sha = None
+                    record(
+                        "merged", ticket=n, pr=pr_num, method=method[2:], head=head,
+                        merge_sha=merge_sha,
+                    )
+                    record_merge_decision(
+                        n, pr_num, "merge now", f"gate, review, approval, and CI passed for {head}",
+                        head, head, latest_checks, merge_sha=merge_sha,
+                    )
+            if blocked is not None:
+                log(
+                    f"PR #{pr_num}: GitHub refused the merge (base branch policy); waiting for GitHub "
+                    f"to allow it: {stderr_tail(blocked.stderr)}"
                 )
                 record_merge_decision(
-                    n, pr_num, "merge now", f"gate, review, approval, and CI passed for {head}",
-                    head, head, latest_checks, merge_sha=merge_sha,
+                    n, pr_num, "merge blocked",
+                    f"GitHub refused merging {head} under the base branch policy",
+                    head, head, latest_checks,
                 )
+                execution.outcome, execution.reason = "not_eligible", "merge_blocked"
+                execution.wait("merge_blocked", mode="eligibility", pr=pr_num)
+                continue
             execution.outcome = "merged"
             log(f"PR #{pr_num}: merged into {cfg.main} ({method[2:]}, ticket #{n})")
             cleanup_after_merge(n, head)
