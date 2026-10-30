@@ -2,7 +2,7 @@
 """Publication check for this public repository: nothing private gets added.
 
 Scans what a change would publish (the lines a commit range adds, its commit
-messages, a branch name, PR text files) or, with --tree, every tracked file.
+messages and author/committer identities, a branch name, PR text files) or, with --tree, every tracked file.
 Built-in rules are generic: private IPv4 ranges and user home-directory paths.
 Operator-specific terms (hostnames, private repository names, tracker issue
 keys) belong in a private denylist that is never committed: one Python regex
@@ -115,14 +115,14 @@ def published_lines(commit: str, path: str) -> set[str]:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--range", help="commit range whose added lines and messages are checked, e.g. origin/main...HEAD")
+    parser.add_argument("--range", help="commit range whose added lines, messages and author/committer identities are checked, e.g. origin/main...HEAD")
     parser.add_argument("--branch", help="branch name to check")
     parser.add_argument("--text", nargs="*", default=[], help="text files to check (PR title/body drafts)")
     parser.add_argument("--tree", action="store_true", help="check every tracked file (existing exposure)")
     parser.add_argument("--denylist", type=Path, help="private denylist (one regex per line)")
     parser.add_argument("--published", action="append", default=[], metavar="REF",
                         help="already-public revision, e.g. upstream/main (repeatable): a --range line equal to a "
-                             "line of the same file there, or a message of a commit it contains, is not new "
+                             "line of the same file there, or a message or identity of a commit it contains, is not new "
                              "exposure; a REF that does not resolve excludes nothing")
     parser.add_argument("--require-denylist", action="store_true",
                         help="fail (exit 2) unless the default or $FACTORY_PRIVACY_DENYLIST denylist exists and has "
@@ -139,6 +139,9 @@ def main(argv: list[str]) -> int:
             found += scan(path, [row for row in rows if row[1] not in public], rules)
         for sha in git("rev-list", args.range.replace("...", ".."), *(f"^{c}" for c in published)).split():
             found += scan(f"commit {sha[:12]} message", git("log", "-1", "--format=%B", sha).splitlines(), rules)
+            author, committer = git("log", "-1", "--format=%an <%ae>%n%cn <%ce>", sha).rstrip("\n").split("\n")
+            found += scan(f"commit {sha[:12]} author", [author], rules)
+            found += scan(f"commit {sha[:12]} committer", [committer], rules)
     if args.branch:
         found += scan("branch name", [args.branch], rules)
     for name in args.text:
