@@ -147,9 +147,14 @@ fails when they are equal; unset, nothing changes. Worker and reviewer agents ne
 get a GitHub credential: the dispatcher drops `GH_TOKEN`/`GITHUB_TOKEN` and points
 `GH_CONFIG_DIR` at a fresh empty directory for them. Workers only commit; the
 dispatcher pushes `agent/<n>` with `--force-with-lease=agent/<n>:<sha>`, the remote
-sha it last fetched or pushed, so a worker rewrite (e.g. a rebase) lands but anyone
-else's push since then is refused, never overwritten (the ticket escalates with
-`lease_refused`, worktree kept). No other ref is force-pushed.
+sha observed before the worker runs (or `""` when absent), or the sha returned by
+the previous successful push. Changes after that observation are refused (the
+ticket escalates with `lease_refused`, worktree kept). Rewritten worker history
+(e.g. a rebase) can replace commits already present at lease-read time even when
+absent locally. Linear work is refused if it still omits a leased head absent
+from its starting history. Starting-history state ends at the first push or
+ticket exit, so it cannot affect later refresh or manager FIX pushes.
+No other ref is force-pushed.
 Review-request opt-in accepts requests naming either the dispatcher's or the
 dashboard's login.
 
@@ -336,10 +341,11 @@ landed on its own, and partial progress needs its own reviewed PR.
 | `factory apply` | No-op unless `[apply].enabled = true`. One stateless pass: finds merged, not-yet-applied tickets, checks out the merge commit fresh, re-runs the tf-plan-safety check against a fresh `terraform plan`, and applies using `[apply].env` credentials — never the dispatcher's. Refuses (exit 1) before any GitHub read or write, publication retry, incident delivery or deploy unless the dispatcher identity authenticates as a login in host-owned `[apply].github_logins` ([GitHub identity](docs/deployment-lifecycle.md#github-identity)). `--dry-run`. |
 | `factory manage` | First recommends directions for `needs-review` PRs, then `needs-viability` issues; then resolves untouched `ready-for-human` escalation packets within `[manager].rounds`; finally publishes one routed human handoff request per escalation whose automatic recovery is terminal (also without a manager). `--dry-run` lists eligible requests without inference or writes. |
 | `factory gate` | Runs the deterministic gate in the current worktree and writes a Markdown report. Workers run it themselves; the dispatcher re-runs it as the evidence of record. |
-| `factory watch` | Post-ship monitor from local evidence only: lifecycle exit rows with `mechanism_failure` (or `unknown` with a `check_timeout` reason), failed `factory-*` user units for this repository, `factory dashboard --runtime-json` **failures** (only the reader's failure-severity journal defects, `runtime_events.FAILURES`; every other reader code is coverage and never filed, see [runtime contract](#bounded-runtime-json-schema-1)), and one escalation `code` repeating on ≥3 distinct tickets in the trailing 7 days (except ticket outcomes: `gate_failed`, when a ticket's project gate fails; `ci_failed`, when a ticket PR's checks fail; `pr_feedback`, when a ticket PR has unresolved feedback on its head; `no_change`, when a worker committed nothing and wrote its handoff because its ticket was already fixed or a duplicate; and `review_revise`, when review still requests changes after bounded review rounds, a manager `FIX`, or a merge-stage refresh/rebase). A no-commit worker without a handoff stays `pr_unpublished` and counts. Host conditions (`worker_exit:*`, `triage_endpoint_*`, `github_command_failed`) remain ignored until their current uninterrupted streak spans `[watch].host_failure_minutes` (default 60), then file with `host` added to the labels; a later successful pass clears the streak. A gap between failures longer than that threshold starts a new streak, since idle successes may leave no journal row. Filings go to one repository: `[watch].repo` (or its upstream spelling `engine_repo`) when set, else the repository it runs in; see [Where watch files](#where-watch-files). Each distinct fingerprint (sha256 of kind and reason/unit role/source, 12 hex, so one reason hitting several stages, one journal source reporting several codes, or the same host condition or unit failure in several installs is one issue; `escalation:<code>` for repeats) files one issue (`[watch].labels`, default `bug,needs-triage`) carrying the fingerprint, an `Observed by` list of installs, the triggering journal rows, the newest attempt log tail, the unit status or the runtime failures with what they point at (the offending journal line, the conflicting execution's rows, the reader's stderr; for repeats: each ticket, its prose `reason` and escalation packet path), the reproducing command and an "Expected behavior" section; the filing is journaled as a `watch` row. Before filing it lists that repository's open `bug` issues: when one already carries the fingerprint (another install filed it), the install comments its newest evidence there, at most once per 24 hours per install, and adds itself to `Observed by` instead of opening a duplicate. `escalate` rows without a `code` are `unknown` and never filed. Never refiles while that issue is open; refiles once it is closed and the signal recurs. An unassigned filing still at `needs-triage` or `ready-for-agent` closes after 24 hours without newer evidence, including after a successful pass clears a host condition ([Where watch files](#where-watch-files)). At most 5 filings or comments and 5 closures per pass. `--dry-run` prints what would be filed or closed without `gh`. `factory install` runs it from the pass unit's `ExecStopPost=`, after every `dispatch`, crashed or not. |
+| `factory watch` | Post-ship monitor from local evidence only: lifecycle exit rows with `mechanism_failure` (or `unknown` with a `check_timeout` reason), failed `factory-*` user units for this repository, `factory dashboard --runtime-json` **failures** (only the reader's failure-severity journal defects, `runtime_events.FAILURES`; every other reader code is coverage and never filed, see [runtime contract](#bounded-runtime-json-schema-1)), and one escalation `code` repeating on ≥3 distinct tickets in the trailing 7 days (except ticket outcomes: `budget`, when a ticket exhausts its configured overall runtime; `gate_failed`, when a ticket's project gate fails; `ci_failed`, when a ticket PR's checks fail; `pr_feedback`, when a ticket PR has unresolved feedback on its head; `no_change`, when a worker committed nothing and wrote its handoff because its ticket was already fixed or a duplicate; and `review_revise`, when review still requests changes after bounded review rounds, a manager `FIX`, or a merge-stage refresh/rebase). A no-commit worker without a handoff stays `pr_unpublished` and counts. Host conditions (`worker_exit:*`, `triage_endpoint_*`, `github_command_failed`) remain ignored until their current uninterrupted streak spans `[watch].host_failure_minutes` (default 60), then file with `host` added to the labels; a later successful pass clears the streak. A gap between failures longer than that threshold starts a new streak, since idle successes may leave no journal row. Filings go to one repository: `[watch].repo` (or its upstream spelling `engine_repo`) when set, else the repository it runs in; see [Where watch files](#where-watch-files). Each distinct fingerprint (sha256 of kind and reason/unit role/source, 12 hex, so one reason hitting several stages, one journal source reporting several codes, or the same host condition or unit failure in several installs is one issue; `escalation:<code>` for repeats) files one issue (`[watch].labels`, default `bug,needs-triage`) carrying the fingerprint, an `Observed by` list of installs, the triggering journal rows, the newest attempt log tail, the unit status or the runtime failures with what they point at (the offending journal line, the conflicting execution's rows, the reader's stderr; for repeats: each ticket, its prose `reason` and escalation packet path), the reproducing command and an "Expected behavior" section; the filing is journaled as a `watch` row. Before filing it lists that repository's open `bug` issues: when one already carries the fingerprint (another install filed it), the install comments its newest evidence there, at most once per 24 hours per install, and adds itself to `Observed by` instead of opening a duplicate. `escalate` rows without a `code` are `unknown` and never filed. Never refiles while that issue is open; refiles once it is closed and the signal recurs. An unassigned filing still at `needs-triage` or `ready-for-agent` closes after 24 hours without newer evidence, including after a successful pass clears a host condition ([Where watch files](#where-watch-files)). At most 5 filings or comments and 5 closures per pass. `--dry-run` prints what would be filed or closed without `gh`. `factory install` runs it from the pass unit's `ExecStopPost=`, after every `dispatch`, crashed or not. |
 | `factory stats` | Ticket table: attempts, review rounds, hours to merge, escalation count, resolver attribution, minutes in `ready-for-human`, re-queues, and triage/review/worker prompt and completion token sums (reported prefix-cache rates listed separately). Worker tokens come from the worker's `[workers.<label>.usage]` log paths or, for OMP workers, the session transcript totals; a ticket whose worker reported none reads `n/a (not reported)`, and the footer sums worker tokens over the tickets that reported them. Dollar columns appear only when some ticket has a cost; with no `[prices]` table the footer says so once. Reads GitHub plus `events.jsonl` from the dispatcher's root: the host config's `[repo."owner/name"].path` for `--repo owner/name` or the current checkout's repository, else the current checkout itself; a root without `.factory/events.jsonl` fails naming that path instead of printing empty rows (`--escapes` reads only git and GitHub). Per-ticket GitHub reads run 8 at a time with `stats: N/M tickets` progress on stderr (`--quiet` hides it). `--by-worker` reads only events and shows every configured worker label: first-attempt gate pass rate, all attempts (including review bounces), and known cost. Attribution uses claim labels with current worker precedence; unclaimed attempts are excluded, missing rates/cost are `n/a`. The dashboard Ops view shows the same worker metrics. `--escapes` lists candidate escaped defects, one row per closed `bug` issue: its fix commits (first-parent `agent/<bug>:` commits on `origin/<main>`, else the merge commit of a merged PR whose closing references include the bug), and the candidate tickets whose `agent/<m>:` commits `git blame` names for the lines the fix modified or deleted, with blamed line counts. Rows without candidates read `unlinked` (no fix commit), `no_blamed_lines` (the fix only adds lines) or `no_candidates` (blamed lines are not from agent commits). A fix commit missing from the clone is fetched with `git fetch origin <sha>`; one still missing is skipped with a stderr warning, listed in the row's `skipped`, makes the row `skipped` when every fix was, and is counted in a `Skipped fixes: N` footer. `Regressed-by: #N` lines in the bug body replace blame (`source` is `declared`, else `blame`). The footer reads `Candidate escapes: X of Y merged agent tickets (Z%)`. Blame is SZZ-style and noisy: refactors give false candidates and add-only fixes give none. Read-only. `--json`. |
+| `factory stats --week [--json]` | Reads the live and rotated journals over the trailing seven days and reports distinct merges, human touches, escalations by code, pooled rate numerators/denominators, and tokens by stage/model. Human touches match the release bar: each nonempty `human-decision` decision ID counts once across statuses and targets (including prepared-only decisions), each legacy row without an ID counts separately, and every manager `HUMAN` row counts. Legacy usage locality falls back only to the configured triage model id. One separate 10-second `gh issue list` finds `ready-for-human` tickets unchanged for seven days; failure leaves `stuck_over_days` unavailable and the command successful. |
 | `factory stats --promotions` | Lists every merged lessons/CURATE PR (`promotion-open`) with its baseline and after-window `efficiency_mean`, `compliance_mean`, `gate_first_pass_rate`, and `n`, decision (`open`, `keep`, or `revert`), and revert branch, from `events.jsonl` alone. `--json`. |
-| `factory learn` | Reads the last N finished tickets' event trail, reviewer findings, and escalation reasons, plus for each ticket an excerpt of its lowest-scored session (`factory score` rows: lowest `efficiency`, ties to the lowest `compliance`, then a gate FAIL): every call repeated back to back, the worker's final message, then every tool call whose result mentioned `error`/`Traceback`/`FAIL` (the call and the result's first 10 lines), at most 3,000 characters per ticket, so the cap only shortens the flagged-call list; a ticket with no `score` row falls back to its failing-attempt log tails. Adds the 10 most recently closed bugs with candidate escapes (`factory stats --escapes`); asks the local model for ≤10 repo-specific lessons; writes `.factory-lessons.md` (you commit it). Every worker prompt carries it. With a manager, the lessons land as an `agent/lessons-<date>-t<N>` chore PR (N: the newest included ticket), and the manager may add a CURATE diff, opened as `agent/curate-<date>-t<N>`, that turns a lesson into a gate check or regression test: `AGENTS.md`, `CONTRIBUTING.md`, `.omp/skills/`, add-only `.factory.toml` (appended `[[gate.check]]` tables and `[gate].protected_paths` entries) and files under the base ref's protected and add-only paths; never `.github/`, never a deleted or renamed protected or add-only file. Both PRs run the attempt gate in their throwaway worktree before the push (journaled as `gate` bound to the head; a FAIL opens nothing), are reviewed by `review_intake_pass` like a `needs-review` PR, and are merged by the merge stage (`learn.promote_pass`, on `merge_pass_locked`'s PR listing) once a `gate` PASS and a `review-result` APPROVE are bound to the PR head, CI is green and no human requested changes: `factory-approved`, `approved`, squash merge, `merged`, then `promotion-open` `{pr, head, branch, baseline}` with the `efficiency_mean`, `compliance_mean`, `gate_first_pass_rate` and `n` of the last 10 `score` rows before the merge. A head behind main whose diff changes more than `.factory-lessons.md` (a CURATE PR or its revert) is not merged; it is rebased onto main, gated (a new `gate` row), force-pushed with a lease on the old head and reviewed again (`learn.refresh`), then merges on a later pass once CI is green on the new head. A failing PR is logged and the others still merge. Once 10 attempts journaled after the merge are scored (a pre-merge attempt scored late never counts), the end-of-pass `learn_pass` journals `promotion-keep`, or `promotion-revert` and opens `agent/revert-lessons-<pr>` (same gate/review/merge path; it opens no promotion of its own) reverting the merge commit with the before/after means in its body, when `efficiency_mean` or `gate_first_pass_rate` fell by more than the population standard deviation of the baseline window (`promotion.drift`). One decision per promotion, never replayed; `factory stats --promotions [--json]` lists them. With a manager, the dispatcher also runs `--last 10` itself after every 10 finished tickets, scoring those tickets' unscored attempts first (see *Learning loop* under Operating it). `--dry-run`, `--last N`. `--promotion claim.json` judges and records a keep/revert claim under the [eval promotion contract](docs/eval-promotion-contract.md). |
+| `factory learn` | Reads the last N finished tickets' event trail, reviewer findings, and escalation reasons, plus for each ticket an excerpt of its lowest-scored session (`factory score` rows: lowest `efficiency`, ties to the lowest `compliance`, then a gate FAIL): every call repeated back to back, the worker's final message, then every tool call whose result mentioned `error`/`Traceback`/`FAIL` (the call and the result's first 10 lines), at most 3,000 characters per ticket, so the cap only shortens the flagged-call list; a ticket with no `score` row falls back to its failing-attempt log tails. Adds the 10 most recently closed bugs with candidate escapes (`factory stats --escapes`); asks the local model for ≤10 repo-specific lessons; writes `.factory-lessons.md` with the repository SPDX identifier (`NOASSERTION` when unavailable; you commit it). Every worker prompt carries it. With a manager, the lessons land as an `agent/lessons-<date>-t<N>` chore PR (N: the newest included ticket), and the manager may add a CURATE diff, opened as `agent/curate-<date>-t<N>`, that turns a lesson into a gate check or regression test: `AGENTS.md`, `CONTRIBUTING.md`, `.omp/skills/`, add-only `.factory.toml` (appended `[[gate.check]]` tables and `[gate].protected_paths` entries) and files under the base ref's protected and add-only paths; never `.github/`, never a deleted or renamed protected or add-only file. New PRs run the attempt gate in their throwaway worktree before the push (journaled as `gate` bound to the head; a FAIL opens nothing); an approved legacy head with no gate row is checked once during promotion. PRs are reviewed by `review_intake_pass` like a `needs-review` PR and are merged by the merge stage (`learn.promote_pass`, on `merge_pass_locked`'s PR listing) once a `gate` PASS and a `review-result` APPROVE are bound to the PR head, CI is green and no human requested changes: add `factory-approved`, squash merge, then journal one `approved`, `merged`, and `promotion-open` `{pr, head, branch, baseline}` with the `efficiency_mean`, `compliance_mean`, `gate_first_pass_rate` and `n` of the last 10 `score` rows before the merge. A head behind main whose diff changes more than `.factory-lessons.md` (a CURATE PR or its revert) is rebased onto main before merge; a lessons-only head is refreshed after a strict base rejects the stale merge. `learn.refresh` gates the rebased head, force-pushes it with a lease on the old head, and reviews it again for a later pass. Repeated blocked passes add one `promotion-blocked` row per PR, head, and reason. A human merge is reconciled on the next pass as `merged {by: human}` and opens the same measurement. A failing PR is logged and the others still merge. Once 10 attempts journaled after the merge are scored (a pre-merge attempt scored late never counts), the end-of-pass `learn_pass` journals `promotion-keep`, or `promotion-revert` and opens `agent/revert-lessons-<pr>` (same gate/review/merge path; it opens no promotion of its own) reverting the merge commit with the before/after means in its body, when `efficiency_mean` or `gate_first_pass_rate` fell by more than the population standard deviation of the baseline window (`promotion.drift`). One decision per promotion, never replayed; `factory stats --promotions [--json]` lists them. With a manager, the dispatcher also runs `--last 10` itself after every 10 finished tickets, scoring those tickets' unscored attempts first (see *Learning loop* under Operating it). `--dry-run`, `--last N`. `--promotion claim.json` judges and records a keep/revert claim under the [eval promotion contract](docs/eval-promotion-contract.md). |
 | `factory eval --profile NAME [--dry-run]` | Replays the checked-in 20-case Factory/rocm-cli worker suite twice per case in isolated local clones with each repository's normal gate and reviewer. `--dry-run` lists every pinned repository, ticket, base, split and the `[eval]` case/token/wall budget. Real runs append one `eval` row per case/repeat and an `eval-summary` with split means/noise; an accepted-main run establishes the baseline and later runs feed a regression claim to `promotion.decide()`. Rejected and unmerged candidate runs never replace that baseline. Budget or replay failure records `not_tested` without escalation. `--scheduled` marks the weekly drift run. |
 | `factory score` | Scores every finished ticket's worker attempts from their persisted OMP transcripts (`attempt.transcript`) and journals one `score` row per attempt: `tool_calls`, `edits` (edit/write calls), `retries` (identical consecutive calls), `gate_first_pass` (attempt 1 with gate PASS), `efficiency = 1 / (1 + retries + max(0, tool_calls - 40) / 40)`, and `compliance`, a 0–1 LLM-as-judge score from the local triage model given the ticket's Scope and Exit gate sections against the worker's final message and handoff (`null`, never a guess, when the model is unreachable or answers with anything but a number; `judge_model` names the model that answered). Already-scored attempts are skipped; a transcript missing on disk journals `{"skipped": "missing"}`. At most 50 attempts per run, 2 MB read per transcript. `--last N` limits to the newest N finished tickets; `--dry-run` prints without journaling. |
 | `factory prune-worktrees` | Removes finished tickets' leftover `.factory/wt-<n>` worktrees under the merge lock, one ticket lock at a time, retaining an accepted handoff first; see [finished worktree retention](#finished-worktree-retention). `--dry-run` changes nothing (no fetch, no lock, no journal row) and lists every ticket worktree with its size and the decision: `would remove`, `keep (stale)` (finished, but dirty, unpushed, unregistered or holding evidence) or `keep` (in flight), each with its reason. `--json`; `--limit N` caps the finished candidates read from GitHub (default 200). Exit 1 when GitHub is unreadable or a removal fails. |
@@ -353,6 +359,20 @@ landed on its own, and partial progress needs its own reviewed PR.
 | `factory plan route N --reason <requirements\|implementation\|ci\|unknown> [--path P]... --json` | Read-only schema 1 JSON naming the human who owns a decision on ticket N; nothing is assigned, labelled or commented. JSON is also the default when `--json` is omitted. Priority: a `**Decision owner**` section in the ticket body (human override, wins on every recomputation), the canonical `Initiative: #N` (or legacy `Programme: #N`) initiative's Owner, or the initiative's own Owner when routing that initiative (requirements only), `[collaboration.reasons]`, `[collaboration.components]` exact repo-relative path prefixes against the given `--path`s (implementation only; `src/auth` matches `src/auth/x.py`, never `src/authentication/`), then `[collaboration].fallback`. `route.status` is `selected`, `candidates` (paths span prefixes with different owners), `unassigned` (reason `unknown`, no `--path` for implementation, or nothing configured) or `invalid` (malformed declared owner; `@org/team` on a user-owned repository). `route.revision` ties the answer to the `.factory.toml` commit and issue `updated_at`; `route.provenance` lists every step. Owner syntax is checked, membership is not: an unreadable repository record leaves `verification: unknown`. Without a `[collaboration]` section only ticket sources apply. |
 | `factory plan baseline N` / `factory plan drift TICKET` | Read-only schema 1 JSON for proposing a complete immutable initiative baseline or comparing a ticket's latest accepted baseline with the live complete source. Results are under top-level `baseline` or `drift`; neither command edits issues, rebaselines work, or grants execution authority. |
 | `factory doctor` / `init` / `install` | Onboarding, above. |
+
+Lessons files generated by `factory learn` start with an SPDX header inferred from
+the repository's package metadata or conventional licence file (`NOASSERTION` when
+neither identifies one). Promotion re-gates an approved legacy PR head once when
+its journal has no gate row. A lessons-only head rejected by a strict up-to-date
+base is refreshed, re-gated, and reviewed for the next pass. Blocked outcomes and
+approvals are journaled once per head; `merged` is written only after a successful
+merge. A human-merged lessons PR is reconciled on the next pass with `by: human`
+and opens the same promotion measurement as an automatic merge.
+
+When Git uses SSH commit signing, `factory doctor` checks the configured signing
+key against the dispatcher GitHub account and warns with `unknown_key` when the
+key is unreadable or unregistered.
+
 
 `factory stats` exposes each structured review round as ordered
 `review_findings` counts in JSON and as `important/nit/pre-existing` triples in
@@ -489,15 +509,22 @@ never closed automatically.
 ## Automatic releases
 
 `[release] auto = true` runs the release check at the start and end of each
-dispatcher pass. `version_file` defaults to `factory/__init__.py` and `min_tickets` to 5.
-The annotated tag's fenced JSON records `human_rate` (distinct tickets with a
-manager HUMAN decision divided by distinct merged tickets, capped at 1; lower
-is better), `first_pass` (PASS journal rows among attempt-1 rows; higher is
-better), and `tickets`; a tag without that block resets the comparison bar. A
-window without attempt-1 evidence is held rather than scored as zero. Each
-release records a bar halfway between the previous bar (or the worst values,
-human rate 1 and first pass 0) and what it measured, so the bar only rises and
-never jumps to one lucky window. Factory requires every bar metric to be no
+dispatcher pass. `version_file` defaults to `factory/__init__.py`, `min_tickets`
+to 5, and `bar_min_tickets` to 20. `bar_floor_human_rate` defaults to 0.10 and
+`bar_floor_first_pass` to 0.90.
+
+The annotated tag's fenced JSON records `human_rate` (manager `HUMAN` and
+`human-decision` rows divided by distinct merged tickets, uncapped; lower is
+better), `first_pass` (PASS journal rows among attempt-1 rows; higher is better),
+and `tickets`. The first tag written by this behavior also records the former
+distinct-ticket metric as `human_ticket_rate`. Windows below `bar_min_tickets`
+retain their raw pending counts in the tag; a later release pools those counts.
+Once the pooled sample reaches the minimum, each bar moves halfway toward the
+95% Wilson upper bound for human rate or lower bound for first pass, without
+tightening past its configured floor. A legacy tag's bar is reset once to those
+floors. A tag without a fenced bar resets the comparison, and a window without
+attempt-1 evidence is held rather than scored as zero. Factory requires every
+bar metric to be no
 worse, all completed CI statuses and check runs on `origin/<main>` to pass
 (`success`, `skipped`, and `neutral` check conclusions pass), and `factory gate
 --tier release` to pass in a temporary worktree. It then bumps the patch
@@ -524,8 +551,9 @@ union-merge), and opens a new one only at the end of a pass. Each pass derives
 its state from remote branches, remote tags, and PRs (only a pending GitHub Release is read from the journal), so crashes need no local recovery file. Temporary worktrees are removed,
 and local-only or stale local tags are ignored and removed before reuse. A
 completed release journals one `release` row with outcome `released`, then one
-with `published` (or `publish_failed` per failed attempt); held reasons go to the
-dispatcher log.
+with `published` (or `publish_failed` per failed attempt). A quality-bar hold
+journals one `release` row with outcome `held`; later passes suppress another
+row until the bar value changes.
 
 Routing distinguishes absent optional information from invalid declarations. A missing
 ticket `Decision owner` section permits fallback; an empty or malformed section stops
@@ -856,23 +884,30 @@ label timelines. Correction reads stop at 50 reviews, 50 threads of 50 comments,
    `.factory.toml` in the list to protect the list itself. Globs in
    `[gate].add_only_paths` (also read from the base ref) are protected add-only:
    a new file passes, a modified file passes only when `git diff --numstat`
-   shows no deleted lines, and a deletion, rename, mode change, binary change
-   or any removed or changed line fails and escalates as "worker removed or
-   changed existing tests". The manager may use `AUTHORIZE`, with an auditable
-   justification and worker guidance, to apply `factory-add-only-override` and
-   requeue the ticket when the ticket requires the existing add-only edit or an
-   obsolete wording-only assertion must be removed; a human may apply it directly.
-   It does not authorize `[gate].protected_paths`. On `bug` tickets the attempt
-   gate also compares every existing Python test function and every Rust
-   `#[test]` function (including tests inside `src/*.rs`) with the base. Deleting
+   shows no deleted lines, and a deletion, rename, mode change, binary change,
+   or any removed or changed line fails as `add-only`. For in-place text edits,
+   its escalation names `factory-add-only-override` as the clearing label. The
+   manager may use `AUTHORIZE`, with an auditable justification and worker
+   guidance, to apply that label and requeue the ticket when the ticket requires
+   the existing add-only edit or an obsolete wording-only assertion must be
+   removed from a retained file; a human may apply it directly. File deletions,
+   renames, mode changes and binary changes still fail with that label and
+   require human-only `factory-protected-override`. Their escalations name that
+   label instead. If `factory-add-only-override` is already present and protection
+   still fails, the escalation explicitly rules out repeated manager `AUTHORIZE`.
+   The add-only override does not authorize `[gate].protected_paths`. On `bug`
+   tickets the attempt gate also compares every existing Python test function and
+   every Rust `#[test]` function (including tests inside `src/*.rs`) with the base. Deleting
    or changing one, including adding `@unittest.skip`, pytest skip/xfail, or
    Rust `#[ignore]`, fails as `protected-tests`; other languages retain the
-   configured path-based add-only policy. Only a human can apply the
-   `factory-protected-override` label, which bypasses both path and function
-   protection, including during a refresh onto moved main; a ticket line
-   `factory-protected-override: <reason>` bypasses only function protection on
-   bug tickets. An `upstream sync:` ticket's worker otherwise gets no
-   override, only upstream-authored content is exempt (`--upstream`, above).
+   configured path-based add-only policy. `factory-add-only-override` bypasses
+   that function check as well, so manager authorization also works on bug
+   tickets. Only a human can apply the `factory-protected-override` label, which
+   bypasses both path and function protection, including during a refresh onto
+   moved main; a ticket line `factory-protected-override: <reason>` bypasses only
+   function protection on bug tickets. An `upstream sync:` ticket's worker
+   otherwise gets no override, only upstream-authored content is exempt
+   (`--upstream`, above).
    A bug worker must add the reproducing test in its own commit before the fix
    and put `Repro test: <test ID>` in its handoff. The test may be added during
    a later retry, review bounce, or manager FIX, not just the first branch commit.
@@ -941,6 +976,42 @@ label timelines. Correction reads stop at 50 reviews, 50 threads of 50 comments,
    and approves if and only if Important is zero. Invalid JSON fails closed;
    disagreement between either verdict and the counts fails closed with
    `verdict_counts_mismatch`. `review-result` records the three counts.
+
+   **Risk tiers.** Before these checks, Factory classifies the exact gated
+   `base..head` diff with the installed `factory/risk.py` rules and records a
+   `risk` event plus a `risk` decision. Candidate code cannot change the rules
+   classifying its own head, and a new head invalidates all tier evidence.
+
+   | Tier | Deterministic paths | Review path |
+   |---|---|---|
+   | Low | `docs/**`; Markdown except `AGENTS.md`/`REVIEW.md`; additions-only `tests/**`; `.factory-lessons.md`; note files under `experiments/**`; additions guarded by a newly added default-off flag | Skip `when = "pr"` checks and run one review. A `REVISE` switches the PR to the Medium loop. |
+   | Medium | Every path not matched by Low or High | Normal pr-tier checks and bounded review loop. |
+   | High | `.github/**`; `factory/release.py`, `promotion.py`, `onboard.py`, `templates/ci.yml`; `factory/dispatch.py`, `gate.py`, `manage.py`, `decisions.py`, `config.py`, `risk.py`; `.factory.toml`; `factory-bands.toml` | Normal gate and primary review, a second reviewer on a model distinct from both the primary reviewer and worker, and blocking mutation checks on changed `factory/*.py` lines. |
+
+   Default-off code qualifies as Low only for wholly added Python module-level
+   guards and new literal-false flag declarations, with no unguarded executable
+   additions or existing flag bindings. Uncertain cases stay Medium.
+
+   A High PR merges without human approval when the full current-head gate
+   (including all PR-tier checks) passes, both reviewers approve, and mutation
+   is `PASS` or `SKIP (no changed factory code)`. Both reviewers
+   revising uses the normal Medium loop. A reviewer split, or mutation failure
+   after both approvals, returns the dissenting findings for one worker round;
+   the next-head disagreement escalates as `risk_disagreement`. This
+   disagreement is the only High-tier-specific path to `ready-for-human`.
+   `[review].second_command` is a host-only override of the code default.
+   Non-mutation PR-check failures use the ordinary gate-failure loop, not the
+   disagreement path. Mutation runs related tests first and stops after the first
+   failure; a surviving mutant still has to pass every discovered test. The
+   deterministic 200-mutant sample uses the gate timeout minus 60 seconds for
+   preparation, baseline, and mutants together; incomplete blocking runs fail.
+   The built-in OMP worker pins `openai-codex/gpt-5.6-sol`; custom worker
+   profiles must also name a model. `factory doctor` warns when any of the
+   worker, primary-reviewer, or second-reviewer models is missing or not
+   distinct, or when the second reviewer cannot launch.
+   `factory stats --by-risk` and the dashboard report human interventions,
+   human-wait minutes, rounds, disagreement rate, and escape rate per tier.
+
 6. **Merge stage** (start of the next pass). One PR per pass requires green
    GitHub checks, a current-main head, no human requested-changes veto, the
    `factory-approved` label, and a matching successful journal approval whose
@@ -1075,7 +1146,7 @@ review_rounds = 1                # REVISE -> worker -> re-review cycles
 # cost_pattern = 'Total cost:\s*\$([0-9.]+)'   # $ from the worker log (Claude Code prints this)
 
 [workers]                        # ticket label/profile -> argv; {prompt} file, {cwd} worktree
-default = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
+default = ["omp", "-p", "--model", "openai-codex/gpt-5.6-sol", "--cwd", "{cwd}", "@{prompt}"]
 chore   = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 
 # A differently named OMP-compatible worker selected by a separate pilot label:
@@ -1089,6 +1160,7 @@ chore   = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd
 command = ["omp", "-p", "--no-session", "--model", "anthropic/claude-fable-5-1", "{prompt}"]   # {prompt} = review prompt text
 # json_mode = true   # required for an OMP-compatible reviewer not named `omp`
 # policy = "REVIEW.md"  # read from the base ref
+# second_command is host-only; it overrides Factory's code default for High-risk reviews.
 
 [manager]                         # optional; unset command disables it
 command = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]   # {prompt} = manager prompt file
@@ -1233,14 +1305,17 @@ extra = ["\\bbluefin\\b", "\\.example-corp\\.com\\b"]
 
 Each worker attempt journals one `llm-usage` event (`stage = "worker"`) with
 `model`, `prompt_tokens` (cached included), `completion_tokens`,
-`cached_tokens` and `cost`; anything the worker does not report is `null`. A
-table worker reads them from structured output: `usage` maps each field to a
-dotted JSON path (or an array of paths, added) summed over the JSON lines of the
-attempt log that satisfy `match`. Without a `cost` path hit, `cost` falls back
-to `[dispatch] cost_pattern`. When log paths report no tokens, an
-`omp-session` transcript supplies the OMP-compatible session totals instead.
-`factory stats --by-worker` attributes those totals to the worker's claim
-label; workers with neither source remain `n/a (not reported)`.
+`cached_tokens`, `cost`, and `local`; anything the worker does not report is
+`null`. `local` is recorded from an explicitly loopback/private triage endpoint
+or by matching worker/reviewer usage to the configured local triage model id,
+never by guessing from a model name. A table worker reads usage from structured
+output: `usage` maps each field to a dotted JSON path (or an array of paths,
+added) summed over the JSON lines of the attempt log that satisfy `match`.
+Without a `cost` path hit, `cost` falls back to `[dispatch] cost_pattern`. When
+log paths report no tokens, an `omp-session` transcript supplies the
+OMP-compatible session totals instead. `factory stats --by-worker` attributes
+those totals to the worker's claim label; workers with neither source remain
+`n/a (not reported)`.
 
 ```toml
 [workers.claude]   # Claude Code `-p --output-format json` prints one result object (paths checked on 2.1.292)

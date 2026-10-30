@@ -166,6 +166,17 @@ def run(cmd: list[str], timeout: int | None = None) -> tuple[bool, str]:
         execution.reason = "configured_check_failed"
     return proc.returncode == 0, proc.stdout + proc.stderr
 
+def _check_status(name: str, passed: bool, output: str, blocking_mutation: bool) -> str:
+    if (
+        blocking_mutation
+        and name == "mutation"
+        and passed
+        and "no mutable files" in output.splitlines()
+    ):
+        return "SKIP (no changed factory code)"
+    return "PASS" if passed else "FAIL"
+
+
 
 def failed_test_ids(output: str) -> list[str]:
     """Canonical unittest, pytest and cargo libtest IDs, in report order."""
@@ -712,6 +723,7 @@ def main(argv: list[str]) -> int:
                         "pr: only the `when = \"pr\"` checks (release ones reported SKIP); "
                         "release: only the `when = \"release\"` checks")
     parser.add_argument("--replay", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--blocking-mutation", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.replay:
         # A learn replay gates its own linked worktree: that checkout's config and journal,
@@ -767,7 +779,9 @@ def execute(args: argparse.Namespace, execution) -> int:
                                   "## protected-paths failure\n\n```diff\n" + detail + "\n```\n")
                 print(f"report: {report}\ngate FAIL: protected-paths")
                 return 1
-        if args.bug and not (args.protected_override or args.test_override):
+        if args.bug and not (
+            args.protected_override or args.test_override or args.add_only_override
+        ):
             passed, detail = check_existing_tests(args.base)
             if not passed:
                 execution.outcome, execution.reason = "project_escalation", "protected_tests"
@@ -784,7 +798,16 @@ def execute(args: argparse.Namespace, execution) -> int:
     # listed checks of a later tier are reported `SKIP (<tier> tier)` instead of run.
     rank = config.CHECK_TIERS.index(args.tier)
     listed = [check for check in cfg.checks if config.CHECK_TIERS.index(check.when) >= rank]
-    configured = [(check.name, (lambda c=check: run(c.run, c.timeout))) for check in listed]
+    configured = [
+        (
+            check.name,
+            lambda c=check: run([
+                *c.run,
+                *(["--blocking"] if args.blocking_mutation and c.name == "mutation" else []),
+            ], c.timeout),
+        )
+        for check in listed
+    ]
     plan_checks = {check.name for check in listed if PLAN_CHECK_MODULE in check.run}
     checks = [
         ("conflict-markers", check_conflict_markers),
@@ -824,7 +847,8 @@ def execute(args: argparse.Namespace, execution) -> int:
                 if fields.get("failed_tests"):
                     fields["changed_paths"] = changed_paths(args.base)
                 check.emit("result", check=name, passed=passed, **fields)
-                results.append((name, "PASS" if passed else "FAIL", output))
+                status = _check_status(name, passed, output, args.blocking_mutation)
+                results.append((name, status, output))
             if not passed and (outcome == "completed" or check.outcome == "unknown"):
                 outcome, reason = check.outcome, check.reason
     finally:

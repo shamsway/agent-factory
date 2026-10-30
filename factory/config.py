@@ -8,6 +8,7 @@ conventions, not configuration.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -18,6 +19,7 @@ import tomllib
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from factory import github_identity, lifecycle
 
@@ -73,9 +75,11 @@ DEFAULT_LEAK_PATTERN = (r"\.(?:corp|internal|intranet|lan)\b|\bconfidential\b|\b
                         r"|\bgh[pousr]_[A-Za-z0-9]{36,}|\bgithub_pat_[A-Za-z0-9_]{22,}"
                         r"|\bsk-ant-[A-Za-z0-9_-]{20,}|\bops_eyJ[A-Za-z0-9_-]{20,}")
 DEFAULT_WORKER = ["omp", "-p", "--cwd", "{cwd}", "@{prompt}"]
+DEFAULT_WORKER_MODEL = "openai-codex/gpt-5.6-sol"
 DEFAULT_CHORE_WORKER = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--no-tools", "--no-extensions",
                     "--no-skills", "--no-rules", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
+DEFAULT_SECOND_REVIEWER = ["omp", "-p", "--no-session", "--model", "openai-codex/gpt-6-astra", "{prompt}"]
 DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
 DEFAULT_LLM_MODEL = "qwen3:30b"
 DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "python": None, "env": {}, "apply": True}
@@ -99,8 +103,8 @@ HOST_TABLES = frozenset({"triage", "workers", "worker_wrap", "check_wrap", "mana
 # where) and stay repo-owned, same split already used for `dashboard`.
 # `apply.github_logins` (the accounts apply may act as on GitHub) is host-only: a
 # committed value is refused, so a merged PR can never widen who apply posts as.
-# `review.command`/`json_mode` are host-only; `review.policy` (REVIEW.md) is repo-owned.
-HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",), "review": ("command", "json_mode"), "apply": ("env", "github_logins")}
+# `review.command`/`second_command`/`json_mode` are host-only; `review.policy` (REVIEW.md) is repo-owned.
+HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",), "review": ("command", "second_command", "json_mode"), "apply": ("env", "github_logins")}
 
 # Every key the loader reads, by table; `factory doctor` reports anything else.
 # `workers` is label-keyed, `gate.check` is a list of {name, run, exclusive, when}.
@@ -111,10 +115,11 @@ KNOWN_KEYS = {
     "workers": None,
     "worker_wrap": ("command",),
     "check_wrap": ("command",),
-    "review": ("command", "json_mode", "policy"),
+    "review": ("command", "second_command", "json_mode", "policy"),
     "manager": ("model", "command", "rounds", "review", "stale_days", "max_active_cap", "budget_min_cap"),
     "learn": ("evaluate", "max_tickets", "max_tokens", "budget_min"),
-    "release": ("auto", "version_file", "min_tickets"),
+    "release": ("auto", "version_file", "min_tickets", "bar_min_tickets",
+                "bar_floor_human_rate", "bar_floor_first_pass"),
     "watch": ("enabled", "repo", "engine_repo", "labels", "host_failure_minutes"),
     "eval": ("max_cases", "max_tokens", "budget_min", "profile", "schedule"),
     "gate": ("timeout", "lock", "check", "protected_paths", "add_only_paths"),
@@ -145,6 +150,7 @@ BAND_METRICS = frozenset({
     "ready_for_human_rate",
     "claim_to_merge_hours",
     "rework_rounds",
+    "revert_rate_by_tier",
 })
 BAND_TIERS = frozenset({"log", "diagnose", "act"})
 ROUTE_REASONS = ("requirements", "implementation", "ci", "unknown")
@@ -340,6 +346,7 @@ class Config:
     # None preserves executable-based compatibility for the built-in OMP reviewer.
     reviewer_json_mode: bool | None = None
     review_policy: str = "REVIEW.md"
+    second_reviewer: list[str] = field(default_factory=lambda: list(DEFAULT_SECOND_REVIEWER))
     manager: list[str] | None = None
     manager_rounds: int = 1
     manager_review: str = "escalated"
@@ -367,6 +374,9 @@ class Config:
     watch_labels: list[str] = field(default_factory=lambda: ["bug", "needs-triage"])
     # A host condition is filed only after an uninterrupted streak this long.
     watch_host_failure_minutes: int = 60
+    release_bar_min_tickets: int = 20
+    release_bar_floor_human_rate: float = 0.10
+    release_bar_floor_first_pass: float = 0.90
     checks: list[Check] = field(default_factory=list)
     protected_paths: list[str] = field(default_factory=list)
     add_only_paths: list[str] = field(default_factory=list)
@@ -443,6 +453,15 @@ class Config:
         """argv for one configured gate check: the host wrap (expanded) before the check's own argv."""
         wrap = expand(self.check_wrap, cwd=str(cwd), root=str(self.root), repo=self.repo, home=str(Path.home()))
         return [*wrap, *argv]
+
+    def worker_model(self, worker: str) -> str | None:
+        """Explicit worker model, including the code-pinned built-in OMP default."""
+        command = self.workers[worker]
+        return (
+            DEFAULT_WORKER_MODEL
+            if command == DEFAULT_WORKER
+            else command_model(command)
+        )
     def worker_environment(self, worker: str, prompt: Path, cwd: Path) -> dict[str, str]:
         """Expanded environment overrides for one selected worker profile."""
         values = {"prompt": str(prompt), "cwd": str(cwd), "root": str(self.root),
@@ -451,6 +470,9 @@ class Config:
 
     def review_cmd(self, prompt: str) -> list[str]:
         return expand(self.reviewer, prompt=prompt)
+
+    def second_review_cmd(self, prompt: str) -> list[str]:
+        return expand(self.second_reviewer, prompt=prompt)
 
     def manager_cmd(self, prompt_path: Path, cwd: Path) -> list[str]:
         """Expand the manager's prompt file, matching the worker transport."""
@@ -468,6 +490,17 @@ def expand(argv: list[str], **values: str) -> list[str]:
             arg = arg.replace("{" + key + "}", val)
         out.append(arg)
     return out
+
+
+def command_model(command: list[str]) -> str | None:
+    """Explicit ``--model`` value, or None when the command leaves it implicit."""
+    for index, value in enumerate(command):
+        if value == "--model" and index + 1 < len(command):
+            return command[index + 1]
+        if value.startswith("--model="):
+            return value.split("=", 1)[1]
+    return None
+
 
 
 def git(root: Path | None, *args: str) -> str:
@@ -554,6 +587,21 @@ def engine_drift(cfg: Config) -> str | None:
         return None
     return (f"installed {commit[:12]} differs from origin/{cfg.main} {main[:12]}; "
             "merged engine changes are not installed")
+
+
+def local_endpoint(url: str) -> bool:
+    """Whether an HTTP endpoint is explicitly loopback or on a private IP network."""
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        if parsed.scheme not in {"http", "https"} or not host:
+            return False
+        if host.casefold() == "localhost":
+            return True
+        address = ipaddress.ip_address(host)
+    except (TypeError, ValueError, UnicodeError):
+        return False
+    return address.is_loopback or address.is_private
 
 
 def host_filter(table: dict) -> dict:
@@ -800,6 +848,7 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
             if table in section and not isinstance(section[table], dict):
                 raise ConfigError(f"{host_config_path()}: {table} must be a table")
     layered = merge(host_filter(host_sections[0]), host_filter(host_sections[1]))
+    host_review = layered.get("review", {})
     raw, raw_repo = merge(layered, raw), raw
     repo_t, dispatch, workers = raw.get("repo", {}), raw.get("dispatch", {}), raw.get("workers", {})
     gate, leak, triage, dash = raw.get("gate", {}), raw.get("leak_scan", {}), raw.get("triage", {}), raw.get("dashboard", {})
@@ -888,9 +937,20 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
             if not isinstance(command, list) or not command or any(not isinstance(a, str) for a in command) or not command[0]:
                 raise ConfigError(f"{table}.command needs a non-empty argv array of strings")
             setattr(cfg, table, command)
+    if "second_command" in raw_repo.get("review", {}):
+        raise ConfigError(f"{path}: review.second_command is host-only; set it in "
+                          f"{host_config_path()} [defaults.review] or "
+                          f"[repo.\"<slug>\".review]")
     review = raw.get("review", {})
     if "command" in review:
         cfg.reviewer = list(review["command"])
+    if "second_command" in host_review:
+        command = host_review["second_command"]
+        if not isinstance(command, list) or not command or any(
+            not isinstance(arg, str) for arg in command
+        ) or not command[0]:
+            raise ConfigError("review.second_command needs a non-empty argv array of strings")
+        cfg.second_reviewer = list(command)
     json_mode = review.get("json_mode")
     if json_mode is not None and type(json_mode) is not bool:
         raise ConfigError("review.json_mode must be true or false")
@@ -941,12 +1001,20 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
     auto = release.get("auto", cfg.release_auto)
     version_file = release.get("version_file", cfg.release_version_file)
     min_tickets = release.get("min_tickets", cfg.release_min_tickets)
+    bar_min_tickets = release.get("bar_min_tickets", cfg.release_bar_min_tickets)
+    floor_human = release.get("bar_floor_human_rate", cfg.release_bar_floor_human_rate)
+    floor_first = release.get("bar_floor_first_pass", cfg.release_bar_floor_first_pass)
     if type(auto) is not bool:
         raise ConfigError("release.auto must be true or false")
     if not isinstance(version_file, str) or not version_file or Path(version_file).is_absolute() or ".." in Path(version_file).parts:
         raise ConfigError("release.version_file must be a nonempty repository-relative path")
-    if isinstance(min_tickets, bool) or not isinstance(min_tickets, int) or min_tickets < 1:
-        raise ConfigError("release.min_tickets must be a positive integer")
+    for key, value in (("min_tickets", min_tickets), ("bar_min_tickets", bar_min_tickets)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigError(f"release.{key} must be a positive integer")
+    for key, value in (("bar_floor_human_rate", floor_human),
+                       ("bar_floor_first_pass", floor_first)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            raise ConfigError(f"release.{key} must be a number from 0 to 1")
     cfg.release_auto, cfg.release_version_file, cfg.release_min_tickets = auto, version_file, min_tickets
     watch = raw.get("watch", {})
     if not isinstance(watch, dict):
@@ -970,6 +1038,9 @@ def load(start: Path | None = None, *, worktree: bool = False) -> Config:
         raise ConfigError("watch.host_failure_minutes must be a positive integer")
     cfg.watch_enabled, cfg.watch_repo, cfg.watch_labels = enabled, watch_repo, list(labels)
     cfg.watch_host_failure_minutes = host_failure_minutes
+    cfg.release_bar_min_tickets = bar_min_tickets
+    cfg.release_bar_floor_human_rate = float(floor_human)
+    cfg.release_bar_floor_first_pass = float(floor_first)
     journal = raw.get("journal", {})
     for key in ("max_mb", "retention"):
         value = journal.get(key, getattr(cfg, f"journal_{key}"))
