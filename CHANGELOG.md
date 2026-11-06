@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Upstream sync PRs are reviewed on their fork-side change: the inline review packet carries each merge's conflict resolution (`git show --remerge-diff`) and each later fork commit, and names the upstream tip it leaves out, so a large upstream sync no longer exceeds the 120 KiB inline prompt limit. Other branches keep the `origin/<main>..<head>` packet.
 - Reviewer calibration model replay resolves the git HEAD contract only when it runs the default matrix runner, so injected runners work in copies without a `.git` directory (the mutation-tier baseline copy).
 - Fork: `scripts/privacy-check.py --range` also checks each commit's author and committer identity (`%an <%ae>`, `%cn <%ce>`) against the same rules, reporting `commit <sha> author` or `commit <sha> committer`. Commits reachable from `--published` are skipped for identities too; merge commits GitHub creates at merge time are out of scope (#78).
 - A merge GitHub refuses on base branch policy (`base branch policy prohibits the merge`) no longer aborts the merge pass. The PR keeps its approval label and gets a `merge blocked` merge decision plus a `merge_blocked` merge-eligibility wait, so later passes retry the merge; other `gh pr merge` failures still raise (#77).
