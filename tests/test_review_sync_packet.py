@@ -38,6 +38,18 @@ def git(cwd: Path, *args: str, strip: bool = True) -> str:
     return out.strip() if strip else out
 
 
+def git_with_input(cwd: Path, data: str, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args], input=data, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def parentless_commit(cwd: Path, text: str) -> str:
+    blob = git_with_input(cwd, text, "hash-object", "-w", "--stdin")
+    tree = git_with_input(cwd, f"100644 blob {blob}\tlone.txt\n", "mktree")
+    return git(cwd, "commit-tree", tree, "-m", "lone root")
+
+
 class SyncReviewPacketTest(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -83,6 +95,8 @@ class SyncReviewPacketTest(unittest.TestCase):
         git(self.repo, "add", "fixup.txt")
         git(self.repo, "commit", "-q", "-m", "fix-up")
         self.head = git(self.repo, "rev-parse", "HEAD")
+        self.merge_sha = git(self.repo, "rev-parse", "HEAD~1")
+        self.fixup_sha = self.head
 
         git(self.repo, "checkout", "-q", "-b", "agent/10", self.fork_main)
         (self.repo / "widget.txt").write_text("widget\n")
@@ -128,6 +142,29 @@ class SyncReviewPacketTest(unittest.TestCase):
         self.assertIn("resolved line", prompt)
         self.assertIn("fixup line", prompt)
         self.assertNotIn("UPSTREAM-PAYLOAD", prompt)
+
+    def test_sync_packet_labels_merge_and_fixup_sections(self) -> None:
+        diff = dispatch._review_packet(self.repo, self.head)[1]
+        self.assertIn(f"--- fork-side merge (conflict resolution) {self.merge_sha[:12]}: ", diff)
+        self.assertIn(f"--- fork-side commit {self.fixup_sha[:12]}: fix-up ---", diff)
+        # The resolution is shown against the automatic merge, not as a combined (--cc) diff.
+        self.assertNotIn("diff --cc", diff)
+
+    def test_fork_side_labels_parentless_commit_as_plain_commit(self) -> None:
+        root = parentless_commit(self.repo, "lone line\n")
+        parts = dispatch._fork_side_diff(self.repo, root, self.upstream_tip)
+        self.assertIn(f"--- fork-side commit {root[:12]}: lone root ---", parts)
+        self.assertIn("lone line", parts)
+
+    def test_absent_upstream_ref_reviews_sync_branch_as_plain_pr(self) -> None:
+        git(self.repo, "update-ref", "-d", "refs/remotes/upstream/main")
+        _, diff = dispatch._review_packet(self.repo, self.head)
+        self.assertEqual(diff, git(self.repo, "diff", f"{self.fork_main}..{self.head}", strip=False))
+
+    def test_upstream_sharing_no_history_does_not_break_plain_review(self) -> None:
+        git(self.repo, "update-ref", "refs/remotes/upstream/main", parentless_commit(self.repo, "other\n"))
+        _, diff = dispatch._review_packet(self.repo, self.plain_head)
+        self.assertEqual(diff, git(self.repo, "diff", f"{self.fork_main}..{self.plain_head}", strip=False))
 
     def test_non_sync_packet_is_unchanged(self) -> None:
         packet, diff = dispatch._review_packet(self.repo, self.plain_head)

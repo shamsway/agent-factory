@@ -314,17 +314,20 @@ def _run_reviewer(
                     path.chmod(0o755)
 
 
-def _carries_upstream(cwd: Path, rev: str) -> bool:
+def _carries_upstream(cwd: Path, rev: str, *, strict: bool = True) -> bool:
     """Whether `rev` carries upstream commits that origin/<main> lacks (the merge pass's condition).
 
     The merge base with the upstream tip is not an ancestor of origin/<main>. Upstream
-    disabled, or its ref absent, carries nothing.
+    disabled, or its ref absent, carries nothing. A `rev` sharing no history with upstream
+    raises when `strict` (the merge pass); review passes strict=False and reviews it as a plain PR.
     """
     if UPSTREAM is None or run(
         ["git", "rev-parse", "--verify", "--quiet", f"{UPSTREAM}/{cfg.main}"], cwd=cwd, check=False,
     ).returncode:
         return False
-    mb = run(["git", "merge-base", rev, f"{UPSTREAM}/{cfg.main}"], cwd=cwd).stdout.strip()
+    mb = run(["git", "merge-base", rev, f"{UPSTREAM}/{cfg.main}"], cwd=cwd, check=strict).stdout.strip()
+    if not mb:
+        return False
     return run(
         ["git", "merge-base", "--is-ancestor", mb, f"origin/{cfg.main}"], cwd=cwd, check=False,
     ).returncode != 0
@@ -363,7 +366,7 @@ def _review_packet(wt: Path, head: str) -> tuple[str, str]:
     """
     base = run(["git", "rev-parse", f"origin/{cfg.main}^{{commit}}"], cwd=wt).stdout.strip()
     note = ""
-    if _carries_upstream(wt, head):
+    if _carries_upstream(wt, head, strict=False):
         tip = run(["git", "rev-parse", f"{UPSTREAM}/{cfg.main}^{{commit}}"], cwd=wt).stdout.strip()
         diff = _fork_side_diff(wt, head, tip)
         note = (
