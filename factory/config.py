@@ -79,7 +79,8 @@ DEFAULT_WORKER_MODEL = "openai-codex/gpt-5.6-sol"
 DEFAULT_CHORE_WORKER = ["droid", "exec", "-f", "{prompt}", "--auto", "medium", "--cwd", "{cwd}"]
 DEFAULT_REVIEWER = ["omp", "-p", "--no-session", "--no-tools", "--no-extensions",
                     "--no-skills", "--no-rules", "--model", "anthropic/claude-fable-5-1", "{prompt}"]
-DEFAULT_SECOND_REVIEWER = ["omp", "-p", "--no-session", "--model", "openai-codex/gpt-6-astra", "{prompt}"]
+DEFAULT_SECOND_REVIEWER = ["omp", "-p", "--no-session", "--no-tools", "--no-extensions",
+                           "--no-skills", "--no-rules", "--model", "openai-codex/gpt-6-astra", "{prompt}"]
 DEFAULT_LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
 DEFAULT_LLM_MODEL = "qwen3:30b"
 DEFAULT_INSTALL = {"every": "10min", "dashboard": False, "host": "127.0.0.1", "python": None, "env": {}, "apply": True}

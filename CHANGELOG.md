@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- High-risk second reviewer runs without tools, extensions, skills or rules, like the primary reviewer, so it judges only the inline packet; `factory doctor` warns when an `omp` reviewer or second reviewer lacks `--no-tools` (#84).
 - Triage supports an explicit Anthropic Messages API option and host-only gateway HTTP headers for model calls, doctor/liveness probes and dashboard checks. Repository endpoint overrides are refused when host headers are configured; authenticated redirects and provider-body diagnostics are suppressed.
 - Reviewer calibration model replay resolves the git HEAD contract only when it runs the default matrix runner, so injected runners work in copies without a `.git` directory (the mutation-tier baseline copy).
 - Fork: `scripts/privacy-check.py --range` also checks each commit's author and committer identity (`%an <%ae>`, `%cn <%ce>`) against the same rules, reporting `commit <sha> author` or `commit <sha> committer`. Commits reachable from `--published` are skipped for identities too; merge commits GitHub creates at merge time are out of scope (#78).

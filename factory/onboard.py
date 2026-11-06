@@ -539,6 +539,13 @@ def report_stage_success(cfg: config.Config, report) -> None:
     report(True, "last successful pass", detail, info=True)
 
 
+def tools_problem(command: list[str]) -> str | None:
+    """`omp` without `--no-tools` runs its default tools inside the review snapshot."""
+    if not command or Path(command[0]).name != "omp" or "--no-tools" in command:
+        return None
+    return "omp runs with tools; add --no-tools (review judges only the inline packet)"
+
+
 def second_reviewer_problem(cfg: config.Config, which) -> str | None:
     command = cfg.second_reviewer
     if not command:
@@ -732,6 +739,9 @@ def doctor(argv: list[str]) -> int:
         f"second reviewer: {cfg.second_reviewer[0] if cfg.second_reviewer else 'unset'}",
         second_problem or on_path,
     )
+    for role, command in (("reviewer", cfg.reviewer), ("second reviewer", cfg.second_reviewer)):
+        problem = tools_problem(command)
+        report(None if problem else True, f"{role} tools", problem or "")
     if not cfg.manager:
         report(None, "manager command", "[manager].command is unset; escalations get no automated diagnosis")
     else:
