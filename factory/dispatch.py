@@ -314,21 +314,73 @@ def _run_reviewer(
                     path.chmod(0o755)
 
 
+def _carries_upstream(cwd: Path, rev: str) -> bool:
+    """Whether `rev` carries upstream commits that origin/<main> lacks (the merge pass's condition).
+
+    The merge base with the upstream tip is not an ancestor of origin/<main>. Upstream
+    disabled, or its ref absent, carries nothing.
+    """
+    if UPSTREAM is None or run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{UPSTREAM}/{cfg.main}"], cwd=cwd, check=False,
+    ).returncode:
+        return False
+    mb = run(["git", "merge-base", rev, f"{UPSTREAM}/{cfg.main}"], cwd=cwd).stdout.strip()
+    return run(
+        ["git", "merge-base", "--is-ancestor", mb, f"origin/{cfg.main}"], cwd=cwd, check=False,
+    ).returncode != 0
+
+
+def _fork_side_diff(wt: Path, head: str, tip: str) -> str:
+    """The fork-side change on a sync branch: commits in origin/<main>..<head> upstream's tip lacks.
+
+    A merge contributes `--remerge-diff`, which shows how its conflicts were resolved and
+    omits the upstream content it merged cleanly; a non-merge commit (worker or operator
+    fix-up) contributes its own diff.
+    """
+    shas = run(
+        ["git", "rev-list", "--reverse", f"origin/{cfg.main}..{head}", f"^{tip}"], cwd=wt,
+    ).stdout.split()
+    parts = []
+    for sha in shas:
+        parents, _, subject = run(["git", "log", "-1", "--format=%P%n%s", sha], cwd=wt).stdout.partition("\n")
+        merge = len(parents.split()) > 1
+        body = run(
+            ["git", "--no-pager", "show", "--no-ext-diff", "--no-textconv", "--format=",
+             *(["--remerge-diff"] if merge else []), sha],
+            cwd=wt,
+        ).stdout
+        kind = "merge (conflict resolution)" if merge else "commit"
+        parts.append(f"--- fork-side {kind} {sha[:12]}: {subject.strip()} ---\n{body}")
+    return "".join(parts)
+
+
 def _review_packet(wt: Path, head: str) -> tuple[str, str]:
     """The inline packet (base standards and diff) and the diff, collected by the controller.
 
-    The packet keeps reviewers without file tools working; the same diff is also
-    written to the reviewer's `./review.diff`.
+    The packet keeps reviewers without file tools working. A branch that carries upstream
+    (an upstream sync PR) gets only its fork-side change, and the packet names the upstream
+    tip it leaves out; every other branch gets `origin/<main>..<head>`.
     """
     base = run(["git", "rev-parse", f"origin/{cfg.main}^{{commit}}"], cwd=wt).stdout.strip()
-    diff = run(["git", "--no-pager", "diff", "--no-ext-diff", "--no-textconv",
-                f"{base}..{head}"], cwd=wt).stdout
+    note = ""
+    if _carries_upstream(wt, head):
+        tip = run(["git", "rev-parse", f"{UPSTREAM}/{cfg.main}^{{commit}}"], cwd=wt).stdout.strip()
+        diff = _fork_side_diff(wt, head, tip)
+        note = (
+            f"Upstream sync: upstream's commits are not included (they are published upstream). "
+            f"Upstream tip: {tip}. The diff below is the fork-side change only: how each merge "
+            "resolved its conflicts, and each later commit upstream does not contain.\n"
+        )
+    else:
+        diff = run(["git", "--no-pager", "diff", "--no-ext-diff", "--no-textconv",
+                    f"{base}..{head}"], cwd=wt).stdout
     standards = []
     for name in ("AGENTS.md", "CONTRIBUTING.md"):
         result = run(["git", "show", f"{base}:{name}"], cwd=wt, check=False)
         if result.returncode == 0:
             standards.append(f"--- {name} (base revision) ---\n{result.stdout}")
     packet = (f"Base revision: {base}\nReviewed revision: {head}\n"
+              + note
               + "\n".join(standards)
               + f"\n--- BEGIN UNTRUSTED DIFF ---\n{diff}\n--- END UNTRUSTED DIFF ---")
     return packet, diff
@@ -4160,22 +4212,9 @@ def merge_pass_locked(dry_run: bool) -> None:
                     )
                 return
             run(["git", "fetch", "origin", cfg.main, f"agent/{n}"], cwd=ROOT)
-            if UPSTREAM is None:
-                carries_upstream = False
-            else:
+            if UPSTREAM is not None:
                 run(["git", "fetch", UPSTREAM, cfg.main], cwd=ROOT)
-                mb = run(
-                    ["git", "merge-base", f"origin/agent/{n}", f"{UPSTREAM}/{cfg.main}"],
-                    cwd=ROOT,
-                ).stdout.strip()
-                carries_upstream = (
-                    run(
-                        ["git", "merge-base", "--is-ancestor", mb, f"origin/{cfg.main}"],
-                        cwd=ROOT,
-                        check=False,
-                    ).returncode
-                    != 0
-                )
+            carries_upstream = _carries_upstream(ROOT, f"origin/agent/{n}")
             if behind:
                 record_merge_decision(
                     n, pr_num, "refresh branch",
