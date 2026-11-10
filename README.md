@@ -158,6 +158,13 @@ No other ref is force-pushed.
 Review-request opt-in accepts requests naming either the dispatcher's or the
 dashboard's login.
 
+`verify-secrets` and `inspect` compare each unit against its rendered role:
+dispatcher and apply use `[install].env` plus `[install].dispatch_env`, while
+the dashboard uses `[install].env`. Dispatch-only keys are checked too; a valid
+override does not require reinstalling the unit. Inspection applies the same
+comparison to configured, effective and running-process environments and retains
+the separate adapter credential-isolation checks.
+
 `factory apply` and `factory incidents --deliver/--retry` act on GitHub as that same
 dispatcher identity, whether the apply unit or an operator shell runs them, and only
 as an approved account: set host-owned `github_logins = ["factory-bot"]` under

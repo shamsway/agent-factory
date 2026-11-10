@@ -76,16 +76,17 @@ def assignments(text: str) -> dict[str, str]:
     return result
 
 
-def boundary(cfg: config.Config, env: dict) -> list[dict]:
+def boundary(cfg: config.Config, env: dict, unit: str | None = None) -> list[dict]:
     rows = []
-    for key, value in sorted(cfg.install["env"].items()):
+    expected = verify_secrets.expected_unit_env(cfg, unit)
+    for key, value in sorted(expected.items()):
         rows.append({"scope": "install", "key": key,
                      "status": "match" if env.get(key) == str(value) else "missing_or_stale"})
     for key, value in sorted(cfg.apply_env.items()):
         # A scoped GH_TOKEN may exist in both roles, but must not be the apply value.
         # An empty selector (for example TF_VAR_onepassword_account) is not
         # a credential. A nonempty unexpected value still violates isolation.
-        leak = bool(env.get(key)) and (key not in cfg.install["env"] or env[key] == str(value))
+        leak = bool(env.get(key)) and (key not in expected or env[key] == str(value))
         rows.append({"scope": "apply", "key": key, "status": "leaked" if leak else "isolated"})
     return rows
 
@@ -129,7 +130,7 @@ def runtime_probe(python: str, cwd: Path, env: dict) -> dict:
         return {"status": "unavailable"}
 
 
-def process_snapshot(pid: int, cfg: config.Config, expected_python: str) -> dict:
+def process_snapshot(pid: int, cfg: config.Config, expected_python: str, unit: str | None = None) -> dict:
     """Compare /proc startup identity and environment without emitting argv/env.
 
     Python's loaded module bytes cannot be recovered reliably from /proc; a fresh
@@ -150,7 +151,7 @@ def process_snapshot(pid: int, cfg: config.Config, expected_python: str) -> dict
         invoked = bool(argv and argv[0] == expected_python)
         return {"status": "observed", "pid": pid, "executable": executable,
                 "executable_matches": matches, "invocation_matches": invoked,
-                "environment": boundary(cfg, env),
+                "environment": boundary(cfg, env, unit=unit),
                 "backend_lock_directory": str(deploy.preferred_lock_dir(env)),
                 "loaded_module_identity": "not_observable; correlate invocation with immutable artifact"}
     except (Unavailable, OSError, ValueError, UnicodeError, IndexError):
@@ -182,7 +183,7 @@ def unit_snapshot(cfg: config.Config, unit: str, manager_env: dict | None, worke
         if unit.endswith(".timer"):
             return output
         unit_env = assignments(props.get("Environment", ""))
-        output["configured_environment"] = boundary(cfg, unit_env)
+        output["configured_environment"] = boundary(cfg, unit_env, unit=unit)
         # ExecStart is systemd's structured property, not a shell command to run.
         paths = re.findall(r"(?:^|\{ )path=([^;]+?)\s*;", props.get("ExecStart", ""))
         output["configured_executables"] = paths
@@ -198,7 +199,7 @@ def unit_snapshot(cfg: config.Config, unit: str, manager_env: dict | None, worke
             output["runtime"] = {"status": "unavailable", "reason": "effective_environment_unknown"}
         else:
             effective = {**manager_env, **unit_env}
-            output["effective_environment"] = boundary(cfg, effective)
+            output["effective_environment"] = boundary(cfg, effective, unit=unit)
             output["backend_lock_directory"] = str(deploy.preferred_lock_dir(effective))
             output["runtime"] = runtime_probe(wanted, Path(props.get("WorkingDirectory") or cfg.root), effective)
             import shutil
@@ -211,7 +212,7 @@ def unit_snapshot(cfg: config.Config, unit: str, manager_env: dict | None, worke
                                               and service.get("prefix") == gate.get("prefix")
                                               and service.get("modules") == gate.get("modules"))
         pid = int(props.get("MainPID", "0"))
-        output["process"] = process_snapshot(pid, cfg, wanted) if pid > 0 else {"status": "not_running"}
+        output["process"] = process_snapshot(pid, cfg, wanted, unit=unit) if pid > 0 else {"status": "not_running"}
         if pid > 0:
             again = command(["systemctl", "--user", "show", "--property=MainPID,InvocationID", "--", unit])
             identity = dict(line.split("=", 1) for line in again.splitlines() if "=" in line)

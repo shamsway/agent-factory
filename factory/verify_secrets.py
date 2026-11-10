@@ -77,8 +77,16 @@ def required_units(cfg: config.Config) -> set[str]:
     return units
 
 
+def expected_unit_env(cfg: config.Config, unit: str | None) -> dict:
+    """Match onboard.units(): only dispatcher/apply receive dispatch overrides."""
+    expected = dict(cfg.install["env"])
+    if unit == f"{cfg.unit}.service" or (cfg.apply_unit and unit == cfg.apply_unit):
+        expected.update(cfg.install.get("dispatch_env", {}))
+    return expected
+
+
 def sync_rows(cfg: config.Config, unit_env_fn=None) -> list[tuple[str, str, str]]:
-    """(unit, key, status) for every [install].env key, one row per unit that's actually installed."""
+    """(unit, key, status) for each unit's expected installation environment."""
     unit_env_fn = unit_env_fn or unit_env  # looked up at call time so tests can mock the module-level default
     rows: list[tuple[str, str, str]] = []
     for unit in units_for(cfg):
@@ -86,7 +94,7 @@ def sync_rows(cfg: config.Config, unit_env_fn=None) -> list[tuple[str, str, str]
         if installed is None:
             rows.append((unit, "*", "not installed"))
             continue
-        for key, want in cfg.install["env"].items():
+        for key, want in expected_unit_env(cfg, unit).items():
             got = installed.get(key)
             if got is None:
                 status = "missing from unit"

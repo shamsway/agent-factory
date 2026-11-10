@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- `verify-secrets` and `inspect` honor `[install].dispatch_env` for dispatcher and apply units, including dispatch-only keys and process observations. Valid identity overrides no longer appear stale; dashboard identity and adapter credential-isolation checks remain separate.
 - Ticket and learning review prompts are tool-free: they cite only the inline base standards, untrusted diff, issue text or learning proposal, and gate report, never `./snapshot` or `./review.diff`. Reviewer output with tool-call markup outside fenced blocks and inline code spans is rejected with reason `tool_call_markup` and retried (#90).
 - Triage supports an explicit Anthropic Messages API option and host-only gateway HTTP headers for model calls, doctor/liveness probes and dashboard checks. Repository endpoint overrides are refused when host headers are configured; authenticated redirects and provider-body diagnostics are suppressed.
 - Reviewer calibration model replay resolves the git HEAD contract only when it runs the default matrix runner, so injected runners work in copies without a `.git` directory (the mutation-tier baseline copy).
