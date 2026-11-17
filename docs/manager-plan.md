@@ -228,8 +228,9 @@ human at the escalation point; later phases are gated on its metrics.
 - Scope: `escalate()` writes `.factory/escalations/<n>.md` (reason, attempt table from
   `events.jsonl`, last gate report tail, latest review findings, handoff text, log paths,
   worktree path) and the `escalate` event carries `packet` path and `round` (escalations so far
-  for this ticket). `sync_escalate` writes the same shape for `upstream`. Deterministic; no LLM.
-- Touches: `dispatch.py` `escalate`, `sync_escalate`, `record`.
+  for this ticket). Upstream sync no longer escalates directly: it stages a sync ticket
+  (`sync_issue`) that goes through the normal worker/gate flow (#151). Deterministic; no LLM.
+- Touches: `dispatch.py` `escalate`, `record`.
 - Exit gate: a forced gate failure (`--ticket N` against a ticket whose check is `false`)
   produces the packet with every section populated; `tests/test_factory.py` asserts the shape.
 - Out of scope: reading the packet.
