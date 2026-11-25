@@ -364,6 +364,11 @@ def _review_packet(wt: Path, head: str, base_ref: str | None = None) -> tuple[st
     defaults to the configured main branch. Against that default, a branch that carries
     upstream (an upstream sync PR) gets only its fork-side change, and the packet names the
     upstream tip it leaves out; every other packet gets `<base>..<head>`.
+
+    Review reads the local upstream ref without fetching it (the merge pass fetches). If
+    that ref is older than what the branch merged, the newer upstream commits count as
+    fork-side and the packet can exceed the cap: review fails closed with
+    `review_packet_too_large` rather than reviewing a partial diff.
     """
     base_name = base_ref or f"origin/{cfg.main}"
     base = run(["git", "rev-parse", f"{base_name}^{{commit}}"], cwd=wt).stdout.strip()

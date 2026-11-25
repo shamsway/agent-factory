@@ -98,6 +98,24 @@ class DoctorReviewerToolsTest(unittest.TestCase):
         self.assertEqual(rows["reviewer tools"]["status"], "WARN")
 
 
+class ReviewNitsTest(unittest.TestCase):
+    doctor_rows = DoctorReviewerToolsTest.doctor_rows
+
+    def test_non_omp_reviewer_sorting_after_omp_is_not_checked(self) -> None:
+        self.assertIsNone(onboard.tools_problem(["zed-reviewer", "--model", "other/model", "{prompt}"]))
+
+    def test_unset_second_reviewer_has_no_tools_row(self) -> None:
+        with mock.patch.object(config, "DEFAULT_SECOND_REVIEWER", []):
+            rows = self.doctor_rows({})
+        self.assertNotIn("second reviewer tools", rows)
+        self.assertEqual(rows["reviewer tools"]["status"], "PASS")
+
+    def test_tools_rows_say_why_they_pass(self) -> None:
+        rows = self.doctor_rows({"second_command": ["zed-reviewer", "--model", "other/model", "{prompt}"]})
+        self.assertEqual(rows["reviewer tools"]["detail"], "--no-tools")
+        self.assertEqual(rows["second reviewer tools"]["detail"], "not omp")
+
+
 def _git_repo(directory: Path) -> Path:
     repo = directory / "repo"
     repo.mkdir()

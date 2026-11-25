@@ -1,7 +1,7 @@
 """#168: docs/ticket-flow.md is an index of factory/, not a freehand sketch.
 
 Label transitions (`gh ... --add-label/--remove-label`, `gh ... create --label`) and
-escalate reasons (`escalate`, `sync_escalate`, `withdraw`, `record("escalate", reason=)`)
+escalate reasons (`escalate`, `withdraw`, `record("escalate", reason=)`)
 are extracted from the AST of factory/*.py and compared with the map's tables, both ways.
 Every `module.symbol` the map cites must exist in factory/.
 """
@@ -23,7 +23,7 @@ PACKAGE = ROOT / "factory"
 LABELS = {name: value for name, value in vars(config).items() if name.startswith("LABEL_") and isinstance(value, str)}
 LABELS["FACTORY_APPROVED"] = config.LABEL_APPROVED
 FLAGS = {"--add-label": "add", "--remove-label": "remove", "--label": "add"}
-ESCALATORS = {"escalate": 1, "sync_escalate": 1, "withdraw": 0}  # name -> reason argument index
+ESCALATORS = {"escalate": 1, "withdraw": 0}  # name -> reason argument index
 
 
 def label_of(node: ast.expr | None) -> str:

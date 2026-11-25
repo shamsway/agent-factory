@@ -748,8 +748,11 @@ def doctor(argv: list[str]) -> int:
         second_problem or on_path,
     )
     for role, command in (("reviewer", cfg.reviewer), ("second reviewer", cfg.second_reviewer)):
+        if not command:  # an unset second reviewer is already reported above
+            continue
         problem = tools_problem(command)
-        report(None if problem else True, f"{role} tools", problem or "")
+        ok = "--no-tools" if "--no-tools" in command else "not omp"
+        report(None if problem else True, f"{role} tools", problem or ok)
     if not cfg.manager:
         report(None, "manager command", "[manager].command is unset; escalations get no automated diagnosis")
     else:
